@@ -19,7 +19,7 @@ import { isDesktop, assetFileUrl } from '@/services/desktop'
 import {
   probeMedia,
   extractVideoThumbnail,
-  playableMediaBlob,
+  ensurePlayableBlob,
   isMostlyDarkImage
 } from '@/services/ffmpeg'
 import type { Asset, ID } from '@/types'
@@ -49,7 +49,7 @@ export const useAssetsStore = defineStore('assets', () => {
       shotId?: string
     } = {}
   ): Promise<Asset> {
-    const typed = playableMediaBlob(blob, kind)
+    const typed = await ensurePlayableBlob(blob, kind)
     const info = await probeMedia(typed)
     const id = `${kind}_${Date.now().toString(36)}_${Math.random()
       .toString(36)
@@ -114,7 +114,7 @@ export const useAssetsStore = defineStore('assets', () => {
     }
     const blob = await loadAssetBlob(id)
     if (!blob) return undefined
-    const typed = playableMediaBlob(blob, meta?.kind, meta?.mimeType)
+    const typed = await ensurePlayableBlob(blob, meta?.kind, meta?.mimeType)
     const url = URL.createObjectURL(typed)
     urlCache.set(id, url)
     return url

@@ -94,6 +94,34 @@ export function playableMediaBlob(
   return blob.slice(0, blob.size, fallback)
 }
 
+function sniffContainerMime(bytes: Uint8Array, kind?: 'image' | 'video' | 'audio'): string | undefined {
+  if (bytes.length < 12) return undefined
+  const ascii = (n: number, m: number) => String.fromCharCode(...bytes.subarray(n, m))
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav'
+  if (ascii(0, 3) === 'ID3') return 'audio/mpeg'
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mpeg'
+  if (ascii(0, 4) === 'OggS') return kind === 'video' ? 'video/ogg' : 'audio/ogg'
+  if (ascii(4, 8) === 'ftyp') return kind === 'audio' ? 'audio/mp4' : 'video/mp4'
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+    return 'video/webm'
+  }
+  return undefined
+}
+
+/** 按文件头校正 MIME，避免口播 wav 被标成 mp3 后无法试听 */
+export async function ensurePlayableBlob(
+  blob: Blob,
+  kind?: 'image' | 'video' | 'audio',
+  mimeType?: string
+): Promise<Blob> {
+  const typed = playableMediaBlob(blob, kind, mimeType)
+  if (kind !== 'audio' && kind !== 'video') return typed
+  const head = new Uint8Array(await typed.slice(0, 16).arrayBuffer())
+  const sniffed = sniffContainerMime(head, kind)
+  if (sniffed && sniffed !== typed.type) return typed.slice(0, typed.size, sniffed)
+  return typed
+}
+
 export async function isMostlyDarkImage(blob: Blob): Promise<boolean> {
   const url = URL.createObjectURL(blob)
   try {

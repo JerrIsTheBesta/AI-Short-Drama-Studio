@@ -27,6 +27,7 @@ const assets = useAssetsStore()
 const mediaUrl = ref('')
 const videoUrl = ref('')
 const videoEl = ref<HTMLVideoElement | null>(null)
+const audioEl = ref<HTMLAudioElement | null>(null)
 const playing = ref(false)
 const playbackDuration = ref(0)
 
@@ -164,22 +165,30 @@ function onLoadedMetadata(ev: Event) {
   }
 }
 
+function currentMedia(): HTMLMediaElement | null {
+  if (type.value === 'shotVideo') return videoEl.value
+  if (type.value === 'audio') return audioEl.value
+  return null
+}
+
 async function togglePlay(ev: Event) {
   ev.stopPropagation()
-  const v = videoEl.value
-  if (!v || !videoUrl.value) return
+  const v = currentMedia()
+  if (!v) return
   if (v.paused) {
     try {
       v.muted = false
       await v.play()
       playing.value = true
     } catch {
-      try {
-        v.muted = true
-        await v.play()
-        playing.value = true
-      } catch {
-        /* 浏览器拦截自动播放时忽略 */
+      if (type.value === 'shotVideo') {
+        try {
+          v.muted = true
+          await v.play()
+          playing.value = true
+        } catch {
+          /* 浏览器拦截自动播放时忽略 */
+        }
       }
     }
   } else {
@@ -222,10 +231,16 @@ function onVideoEnded() {
 }
 
 function onCanPlay() {
-  const v = videoEl.value
+  const v = currentMedia()
   if (playing.value && v?.paused && !v.ended) {
     v.play().catch(() => {})
   }
+}
+
+function onAudioEnded() {
+  playing.value = false
+  const a = audioEl.value
+  if (a) a.currentTime = 0
 }
 </script>
 
@@ -281,7 +296,27 @@ function onCanPlay() {
       {{ (project.current?.script?.content || '还没有正文，在右侧填写或让智能体拆分镜').slice(0, 120) }}
     </div>
     <div v-else-if="type === 'audio'" class="pnode-body wave">
-      {{ shot?.voiceover?.slice(0, 40) || '无口播' }}
+      <audio
+        v-if="mediaUrl"
+        ref="audioEl"
+        class="nodrag nowheel"
+        :src="mediaUrl"
+        preload="auto"
+        @play="onVideoPlay"
+        @ended="onAudioEnded"
+        @canplay="onCanPlay"
+      />
+      <button
+        v-if="mediaUrl"
+        class="vo-play nodrag"
+        type="button"
+        :title="playing ? '暂停' : '试听'"
+        @click.stop="togglePlay"
+        @mousedown.stop
+      >
+        {{ playing ? '❚❚' : '▶' }}
+      </button>
+      <span>{{ shot?.voiceover?.slice(0, 40) || (mediaUrl ? '口播' : '无口播') }}</span>
     </div>
     <div v-else-if="type === 'export'" class="pnode-body text">拼接时间线 · 字幕 · BGM</div>
     <div v-else class="pnode-media" :style="{ aspectRatio: mediaAspect }">
@@ -450,6 +485,43 @@ function onCanPlay() {
   color: var(--color-text-3);
   line-height: 1.45;
   min-height: 48px;
+}
+.pnode-body.wave {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pnode-body.wave audio {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.pnode-body.wave span {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.vo-play {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 0 1px 1px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(124, 58, 237, 0.85);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.vo-play:hover {
+  background: var(--color-accent);
 }
 .pnode-err {
   padding: 4px 10px 8px;

@@ -216,6 +216,9 @@ function resetVideoPrompt() {
       <div class="insp-k">{{ kindLabel }}</div>
       <h3>{{ title }}</h3>
       <p v-if="node.error" class="err">{{ node.error }}</p>
+      <p v-else-if="hasAsset && node.type === 'audio'" class="hint">
+        点播放可试听口播。改文案后重新生成，只动这一个节点。
+      </p>
       <p v-else-if="hasAsset && node.type !== 'script' && node.type !== 'export'" class="hint">
         改下面提示词后点重新生成，只动这一个节点。点缩略图可看大图。
       </p>
@@ -229,6 +232,10 @@ function resetVideoPrompt() {
         <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
           <video :src="preview" controls playsinline preload="auto" />
         </div>
+      </div>
+      <div v-else-if="preview && node.type === 'audio'" class="prev prev-audio">
+        <audio :src="preview" controls preload="auto" />
+        <span>试听口播</span>
       </div>
       <button
         v-else-if="preview"
@@ -462,6 +469,17 @@ textarea {
   color: var(--color-text-4);
   padding: 4px 6px 5px;
   text-align: center;
+}
+.prev-audio {
+  width: 100%;
+  max-width: 100%;
+  cursor: default;
+  padding: 8px 8px 0;
+}
+.prev-audio audio {
+  width: 100%;
+  height: 36px;
+  display: block;
 }
 .prev-video {
   width: 100%;
