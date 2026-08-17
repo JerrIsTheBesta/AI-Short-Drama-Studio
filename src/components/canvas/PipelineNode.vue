@@ -28,6 +28,7 @@ const mediaUrl = ref('')
 const videoUrl = ref('')
 const videoEl = ref<HTMLVideoElement | null>(null)
 const playing = ref(false)
+const playbackDuration = ref(0)
 
 const nodeMeta = computed(() => {
   const p = project.current
@@ -42,7 +43,11 @@ const shot = computed(() =>
 )
 
 const durationLabel = computed(() => {
-  const d = shot.value?.duration
+  const meta = assetId.value ? assets.getMeta(assetId.value) : undefined
+  const actual =
+    playbackDuration.value ||
+    (meta && 'duration' in meta && Number(meta.duration) > 0 ? Number(meta.duration) : 0)
+  const d = actual > 0 ? actual : shot.value?.duration
   if (!d || d <= 0) return ''
   return Number.isInteger(d) ? `${d}s` : `${Number(d).toFixed(1)}s`
 })
@@ -135,6 +140,7 @@ watch(
 async function loadMedia() {
   const id = assetId.value
   playing.value = false
+  playbackDuration.value = 0
   if (!id) {
     mediaUrl.value = ''
     videoUrl.value = ''
@@ -151,13 +157,10 @@ async function loadMedia() {
 
 defineExpose({ loadMedia })
 
-function showVideoFrame(ev: Event) {
+function onLoadedMetadata(ev: Event) {
   const v = ev.target as HTMLVideoElement
-  if (!v || v.currentTime > 0) return
-  try {
-    v.currentTime = 0.05
-  } catch {
-    /* ignore */
+  if (v && Number.isFinite(v.duration) && v.duration > 0) {
+    playbackDuration.value = v.duration
   }
 }
 
@@ -190,13 +193,39 @@ function onVideoPlay() {
 }
 
 function onVideoPause() {
-  playing.value = false
+  const v = videoEl.value
+  if (!v || v.ended) playing.value = false
+}
+
+function bufferedEnd(v: HTMLVideoElement) {
+  try {
+    if (v.buffered.length === 0) return 0
+    return v.buffered.end(v.buffered.length - 1)
+  } catch {
+    return 0
+  }
 }
 
 function onVideoEnded() {
-  playing.value = false
   const v = videoEl.value
-  if (v) v.currentTime = 0
+  if (v) {
+    const dur = Number.isFinite(v.duration) ? v.duration : 0
+    const buf = bufferedEnd(v)
+    // 元数据时长偏短或缓冲还没到头时，ended 会提前触发
+    if (buf > v.currentTime + 0.2 || (dur > 0 && v.currentTime < dur - 0.35 && buf > v.currentTime + 0.05)) {
+      v.play().catch(() => {})
+      return
+    }
+    v.currentTime = 0
+  }
+  playing.value = false
+}
+
+function onCanPlay() {
+  const v = videoEl.value
+  if (playing.value && v?.paused && !v.ended) {
+    v.play().catch(() => {})
+  }
 }
 </script>
 
@@ -263,9 +292,10 @@ function onVideoEnded() {
           :src="videoUrl"
           :poster="mediaUrl && mediaUrl !== videoUrl ? mediaUrl : undefined"
           playsinline
-          preload="metadata"
+          preload="auto"
           title="点击播放 / 暂停"
-          @loadedmetadata="showVideoFrame"
+          @loadedmetadata="onLoadedMetadata"
+          @canplay="onCanPlay"
           @play="onVideoPlay"
           @pause="onVideoPause"
           @ended="onVideoEnded"

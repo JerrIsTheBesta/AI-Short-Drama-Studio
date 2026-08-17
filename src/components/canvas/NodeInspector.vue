@@ -227,7 +227,7 @@ function resetVideoPrompt() {
 
       <div v-if="preview && node.type === 'shotVideo'" class="prev prev-video">
         <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
-          <video :src="preview" controls playsinline />
+          <video :src="preview" controls playsinline preload="auto" />
         </div>
       </div>
       <button

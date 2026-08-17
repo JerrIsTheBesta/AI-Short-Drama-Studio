@@ -93,10 +93,18 @@ export const useAssetsStore = defineStore('assets', () => {
     return kind === 'image' ? 'image/png' : kind === 'video' ? 'video/mp4' : 'audio/mpeg'
   }
 
-  /** 获取 blob URL（带缓存） */
+  /** 获取播放 URL。视频/音频走完整 blob，避免自定义协议不支持 Range 时只播前半段。 */
   async function getUrl(id: ID): Promise<string | undefined> {
-    if (urlCache.has(id)) return urlCache.get(id)
-    if (isDesktop()) {
+    const meta = all.value.find((a) => a.id === id)
+    const asBlob =
+      meta?.kind === 'video' ||
+      meta?.kind === 'audio' ||
+      id.startsWith('video_') ||
+      id.startsWith('audio_')
+    const cached = urlCache.get(id)
+    if (cached && !(asBlob && cached.startsWith('aicuts:'))) return cached
+    if (cached) urlCache.delete(id)
+    if (isDesktop() && !asBlob) {
       const abs = await assetAbsPath(id)
       if (abs) {
         const url = assetFileUrl(abs)
@@ -106,7 +114,6 @@ export const useAssetsStore = defineStore('assets', () => {
     }
     const blob = await loadAssetBlob(id)
     if (!blob) return undefined
-    const meta = all.value.find((a) => a.id === id)
     const typed = playableMediaBlob(blob, meta?.kind, meta?.mimeType)
     const url = URL.createObjectURL(typed)
     urlCache.set(id, url)

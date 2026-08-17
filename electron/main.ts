@@ -6,13 +6,13 @@ import {
   dialog,
   shell,
   protocol,
-  net,
   Menu
 } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 
 const mainDir = path.dirname(fileURLToPath(import.meta.url))
 
@@ -22,6 +22,79 @@ function resolvePreload() {
     if (existsSync(p)) return p
   }
   return path.join(mainDir, 'preload.js')
+}
+
+function mimeOf(filePath: string) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.mp4':
+      return 'video/mp4'
+    case '.webm':
+      return 'video/webm'
+    case '.mov':
+      return 'video/quicktime'
+    case '.png':
+      return 'image/png'
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.webp':
+      return 'image/webp'
+    case '.gif':
+      return 'image/gif'
+    case '.mp3':
+      return 'audio/mpeg'
+    case '.wav':
+      return 'audio/wav'
+    case '.m4a':
+      return 'audio/mp4'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+/** <video> 需要 206 + Range，否则自定义协议往往只播前半段就停 */
+function fileRangeResponse(filePath: string, request: Request) {
+  if (!existsSync(filePath)) return new Response('not found', { status: 404 })
+  const size = statSync(filePath).size
+  const mime = mimeOf(filePath)
+  const range = request.headers.get('range')
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/i.exec(range.trim())
+    if (!m) return new Response('invalid range', { status: 416 })
+    const start = m[1] ? Number(m[1]) : 0
+    const end = m[2] ? Number(m[2]) : size - 1
+    if (
+      Number.isNaN(start) ||
+      Number.isNaN(end) ||
+      start >= size ||
+      start > end
+    ) {
+      return new Response('range not satisfiable', {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${size}` }
+      })
+    }
+    const clampedEnd = Math.min(end, size - 1)
+    const stream = createReadStream(filePath, { start, end: clampedEnd })
+    return new Response(Readable.toWeb(stream) as ReadableStream, {
+      status: 206,
+      headers: {
+        'Content-Type': mime,
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${start}-${clampedEnd}/${size}`,
+        'Content-Length': String(clampedEnd - start + 1)
+      }
+    })
+  }
+  const stream = createReadStream(filePath)
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    status: 200,
+    headers: {
+      'Content-Type': mime,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(size)
+    }
+  })
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -104,7 +177,7 @@ app.whenReady().then(async () => {
       const u = new URL(request.url)
       const filePath = u.searchParams.get('path')
       if (!filePath) return new Response('missing path', { status: 400 })
-      return net.fetch(pathToFileURL(filePath).toString())
+      return fileRangeResponse(filePath, request)
     } catch (e) {
       return new Response(String(e), { status: 500 })
     }
