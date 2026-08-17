@@ -1,0 +1,344 @@
+/**
+ * 口播 TTS：按分镜字幕生成人声
+ *
+ * 对接阿里云百炼语音合成（文档 2938790 / 实时与非实时 SpeechSynthesizer）：
+ *   POST {origin}/api/v1/services/audio/tts/SpeechSynthesizer
+ * 默认模型：qwen-audio-3.0-tts-flash（同系列，成片配音用非实时 HTTP）
+ * 生成视频时顺带合成，导出时叠到对应片段上。
+ */
+
+import { getAIMode } from './client'
+
+export interface TTSInput {
+  text: string
+  voice?: string
+  language?: 'Chinese' | 'English' | 'Auto'
+}
+
+export interface TTSOutput {
+  blob: Blob
+  mimeType: string
+  duration?: number
+  model: string
+}
+
+const MAX_CHARS = 580
+
+const log = (msg: string) =>
+  console.log('%c[tts]', 'color:#06b6d4;font-weight:600', msg)
+
+/** qwen-audio-3.0-tts-flash 系统音色（百炼音色列表） */
+export const TTS_VOICES: { id: string; label: string }[] = [
+  { id: 'longanfengyue', label: '龙安风悦（女·自然亲切）' },
+  { id: 'longanhuan_v3.6', label: '龙安欢（女）' },
+  { id: 'longanlingxi', label: '龙安灵希（女·可爱甜美）' },
+  { id: 'longanxiaoxin', label: '龙安小昕（女·亲切活泼）' },
+  { id: 'longanyuanfei', label: '龙安元妃（女）' },
+  { id: 'longjielidou_v3.6', label: '龙杰力豆（男童）' },
+  { id: 'longpaopao_v3.6', label: '龙泡泡（女童）' },
+  { id: 'longhuohuo_v3.6', label: '龙火火（顽皮少年）' },
+  { id: 'longchuanshu_v3.6', label: '龙川叔（男）' },
+  { id: 'loongmary', label: 'loongmary（女·英音）' },
+  { id: 'loongeva_v3.6', label: 'loongeva（女·美音）' },
+  { id: 'loongjohn', label: 'loongJohn（男·美音）' }
+]
+
+/** 这些仍按缩写处理（可以逐字母或习惯读法） */
+const SPELL_ACRONYMS = new Set([
+  'VIP',
+  'SKU',
+  'UV',
+  'UVA',
+  'UVB',
+  'LED',
+  'USB',
+  'CPU',
+  'GPU',
+  'PDF',
+  'QR',
+  'ID',
+  'TV',
+  'AI',
+  'SPF',
+  '3C',
+  'OK'
+])
+
+/**
+ * 送给 TTS 的文本预处理：
+ * 中文模型遇到 POLO / NIKE 这种全大写，会当成缩写念成 P-O-L-O。
+ * 有元音、长度≥3 的全大写词改成首字母大写（Polo），按单词读。
+ * 字幕原文不改，只影响发音。
+ */
+export function normalizeForSpeech(text: string): string {
+  return text.replace(/[A-Za-z][A-Za-z0-9]*/g, (word) => {
+    if (!/^[A-Z0-9]+$/.test(word)) return word
+    if (SPELL_ACRONYMS.has(word)) return word
+    if (word.length <= 2) return word
+    if (/[AEIOUY]/.test(word)) {
+      return word.charAt(0) + word.slice(1).toLowerCase()
+    }
+    return word
+  })
+}
+
+export function detectSpeechLanguage(text: string): 'Chinese' | 'English' | 'Auto' {
+  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length
+  const latin = (text.match(/[A-Za-z]/g) || []).length
+  if (cjk > 0 && latin > 0) return 'Auto'
+  if (cjk >= latin && cjk > 0) return 'Chinese'
+  if (latin > 0 && cjk === 0) return 'English'
+  return 'Auto'
+}
+
+function ttsConfig() {
+  const baseUrl = String(
+    import.meta.env.VITE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1'
+  ).replace(/\/+$/, '')
+  const apiKey = import.meta.env.VITE_TTS_API_KEY || import.meta.env.VITE_LLM_API_KEY
+  const model = import.meta.env.VITE_TTS_MODEL || 'qwen-audio-3.0-tts-flash'
+  const voice = import.meta.env.VITE_TTS_VOICE || 'longanhuan_v3.6'
+  return { baseUrl, apiKey, model, voice }
+}
+
+/** 解析出可请求 SpeechSynthesizer 的 origin（含 /api/v1） */
+function speechApiRoot(baseUrl: string): string {
+  let u = baseUrl.replace(/\/+$/, '')
+  // compatible-mode / chat 兼容地址 → 切回原生 api/v1
+  u = u.replace(/\/compatible-mode\/v1$/i, '/api/v1')
+  if (/\/api\/v1$/i.test(u)) return u
+  // 仅给了域名时补 /api/v1
+  if (/^https?:\/\//i.test(u) && !/\/api\//i.test(u)) {
+    return `${u}/api/v1`
+  }
+  return u
+}
+
+function clipText(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim()
+  if (t.length <= MAX_CHARS) return t
+  const slice = t.slice(0, MAX_CHARS)
+  const cut = Math.max(
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('！'),
+    slice.lastIndexOf('？'),
+    slice.lastIndexOf('.')
+  )
+  return (cut > 40 ? slice.slice(0, cut + 1) : slice).trim()
+}
+
+function languageHint(language: string): string | undefined {
+  if (language === 'Chinese') return 'zh'
+  if (language === 'English') return 'en'
+  return undefined
+}
+
+async function downloadAudioUrl(audioUrl: string): Promise<Blob> {
+  const aResp = await fetch(audioUrl)
+  if (!aResp.ok) throw new Error(`[TTS] 下载音频失败 ${aResp.status}`)
+  const buf = await aResp.arrayBuffer()
+  const ct = (aResp.headers.get('content-type') || '').toLowerCase()
+  const mime =
+    ct.includes('mpeg') || ct.includes('mp3')
+      ? 'audio/mpeg'
+      : ct.includes('wav')
+        ? 'audio/wav'
+        : 'audio/mpeg'
+  return new Blob([buf], { type: mime })
+}
+
+function blobFromBase64(data: string, mime = 'audio/wav'): Blob {
+  const bin = atob(String(data).replace(/\s/g, ''))
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Blob([bytes], { type: mime })
+}
+
+/**
+ * 百炼 SpeechSynthesizer（非实时 HTTP）
+ * 文档：https://help.aliyun.com/zh/model-studio/cosyvoice-tts-http-api
+ * 对应控制台文档 url=2938790 同系列模型
+ */
+async function speechSynthesizer(
+  apiRoot: string,
+  apiKey: string,
+  model: string,
+  text: string,
+  voice: string,
+  language: string
+): Promise<Blob> {
+  const hint = languageHint(language)
+  const input: Record<string, unknown> = {
+    text,
+    voice,
+    format: 'mp3',
+    sample_rate: 24000
+  }
+  if (hint) input.language_hints = [hint]
+
+  const resp = await fetch(`${apiRoot}/services/audio/tts/SpeechSynthesizer`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({ model, input })
+  })
+  const raw = await resp.text()
+  let data: any
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    throw new Error(`[TTS] SpeechSynthesizer ${resp.status} ${raw.slice(0, 200)}`)
+  }
+  if (!resp.ok || data.code) {
+    throw new Error(
+      `[TTS] SpeechSynthesizer ${data.code || resp.status} ${data.message || raw.slice(0, 200)}`
+    )
+  }
+
+  const audio = data.output?.audio ?? data.audio
+  if (audio?.data) {
+    return blobFromBase64(String(audio.data), 'audio/mpeg')
+  }
+  const audioUrl = audio?.url
+  if (!audioUrl) {
+    throw new Error(`[TTS] SpeechSynthesizer 无音频：${JSON.stringify(data).slice(0, 240)}`)
+  }
+  return downloadAudioUrl(audioUrl)
+}
+
+/** 旧版 Qwen3-TTS multimodal-generation（兜底） */
+async function nativeQwen3Speech(
+  origin: string,
+  apiKey: string,
+  model: string,
+  text: string,
+  voice: string,
+  language: string
+): Promise<Blob> {
+  const apiRoot = origin.replace(/\/api\/v1$/i, '') + '/api/v1'
+  const resp = await fetch(`${apiRoot}/services/aigc/multimodal-generation/generation`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      input: {
+        text,
+        voice,
+        language_type: language
+      }
+    })
+  })
+  const raw = await resp.text()
+  let data: any
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    throw new Error(`[TTS] native ${resp.status} ${raw.slice(0, 200)}`)
+  }
+  if (!resp.ok || data.code) {
+    throw new Error(`[TTS] native ${data.code || resp.status} ${data.message || raw.slice(0, 200)}`)
+  }
+  const audio = data.output?.audio ?? data.audio
+  if (audio?.data) return blobFromBase64(String(audio.data), 'audio/wav')
+  const audioUrl = audio?.url
+  if (!audioUrl) {
+    throw new Error(`[TTS] native 无音频：${JSON.stringify(data).slice(0, 240)}`)
+  }
+  return downloadAudioUrl(audioUrl)
+}
+
+function mockSpeechWav(text: string): Blob {
+  const chars = Math.max(1, text.replace(/\s/g, '').length)
+  const duration = Math.min(10, Math.max(1.2, chars / 4.5))
+  const sampleRate = 22050
+  const n = Math.ceil(duration * sampleRate)
+  const dataSize = n * 2
+  const buf = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buf)
+  const ascii = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i))
+  }
+  ascii(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  ascii(8, 'WAVE')
+  ascii(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  ascii(36, 'data')
+  view.setUint32(40, dataSize, true)
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate
+    const env = Math.min(1, t * 8) * Math.min(1, (duration - t) * 8)
+    const sample = Math.sin(2 * Math.PI * 196 * t) * 0.12 * env
+    view.setInt16(44 + i * 2, Math.round(sample * 32767), true)
+  }
+  return new Blob([buf], { type: 'audio/wav' })
+}
+
+export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
+  const text = normalizeForSpeech(clipText(input.text || ''))
+  if (!text) throw new Error('没有口播文案，无法配音')
+
+  const cfg = ttsConfig()
+  const voice = input.voice || cfg.voice
+  const language = input.language || detectSpeechLanguage(text)
+  log(`口播文本：${text.slice(0, 80)}${text.length > 80 ? '…' : ''}  lang=${language}`)
+
+  if (getAIMode() !== 'real' || !cfg.apiKey) {
+    log('演示模式：生成占位音轨')
+    const blob = mockSpeechWav(text)
+    return { blob, mimeType: blob.type, model: 'mock-tts' }
+  }
+
+  const apiRoot = speechApiRoot(cfg.baseUrl)
+  const errors: string[] = []
+
+  try {
+    log(`→ SpeechSynthesizer (${cfg.model}, ${voice})`)
+    const blob = await speechSynthesizer(
+      apiRoot,
+      cfg.apiKey,
+      cfg.model,
+      text,
+      voice,
+      language
+    )
+    log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
+    return { blob, mimeType: blob.type, model: cfg.model }
+  } catch (e: any) {
+    errors.push(e?.message ?? String(e))
+    log(`SpeechSynthesizer 失败：${e?.message ?? e}`)
+  }
+
+  // 若仍配置了旧版 qwen3-tts-*，再试 multimodal 兜底
+  if (/^qwen3-tts/i.test(cfg.model) || /^qwen-tts/i.test(cfg.model)) {
+    try {
+      const origin = apiRoot.replace(/\/api\/v1$/i, '')
+      log(`→ multimodal 兜底 (${cfg.model}, ${voice})`)
+      const blob = await nativeQwen3Speech(
+        origin,
+        cfg.apiKey,
+        cfg.model,
+        text,
+        voice,
+        language
+      )
+      log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
+      return { blob, mimeType: blob.type, model: cfg.model }
+    } catch (e: any) {
+      errors.push(e?.message ?? String(e))
+    }
+  }
+
+  throw new Error(errors.join('\n') || 'TTS 失败')
+}
