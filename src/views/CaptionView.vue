@@ -8,6 +8,7 @@ import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import type { CaptionStyle, Shot } from '@/types'
+import { ensureTimelineFromShots } from '@/utils/timeline'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -307,6 +308,10 @@ function drawPreview() {
 }
 
 function next() {
+  if (project.current) {
+    const { built, clips } = ensureTimelineFromShots(project.current)
+    if (built) project.setTimeline(clips)
+  }
   project.setCaptionSrt(srtText.value)
   if (pendingVoice.value > 0) {
     toast.warn(`${pendingVoice.value} 段台词还没配音，导出时这些段会没有人声`)

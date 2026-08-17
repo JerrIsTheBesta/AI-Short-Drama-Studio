@@ -9,6 +9,7 @@ import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
+import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
 import type { CanvasNode } from '@/types'
 
 const props = defineProps<{
@@ -62,11 +63,17 @@ const actionLabel = computed(() => {
   if (t === 'shotImage') return again ? '重新生成配图' : '生成配图'
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
   if (t === 'audio') return again ? '重新生成口播' : '生成口播'
-  if (t === 'export') return '打开导出'
+  if (t === 'export') return '打开导出页'
   return again ? '重新生成' : '生成这个节点'
 })
 
-const canRun = computed(() => !running.value && !gateBlocked.value)
+const canRun = computed(() => {
+  if (running.value || gateBlocked.value) return false
+  if (props.node?.type === 'export') {
+    return canBuildExport(project.current)
+  }
+  return true
+})
 
 const previewAspect = computed(() => {
   if (props.node?.type === 'subject') return cssAspectRatio('16:9')
@@ -166,6 +173,17 @@ async function run() {
   }
   try {
     if (props.node.type === 'export') {
+      if (!project.current) return
+      if (!canBuildExport(project.current)) {
+        toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
+        return
+      }
+      const { built, clips } = ensureTimelineFromShots(project.current)
+      if (built) {
+        project.setTimeline(clips)
+        await project.save()
+        toast.info(`已按分镜排好时间线（${clips.length} 段）`)
+      }
       router.push('/export')
       return
     }
@@ -224,7 +242,10 @@ function resetVideoPrompt() {
       </p>
 
       <p v-else-if="node.type === 'script'" class="hint">
-        拆完先看左侧完整剧本。确认通过后才做人设和配图；说「全流程」才会自动跑完。
+        左侧完整剧本可点「编辑」直接改 Markdown（文案/人物/场景/分镜）。保存后若已确认过需再点一次确认通过。
+      </p>
+      <p v-else-if="node.type === 'export'" class="hint">
+        将按分镜自动排时间线并打开导出页。若按钮灰掉，说明还没有生成视频或图片。
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
 

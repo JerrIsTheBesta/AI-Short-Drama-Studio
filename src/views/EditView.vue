@@ -9,6 +9,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import TimelineView from '@/components/timeline/TimelineView.vue'
 import type { Shot, TimelineClip, TransitionType } from '@/types'
+import { buildTimelineFromShots } from '@/utils/timeline'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -45,26 +46,7 @@ const selectedShot = computed(() => {
 
 function autoBuildTimeline() {
   if (!project.current) return
-  const clips: TimelineClip[] = shots.value
-    .filter((s) => s.videoAssetId || s.imageAssetId)
-    .map((s, i) => ({
-      id: 'tc_' + s.id,
-      shotId: s.id,
-      startTime: 0,
-      duration: s.duration,
-      sourceIn: 0,
-      transitionIn: project.current!.settings.defaultTransition,
-      transitionDuration: 0.5,
-      speed: 1,
-      volume: 1,
-      enabled: true
-    }))
-  // 计算 startTime
-  let cursor = 0
-  for (const c of clips) {
-    c.startTime = cursor
-    cursor += c.duration
-  }
+  const clips = buildTimelineFromShots(project.current)
   project.setTimeline(clips)
   toast.success(`已自动构建 ${clips.length} 个片段的时间线`)
 }

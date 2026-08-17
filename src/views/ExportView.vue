@@ -8,7 +8,7 @@ import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
-import type { TimelineClip } from '@/types'
+import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -46,6 +46,7 @@ const audioAssets = computed(() =>
 
 onMounted(async () => {
   await assets.refresh()
+  ensureExportTimeline()
   if (project.current?.bgmAssetId) {
     bgmAssetId.value = project.current.bgmAssetId
     const url = await assets.getUrl(project.current.bgmAssetId)
@@ -53,6 +54,20 @@ onMounted(async () => {
   }
   bgmPrompt.value = project.current?.bgmPrompt || (project.current ? buildMusicPrompt(project.current) : '')
 })
+
+/** 画布模式下往往没走过「剪辑」页，时间线为空会导致导出按钮灰掉——自动从分镜补齐 */
+function ensureExportTimeline(silent = false) {
+  if (!project.current) return false
+  const { built, clips } = ensureTimelineFromShots(project.current)
+  if (built) {
+    project.setTimeline(clips)
+    if (!silent) {
+      toast.info(`已按分镜自动排时间线（${clips.length} 段），可直接导出`, 4000)
+    }
+    return true
+  }
+  return project.current.timeline.some((c) => c.enabled)
+}
 
 watch(bgmAssetId, async (id) => {
   if (!id) {
@@ -113,16 +128,16 @@ const totalDuration = computed(() =>
 )
 
 const canExport = computed(() => {
-  return (
-    !!project.current &&
-    timeline.value.length > 0 &&
-    timeline.value.some((c) => c.enabled) &&
-    !exporting.value
-  )
+  return !!project.current && canBuildExport(project.current) && !exporting.value
 })
 
 async function doExport() {
   if (!project.current || !canExport.value) return
+  ensureExportTimeline(true)
+  if (!timeline.value.some((c) => c.enabled)) {
+    toast.warn('没有可导出的片段：请先为分镜生成视频或图片')
+    return
+  }
 
   exporting.value = true
   progress.value = 0
@@ -455,7 +470,13 @@ const segmentSummary = computed(() => {
         <GlassCard padding="md" v-if="!exporting && !resultUrl">
           <h3>📋 时间线预览</h3>
           <div v-if="segmentSummary.length === 0" class="empty">
-            时间线是空的，请先回到剪辑步骤加入片段
+            <p>还没有可导出片段。</p>
+            <p class="hint" style="margin: 8px 0;">
+              请先生成分镜视频或图片。从画布进入时会自动按分镜排时间线。
+            </p>
+            <GradientButton size="sm" type="secondary" @click="ensureExportTimeline()">
+              从分镜重建时间线
+            </GradientButton>
           </div>
           <div v-else class="seg-list">
             <div v-for="seg in segmentSummary" :key="seg.index" class="seg">

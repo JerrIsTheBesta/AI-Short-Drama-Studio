@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Handle, Position } from '@vue-flow/core'
-import { useAssetsStore, useProjectStore } from '@/stores'
+import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
 import { openLightbox } from '@/composables/useLightbox'
+import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
 import type { CanvasNodeType } from '@/types'
 
 const props = defineProps<{
@@ -24,6 +26,8 @@ const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 
 const project = useProjectStore()
 const assets = useAssetsStore()
+const toast = useToastStore()
+const router = useRouter()
 const mediaUrl = ref('')
 const videoUrl = ref('')
 const videoEl = ref<HTMLVideoElement | null>(null)
@@ -115,13 +119,33 @@ const genLabel = computed(() => {
   if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
   if (type.value === 'audio') return again ? '重新生成' : '生成口播'
-  if (type.value === 'export') return ''
+  if (type.value === 'export') return '打开导出'
   return again ? '重新生成' : '生成'
 })
 
+async function openExport(ev: Event) {
+  ev.stopPropagation()
+  if (!project.current) return
+  if (!canBuildExport(project.current)) {
+    toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
+    return
+  }
+  const { built, clips } = ensureTimelineFromShots(project.current)
+  if (built) {
+    project.setTimeline(clips)
+    await project.save()
+    toast.info(`已按分镜排好时间线（${clips.length} 段）`)
+  }
+  router.push('/export')
+}
+
 async function generateThis(ev: Event) {
   ev.stopPropagation()
-  if (type.value === 'export' || generating.value || gateBlocked.value) return
+  if (type.value === 'export') {
+    await openExport(ev)
+    return
+  }
+  if (generating.value || gateBlocked.value) return
   try {
     await runCanvasNode(props.id)
     await loadMedia()
@@ -363,7 +387,11 @@ function onAudioEnded() {
     <button
       v-if="genLabel"
       class="pnode-gen"
-      :disabled="generating || gateBlocked"
+      :disabled="
+        generating ||
+        gateBlocked ||
+        (type === 'export' && !canBuildExport(project.current))
+      "
       @click="generateThis"
       @mousedown.stop
     >

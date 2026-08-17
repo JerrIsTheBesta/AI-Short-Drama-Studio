@@ -322,7 +322,18 @@ export async function runCanvasNode(nodeId: string, onProgress?: RunProgress) {
         if (!shot) throw new Error('找不到分镜')
         await generateShotAudio(shot, report)
       } else if (node.type === 'export') {
-        throw new Error('请在右侧面板打开导出')
+        const { canBuildExport, ensureTimelineFromShots } = await import('@/utils/timeline')
+        if (!canBuildExport(p)) {
+          throw new Error('还没有可导出的视频或图片，请先生成分镜成片')
+        }
+        const { built, clips } = ensureTimelineFromShots(p)
+        if (built) {
+          project.setTimeline(clips)
+          await project.save()
+        }
+        report('时间线已就绪，请打开导出页成片')
+      } else {
+        throw new Error(`未知节点类型：${node.type}`)
       }
       patchNode(project, nodeId, 'success')
     } catch (e: any) {
