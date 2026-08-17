@@ -2,6 +2,9 @@
 import { computed, ref, watch } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import { useAssetsStore, useProjectStore } from '@/stores'
+import { runCanvasNode } from '@/services/canvas/runner'
+import { isNodeRunning } from '@/services/canvas/jobs'
+import { needsPlayReview } from '@/services/canvas/playGate'
 import type { CanvasNodeType } from '@/types'
 
 const props = defineProps<{
@@ -66,10 +69,38 @@ const assetId = computed(() => {
   if (!shot) return undefined
   if (type.value === 'shotImage') return shot.imageAssetId
   if (type.value === 'shotVideo') return shot.videoAssetId
+  if (type.value === 'audio') return shot.audioAssetId
   return undefined
 })
 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
+const generating = computed(() => isNodeRunning(props.id) || status.value === 'running')
+const hasAsset = computed(() => Boolean(assetId.value))
+const gateBlocked = computed(() => type.value !== 'script' && type.value !== 'export' && needsPlayReview(project.current))
+
+const genLabel = computed(() => {
+  if (gateBlocked.value) return '先验收剧本'
+  const again = hasAsset.value
+  if (type.value === 'script') return project.current?.shots.length ? '重新拆分镜' : '拆分镜'
+  if (type.value === 'subject') return again ? '重新生成' : '生成人设'
+  if (type.value === 'scene') return again ? '重新生成' : '生成场景'
+  if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
+  if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
+  if (type.value === 'audio') return again ? '重新生成' : '生成口播'
+  if (type.value === 'export') return ''
+  return again ? '重新生成' : '生成'
+})
+
+async function generateThis(ev: Event) {
+  ev.stopPropagation()
+  if (type.value === 'export' || generating.value || gateBlocked.value) return
+  try {
+    await runCanvasNode(props.id)
+    await loadMedia()
+  } catch {
+    /* 节点上会显示失败 */
+  }
+}
 
 watch(
   assetId,
@@ -155,6 +186,15 @@ defineExpose({ loadMedia })
       <div v-else class="ph">{{ type === 'shotVideo' ? '▶' : '＋' }}</div>
     </div>
     <div v-if="nodeMeta?.error" class="pnode-err">{{ nodeMeta.error }}</div>
+    <button
+      v-if="genLabel"
+      class="pnode-gen"
+      :disabled="generating || gateBlocked"
+      @click="generateThis"
+      @mousedown.stop
+    >
+      {{ generating ? '生成中…' : genLabel }}
+    </button>
 
     <Handle id="out" type="source" :position="Position.Right" class="hndl" />
   </div>
@@ -244,6 +284,35 @@ defineExpose({ loadMedia })
 .badge.ok {
   background: rgba(16, 185, 129, 0.2);
   color: #6ee7b7;
+}
+.pnode.kind-subject {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.pnode.kind-scene {
+  border-color: rgba(96, 165, 250, 0.45);
+}
+.pnode.kind-shotImage {
+  border-color: rgba(167, 139, 250, 0.45);
+}
+.pnode.kind-shotVideo {
+  border-color: rgba(244, 114, 182, 0.45);
+}
+.pnode-gen {
+  width: calc(100% - 16px);
+  margin: 0 8px 8px;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--color-bg-3);
+  color: var(--color-text-2);
+}
+.pnode-gen:hover:not(:disabled) {
+  background: var(--color-accent);
+  color: #fff;
+}
+.pnode-gen:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 .hndl {
   width: 8px;

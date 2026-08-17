@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "main": "dist-electron/main.js",
-  "description": "AI 混剪桌面工作台：无限画布 + 智能体",
+  "description": "剧流 Studio：无限画布 + 智能体，从剧本到成片",
   "scripts": {
     "dev": "vite",
     "web": "vite --mode web",
@@ -15,7 +15,7 @@
   },
   "build": {
     "appId": "com.aicuts.desktop",
-    "productName": "AI Cut",
+    "productName": "剧流 Studio",
     "directories": {
       "output": "release"
     },

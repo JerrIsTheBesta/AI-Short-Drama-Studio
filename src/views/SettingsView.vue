@@ -199,7 +199,7 @@ const storagePct = computed(() => {
 
         <div v-if="settings.config.aiMode === 'real'" class="env-config">
           <p class="env-hint">
-            ⚠️ 真实模式需要在项目根目录的 <code>.env</code> 文件里配置以下变量，然后重启 <code>npm run dev</code>：
+            画布右侧「模型」面板可以改 LLM / 生图 / 配音，改完立刻生效。也可以在下面用 <code>.env</code> 做默认值。
           </p>
           <pre class="env-block"># ===== LLM（分镜脚本 + 口播文案，APIYI）=====
 VITE_LLM_BASE_URL=https://api.apiyi.com/v1
@@ -394,7 +394,7 @@ VITE_AI_REAL_MODE=true</pre>
 
       <GlassCard padding="lg">
         <h2>ℹ 关于</h2>
-        <p class="card-desc">AI Cut · 一站式 AI 混剪工作台</p>
+        <p class="card-desc">剧流 Studio · 从剧本到成片</p>
         <div class="about">
           <div class="about-row">
             <span>版本</span><b>v0.1.0</b>

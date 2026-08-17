@@ -1,24 +1,14 @@
 /**
  * AI 服务通用 client
  *
- * 支持两种模式：
- * - mock 模式（默认）：本地生成演示数据，无需任何 API key
- * - real 模式：通过 VITE_AI_REAL_MODE=true 启用，调用真实 endpoint
- *
- * 真实模式下，LLM 走 APIYI OpenAI 兼容协议：
- *   POST {VITE_LLM_BASE_URL}/chat/completions
- *   Authorization: Bearer {VITE_LLM_API_KEY}
- * 默认模型：qwen3.7-max。支持多模态：user content 可带图片。
+ * mock：本地演示；real：画布右侧「模型」面板或 .env 里的真实接口
  */
 
-export type AIMode = 'mock' | 'real'
+export type { AIMode } from '@/stores/settings'
+export { getAIMode } from './runtime'
 
 import { mockLLM } from './mock'
-
-export function getAIMode(): AIMode {
-  const flag = (import.meta.env.VITE_AI_REAL_MODE ?? 'false').toLowerCase()
-  return flag === 'true' || flag === '1' ? 'real' : 'mock'
-}
+import { getAIMode, getLlmConfig } from './runtime'
 
 export type LLMContentPart =
   | { type: 'text'; text: string }
@@ -86,14 +76,10 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     return mockLLM(req)
   }
 
-  const baseUrl = String(import.meta.env.VITE_LLM_BASE_URL ?? '').replace(/\/+$/, '')
-  const apiKey = import.meta.env.VITE_LLM_API_KEY
-  const model = import.meta.env.VITE_LLM_MODEL || 'qwen3.7-max'
+  const { baseUrl, apiKey, model } = getLlmConfig()
 
   if (!baseUrl || !apiKey) {
-    throw new Error(
-      '[AI] real 模式但未配置 VITE_LLM_BASE_URL / VITE_LLM_API_KEY'
-    )
+    throw new Error('[AI] 真实模式但没配 LLM 地址或密钥，打开右侧「模型」面板填一下')
   }
 
   const withImages = hasImageParts(req.messages)

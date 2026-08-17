@@ -88,7 +88,7 @@ body,
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow: hidden;
+  /* overflow:hidden 会让 Electron 的 -webkit-app-region:drag 失效，不能写在顶栏祖先上 */
 }
 
 body {

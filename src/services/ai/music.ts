@@ -11,6 +11,7 @@
  */
 
 import { getAIMode, callLLM } from './client'
+import { getMusicConfig } from './runtime'
 import type { Project, VisualStyle } from '@/types'
 
 export interface MusicGenInput {
@@ -87,12 +88,7 @@ export async function refineMusicPrompt(project: Project): Promise<string> {
 }
 
 function musicConfig() {
-  const apiKey = import.meta.env.VITE_MUSIC_API_KEY
-  const model = import.meta.env.VITE_MUSIC_MODEL || 'music-3.0'
-  const baseUrl = String(
-    import.meta.env.VITE_MUSIC_BASE_URL || 'https://api.minimaxi.com/v1'
-  ).replace(/\/+$/, '')
-  return { apiKey, model, baseUrl }
+  return getMusicConfig()
 }
 
 function hexToBytes(hex: string): Uint8Array {

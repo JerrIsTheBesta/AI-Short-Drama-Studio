@@ -13,6 +13,11 @@ export type DesktopAPI = {
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
+  minimize: () => Promise<void>
+  toggleMaximize: () => Promise<boolean>
+  closeWindow: () => Promise<void>
+  isMaximized: () => Promise<boolean>
+  onMaximized: (cb: (v: boolean) => void) => () => void
 }
 
 declare global {
@@ -22,7 +27,7 @@ declare global {
 }
 
 export function isDesktop(): boolean {
-  return Boolean(window.desktop?.isDesktop)
+  return Boolean(window.desktop?.isDesktop) || /electron/i.test(navigator.userAgent)
 }
 
 export function desktop(): DesktopAPI {

@@ -8,6 +8,7 @@
  */
 
 import { getAIMode } from './client'
+import { getTtsConfig } from './runtime'
 
 export interface TTSInput {
   text: string
@@ -92,13 +93,7 @@ export function detectSpeechLanguage(text: string): 'Chinese' | 'English' | 'Aut
 }
 
 function ttsConfig() {
-  const baseUrl = String(
-    import.meta.env.VITE_TTS_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1'
-  ).replace(/\/+$/, '')
-  const apiKey = import.meta.env.VITE_TTS_API_KEY || import.meta.env.VITE_LLM_API_KEY
-  const model = import.meta.env.VITE_TTS_MODEL || 'qwen-audio-3.0-tts-flash'
-  const voice = import.meta.env.VITE_TTS_VOICE || 'longanhuan_v3.6'
-  return { baseUrl, apiKey, model, voice }
+  return getTtsConfig()
 }
 
 /** 解析出可请求 SpeechSynthesizer 的 origin（含 /api/v1） */

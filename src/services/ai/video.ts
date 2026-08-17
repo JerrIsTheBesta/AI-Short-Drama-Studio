@@ -18,6 +18,7 @@
  */
 
 import { getAIMode } from './client'
+import { getVideoConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import type { Shot, AspectRatio } from '@/types'
 
@@ -75,16 +76,10 @@ async function realWorkflowVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const baseUrl = import.meta.env.VITE_VIDEO_BASE_URL?.replace(/\/+$/, '')
-  const apiKey = import.meta.env.VITE_VIDEO_API_KEY
-  const workflowId =
-    import.meta.env.VITE_VIDEO_WORKFLOW_ID || 'minimax_h3_light2v-1'
+  const { baseUrl, apiKey, workflowId } = getVideoConfig()
 
   if (!baseUrl) {
-    throw new Error(
-      '[video] 未配置 VITE_VIDEO_BASE_URL\n' +
-        '格式：https://your-comfyui-server.com:port（不含 /api/...）'
-    )
+    throw new Error('[video] 没配图生视频地址，打开右侧「模型」面板填 ComfyUI 地址')
   }
 
   // 1) 收集图：imageBlob + referenceImages，最多 3 张

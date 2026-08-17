@@ -14,8 +14,10 @@ import {
   collectShotRefIds,
   composeShotImagePrompt
 } from '@/utils/consistency'
-import { effectiveImagePrompt, effectiveVideoPrompt } from '@/utils/shot'
+import { effectiveImagePrompt, effectiveVideoPrompt, pushHistory } from '@/utils/shot'
 import { rebuildCanvasGraph } from './layout'
+import { mapPool, withNodeJob } from './jobs'
+import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import type { CanvasNode, Scene, Shot, Subject } from '@/types'
 
 export type RunProgress = (nodeId: string, msg: string) => void
@@ -26,11 +28,10 @@ function patchNode(
   status: CanvasNode['status'],
   error?: string
 ) {
-  if (!project.current?.canvas) return
-  const nodes = project.current.canvas.nodes.map((n) =>
-    n.id === nodeId ? { ...n, status, error } : n
-  )
-  project.setCanvas({ ...project.current.canvas, nodes })
+  const node = project.current?.canvas?.nodes.find((n) => n.id === nodeId)
+  if (!node) return
+  node.status = status
+  node.error = error
 }
 
 async function productRefBlobs() {
@@ -72,7 +73,14 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
     prompt,
     projectId: project.current.id
   })
-  project.updateSubject(sub.id, { designSheetAssetId: asset.id })
+  project.updateSubject(sub.id, {
+    designSheetAssetId: asset.id,
+    designSheetHistoryIds: pushHistory(
+      sub.designSheetAssetId,
+      asset.id,
+      sub.designSheetHistoryIds
+    )
+  })
   await project.save()
   return asset
 }
@@ -99,7 +107,10 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
     prompt,
     projectId: project.current.id
   })
-  project.updateScene(scn.id, { plateAssetId: asset.id })
+  project.updateScene(scn.id, {
+    plateAssetId: asset.id,
+    plateHistoryIds: pushHistory(scn.plateAssetId, asset.id, scn.plateHistoryIds)
+  })
   await project.save()
   return asset
 }
@@ -254,47 +265,92 @@ export async function runStoryboard(onProgress?: (msg: string) => void) {
     project.setScript({ ...project.current.script, aesthetic: run.result.aesthetic })
   }
   project.setCanvas(rebuildCanvasGraph(project.current, false))
+  project.setPlayApproved(false)
   await project.save()
   return run
 }
 
 export async function runCanvasNode(nodeId: string, onProgress?: RunProgress) {
-  const project = useProjectStore()
-  const p = project.current
-  if (!p?.canvas) throw new Error('画布为空')
-  const node = p.canvas.nodes.find((n) => n.id === nodeId)
-  if (!node) throw new Error('找不到节点')
-  const report = (msg: string) => onProgress?.(nodeId, msg)
-  patchNode(project, nodeId, 'running')
-  try {
-    if (node.type === 'script') {
-      await runStoryboard(report)
-    } else if (node.type === 'subject' && node.data.subjectId) {
-      const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
-      if (!sub) throw new Error('找不到主体')
-      await generateSubjectSheet(sub, report)
-    } else if (node.type === 'scene' && node.data.sceneId) {
-      const scn = (p.scenes ?? []).find((s) => s.id === node.data.sceneId)
-      if (!scn) throw new Error('找不到场景')
-      await generateScenePlate(scn, report)
-    } else if (node.type === 'shotImage' && node.data.shotId) {
-      const shot = p.shots.find((s) => s.id === node.data.shotId)
-      if (!shot) throw new Error('找不到分镜')
-      await generateShotImage(shot, report)
-    } else if (node.type === 'shotVideo' && node.data.shotId) {
-      const shot = p.shots.find((s) => s.id === node.data.shotId)
-      if (!shot) throw new Error('找不到分镜')
-      await generateShotVideo(shot, report)
-    } else if (node.type === 'audio' && node.data.shotId) {
-      const shot = p.shots.find((s) => s.id === node.data.shotId)
-      if (!shot) throw new Error('找不到分镜')
-      await generateShotAudio(shot, report)
-    } else if (node.type === 'export') {
-      throw new Error('请在右侧面板打开导出')
+  return withNodeJob(nodeId, async () => {
+    const project = useProjectStore()
+    const p = project.current
+    if (!p?.canvas) throw new Error('画布为空')
+    const node = p.canvas.nodes.find((n) => n.id === nodeId)
+    if (!node) throw new Error('找不到节点')
+    const report = (msg: string) => onProgress?.(nodeId, msg)
+    if (node.type !== 'script' && node.type !== 'export' && !isPlayApproved(p)) {
+      throw new Error(PLAY_GATE_MSG)
     }
-    patchNode(project, nodeId, 'success')
-  } catch (e: any) {
-    patchNode(project, nodeId, 'failed', e?.message ?? String(e))
-    throw e
-  }
+    patchNode(project, nodeId, 'running')
+    try {
+      if (node.type === 'script') {
+        await runStoryboard(report)
+      } else if (node.type === 'subject' && node.data.subjectId) {
+        const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
+        if (!sub) throw new Error('找不到主体')
+        await generateSubjectSheet(sub, report)
+      } else if (node.type === 'scene' && node.data.sceneId) {
+        const scn = (p.scenes ?? []).find((s) => s.id === node.data.sceneId)
+        if (!scn) throw new Error('找不到场景')
+        await generateScenePlate(scn, report)
+      } else if (node.type === 'shotImage' && node.data.shotId) {
+        const shot = p.shots.find((s) => s.id === node.data.shotId)
+        if (!shot) throw new Error('找不到分镜')
+        await generateShotImage(shot, report)
+      } else if (node.type === 'shotVideo' && node.data.shotId) {
+        const shot = p.shots.find((s) => s.id === node.data.shotId)
+        if (!shot) throw new Error('找不到分镜')
+        await generateShotVideo(shot, report)
+      } else if (node.type === 'audio' && node.data.shotId) {
+        const shot = p.shots.find((s) => s.id === node.data.shotId)
+        if (!shot) throw new Error('找不到分镜')
+        await generateShotAudio(shot, report)
+      } else if (node.type === 'export') {
+        throw new Error('请在右侧面板打开导出')
+      }
+      patchNode(project, nodeId, 'success')
+    } catch (e: any) {
+      patchNode(project, nodeId, 'failed', e?.message ?? String(e))
+      throw e
+    }
+  })
+}
+
+export async function generateMissingSheets(onProgress?: (msg: string) => void) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = (p.subjects ?? [])
+    .filter((s) => !s.designSheetAssetId)
+    .map((s) => `subject:${s.id}`)
+  await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg)))
+}
+
+export async function generateMissingPlates(onProgress?: (msg: string) => void) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = (p.scenes ?? []).filter((s) => !s.plateAssetId).map((s) => `scene:${s.id}`)
+  await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg)))
+}
+
+export async function generateMissingImages(onProgress?: (msg: string) => void) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = p.shots.filter((s) => !s.imageAssetId).map((s) => `shotImage:${s.id}`)
+  await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg)))
+}
+
+export async function generateMissingVideos(onProgress?: (msg: string) => void) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = p.shots
+    .filter((s) => s.imageAssetId && !s.videoAssetId)
+    .map((s) => `shotVideo:${s.id}`)
+  await mapPool(ids, 2, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg)))
+}
+
+export async function generateMissingAudio(onProgress?: (msg: string) => void) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = p.shots.filter((s) => s.voiceover && !s.audioAssetId).map((s) => `audio:${s.id}`)
+  await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg)))
 }

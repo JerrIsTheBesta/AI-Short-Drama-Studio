@@ -6,12 +6,23 @@ import {
   dialog,
   shell,
   protocol,
-  net
+  net,
+  Menu
 } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const mainDir = path.dirname(fileURLToPath(import.meta.url))
+
+function resolvePreload() {
+  for (const name of ['preload.cjs', 'preload.js', 'preload.mjs']) {
+    const p = path.join(mainDir, name)
+    if (existsSync(p)) return p
+  }
+  return path.join(mainDir, 'preload.js')
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -51,26 +62,41 @@ function createWindow() {
     height: 960,
     minWidth: 1100,
     minHeight: 720,
-    title: 'AI Cut',
+    title: '剧流 Studio',
     backgroundColor: '#0a0a14',
+    frame: false,
+    autoHideMenuBar: true,
+    show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: resolvePreload(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
     }
   })
 
+  const sendMax = () => {
+    win.webContents.send('window:maximized', win.isMaximized())
+  }
+  win.on('maximize', sendMax)
+  win.on('unmaximize', sendMax)
+
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl) {
     win.loadURL(devUrl)
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'))
+    win.loadFile(path.join(mainDir, '../dist/index.html'))
   }
+  win.webContents.on('did-finish-load', () => {
+    console.log('[electron] preload', resolvePreload(), 'desktop api via preload.cjs')
+  })
+  win.setMenuBarVisibility(false)
+  win.once('ready-to-show', () => win.show())
 }
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null)
   await ensureDir(defaultRoot())
 
   protocol.handle('aicuts', (request) => {
@@ -160,10 +186,31 @@ app.whenReady().then(async () => {
     return shell.openPath(filePath)
   })
 
+  function senderWin(e: Electron.IpcMainInvokeEvent) {
+    return BrowserWindow.fromWebContents(e.sender)
+  }
+
+  ipcMain.handle('window:minimize', (e) => {
+    senderWin(e)?.minimize()
+  })
+  ipcMain.handle('window:toggleMaximize', (e) => {
+    const win = senderWin(e)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle('window:close', (e) => {
+    senderWin(e)?.close()
+  })
+  ipcMain.handle('window:isMaximized', (e) => senderWin(e)?.isMaximized() ?? false)
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((err) => {
+  console.error('[electron] startup failed', err)
 })
 
 app.on('window-all-closed', () => {

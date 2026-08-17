@@ -21,6 +21,7 @@ export interface CanvasNode {
     label?: string
     width?: number
     height?: number
+    kind?: string
   }
   status?: TaskStatus
   error?: string

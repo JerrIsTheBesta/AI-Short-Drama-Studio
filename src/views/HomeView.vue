@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -7,6 +7,7 @@ import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import { isDesktop, desktop } from '@/services/desktop'
+import { projectCoverUrl } from '@/services/storage'
 import type { AspectRatio } from '@/types'
 
 const router = useRouter()
@@ -30,9 +31,29 @@ const aspectPresets: { value: AspectRatio; label: string; desc: string; w: numbe
   { value: '21:9', label: '🎬 影院', desc: '电影宽屏', w: 1680, h: 720 }
 ]
 
+const covers = ref<Record<string, string>>({})
+
 onMounted(async () => {
   await project.refreshList()
 })
+
+watch(
+  () => project.allProjects.map((p) => p.id).join(','),
+  async () => {
+    const next: Record<string, string> = { ...covers.value }
+    for (const p of project.allProjects) {
+      if (next[p.id]) continue
+      try {
+        const url = await projectCoverUrl(p)
+        if (url) next[p.id] = url
+      } catch {
+        /* 某个项目素材读失败就跳过 */
+      }
+    }
+    covers.value = next
+  },
+  { immediate: true }
+)
 
 const filteredProjects = computed(() => {
   const kw = search.value.trim().toLowerCase()
@@ -126,7 +147,7 @@ function fmtDuration(sec: number) {
       <div class="hero-content">
         <div class="brand">
           <span class="brand-mark">▶</span>
-          <span class="brand-name">AI Cut</span>
+          <span class="brand-name">剧流 Studio</span>
         </div>
         <h1 class="title">
           一句话，<span class="gradient-text">一条 AI 流水线</span>，<br />
@@ -189,7 +210,7 @@ function fmtDuration(sec: number) {
         v-if="filteredProjects.length === 0"
         icon="🎬"
         title="还没有项目"
-        description="点击「创建新项目」开始你的第一条 AI 混剪"
+        description="点击「创建新项目」开始你的第一条成片"
       >
         <template #action>
           <GradientButton @click="showCreateModal = true">创建新项目</GradientButton>
@@ -206,8 +227,9 @@ function fmtDuration(sec: number) {
           @click="openProject(p.id)"
         >
           <div class="proj-thumb">
-            <div class="proj-thumb-grad" :data-style="p.script?.style || 'cinematic'" />
-            <div class="proj-thumb-overlay">
+            <img v-if="covers[p.id]" class="proj-cover" :src="covers[p.id]" alt="" />
+            <div v-else class="proj-thumb-grad" :data-style="p.script?.style || 'cinematic'" />
+            <div v-if="!covers[p.id]" class="proj-thumb-overlay">
               <div class="proj-thumb-icon">🎬</div>
             </div>
             <div class="proj-meta-top">
@@ -318,7 +340,7 @@ function fmtDuration(sec: number) {
 
 <style scoped>
 .home {
-  height: 100vh;
+  height: 100%;
   overflow-y: auto;
   background: var(--color-bg-0);
 }
@@ -466,6 +488,14 @@ function fmtDuration(sec: number) {
   aspect-ratio: 16/9;
   background: var(--color-bg-2);
 }
+.proj-cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .proj-thumb-grad {
   position: absolute;
   inset: 0;
@@ -514,6 +544,7 @@ function fmtDuration(sec: number) {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  z-index: 2;
 }
 .proj-info {
   padding: var(--space-3) var(--space-4);

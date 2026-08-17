@@ -6,6 +6,11 @@ declare module '*.vue' {
   export default component
 }
 
+declare module '*.md?raw' {
+  const content: string
+  export default content
+}
+
 interface ImportMetaEnv {
   readonly VITE_AI_REAL_MODE: string
   readonly VITE_LLM_BASE_URL: string

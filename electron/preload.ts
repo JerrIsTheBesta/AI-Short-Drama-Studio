@@ -15,6 +15,11 @@ export type DesktopAPI = {
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
+  minimize: () => Promise<void>
+  toggleMaximize: () => Promise<boolean>
+  closeWindow: () => Promise<void>
+  isMaximized: () => Promise<boolean>
+  onMaximized: (cb: (v: boolean) => void) => () => void
 }
 
 const api: DesktopAPI = {
@@ -31,7 +36,16 @@ const api: DesktopAPI = {
   join: (...parts) => ipcRenderer.invoke('desktop:join', parts),
   pickFiles: (filters) => ipcRenderer.invoke('desktop:pickFiles', filters),
   pickDirectory: () => ipcRenderer.invoke('desktop:pickDirectory'),
-  openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath)
+  openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath),
+  minimize: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  onMaximized: (cb) => {
+    const handler = (_e: unknown, v: boolean) => cb(v)
+    ipcRenderer.on('window:maximized', handler)
+    return () => ipcRenderer.removeListener('window:maximized', handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('desktop', api)

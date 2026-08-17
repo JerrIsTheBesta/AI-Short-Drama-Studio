@@ -217,6 +217,8 @@ export interface Subject {
   stateVariants?: string
   /** 多角度角色设计图（一张图里含正/侧/背等多种形态） */
   designSheetAssetId?: ID
+  /** 历史人设图（不含当前） */
+  designSheetHistoryIds?: ID[]
   /** 是否从用户参考图里识别出来 */
   fromReference?: boolean
 }
@@ -233,6 +235,8 @@ export interface Scene {
   lighting?: string
   /** 场景空镜 / 底板图 */
   plateAssetId?: ID
+  /** 历史底板图（不含当前） */
+  plateHistoryIds?: ID[]
 }
 
 /** 完整项目 */
@@ -257,6 +261,11 @@ export interface Project {
   folderPath?: string
   /** 无限画布图（节点 / 连线 / 分组） */
   canvas?: CanvasGraph
+  /**
+   * 剧本是否已验收。拆分镜后为 false，确认通过后才做人设/配图/视频。
+   * 用户明确要求全流程时会自动视为通过。
+   */
+  playApproved?: boolean
   createdAt: number
   updatedAt: number
 }

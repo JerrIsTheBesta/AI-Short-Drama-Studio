@@ -204,8 +204,18 @@ export async function estimateStorage(): Promise<{ usage: number; quota: number 
 export async function assetAbsPath(id: string): Promise<string | undefined> {
   const dir = activeDir
   if (!dir) return undefined
-  const list = assetCache.length ? assetCache : await loadManifest(dir)
+  return assetAbsPathInDir(dir, id)
+}
+
+/** 不切换当前项目目录，按指定文件夹解析素材路径（首页封面用） */
+export async function assetAbsPathInDir(
+  dir: string,
+  id: string
+): Promise<string | undefined> {
+  const list = await loadManifest(dir)
   const meta = list.find((a) => a.id === id)
   if (!meta?.fileRelPath) return undefined
-  return desktop().join(dir, meta.fileRelPath)
+  const abs = await desktop().join(dir, meta.fileRelPath)
+  if (!(await desktop().exists(abs))) return undefined
+  return abs
 }

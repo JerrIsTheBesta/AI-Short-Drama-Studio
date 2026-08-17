@@ -374,6 +374,12 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  function setPlayApproved(ok: boolean) {
+    if (!current.value) return
+    current.value.playApproved = ok
+    touch()
+  }
+
   function touch() {
     if (!current.value) return
     current.value.updatedAt = Date.now()
@@ -407,16 +413,22 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  /** 主动保存 */
+  /** 主动保存（串行，避免并行生成互相覆盖） */
+  let saveChain: Promise<void> = Promise.resolve()
   async function save() {
-    if (!current.value) return
-    const stamp = current.value.updatedAt
-    await saveProject(current.value)
-    lastSavedAt.value = Date.now()
-    if (current.value.updatedAt === stamp) {
-      dirty.value = false
+    const run = async () => {
+      if (!current.value) return
+      const stamp = current.value.updatedAt
+      await saveProject(current.value)
+      lastSavedAt.value = Date.now()
+      if (current.value.updatedAt === stamp) {
+        dirty.value = false
+      }
+      await refreshList()
     }
-    await refreshList()
+    const next = saveChain.then(run, run)
+    saveChain = next.catch(() => undefined)
+    return next
   }
 
   /** 删除项目 */
@@ -463,6 +475,7 @@ export const useProjectStore = defineStore('project', () => {
     setCanvas,
     syncCanvasFromProject,
     setAspectRatio,
+    setPlayApproved,
     save,
     remove,
     startAutoSave,

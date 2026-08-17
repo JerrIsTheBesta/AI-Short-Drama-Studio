@@ -53,7 +53,7 @@ function newProject() {
     <div class="left">
       <button class="logo" @click="goHome">
         <span class="logo-mark">▶</span>
-        <span class="logo-text">AI Cut</span>
+        <span class="logo-text">剧流 Studio</span>
       </button>
 
       <div class="divider" />
@@ -118,12 +118,16 @@ function newProject() {
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
   z-index: 10;
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 .left,
 .right {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .logo {
   display: flex;
@@ -132,6 +136,8 @@ function newProject() {
   padding: 6px 10px;
   border-radius: var(--radius-md);
   transition: background var(--duration-fast);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .logo:hover {
   background: rgba(255, 255, 255, 0.05);

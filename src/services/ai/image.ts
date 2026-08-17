@@ -11,6 +11,7 @@
  */
 
 import { getAIMode } from './client'
+import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
 import type { VisualStyle, AspectRatio } from '@/types'
 import { styleLockSuffix } from '@/utils/visualStyle'
@@ -39,11 +40,7 @@ const log = (msg: string) =>
   console.log('%c[image]', 'color:#f59e0b;font-weight:600', msg)
 
 function imageConfig() {
-  const baseUrl = String(import.meta.env.VITE_IMAGE_BASE_URL || '')
-    .replace(/\/+$/, '')
-  const apiKey = import.meta.env.VITE_IMAGE_API_KEY
-  const model = import.meta.env.VITE_IMAGE_MODEL || 'seedream-4-5-251128'
-  return { baseUrl, apiKey, model }
+  return getImageConfig()
 }
 
 function isSeedreamModel(model: string): boolean {

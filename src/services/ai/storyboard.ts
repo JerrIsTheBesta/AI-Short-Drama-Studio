@@ -4,7 +4,7 @@
  * 输入：文案 + 主题 + 风格 + 镜头时长
  * 输出：StoryboardResult（含导演式策划字段）
  *
- * 走 APIYI（qwen3.7-max）OpenAI 兼容协议，以「专业剧本编剧 + 镜头导演」身份生成；
+ * 走真实 LLM，以现场短视频编导身份拆能拍的镜头；
  * 失败/未配置则走演示数据
  */
 
@@ -12,11 +12,12 @@ import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './clie
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, Subject, VisualStyle } from '@/types'
 import { composeShotVisualPrompt } from '@/utils/shotPrompt'
+import { getSkillBody } from '@/skills'
+import { getLlmConfig } from './runtime'
 import {
   buildStyleBriefForLLM,
   promptMentionsStyle,
   styleLabel,
-  styleLockSuffix,
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
 
@@ -132,24 +133,16 @@ function buildStylePriorityBlock(input: StoryboardInput): string {
   const styleCn = styleLabel(input.style)
 
   if (userAuth) {
-    return `【画风最高指令 · 用户主题描述 = 画风圣经 · 必须严格遵守】
-用户在「视频主题」和文案开头已经写清想要的画风与美学。这是全片唯一最高优先级，远高于页面下拉「画面风格」。
-你必须：
-1. 精读主题原文，把其中的媒介、技法、色调、光影、时代感、品类气质提炼成一条高密度 Aesthetic（格式见下）
-2. 每一镜 visualPrompt 开篇用用户主题里的画风原词做锁（尽量用原词，可压缩，不可篡改成别的风格）
-3. 禁止用「电影感/日系动画/写实摄影」等下拉套话覆盖用户原意；只有主题完全没提画风时才用下拉
-4. 若主题写的是武侠灯笼雨雾汉服商业广告气质，就锁这个，不要改成无关画风
+    return `【画风听用户的】
+用户在「视频主题」和文案开头写了想要的味道。这是全片最高优先级，别翻译成「电影感 / 日系动画」套话。
+把用户原词写进人话句子里（灯笼就灯笼，雨就下雨），不要改成英文标签。
 
 用户主题/画风原文：
 """
 ${userAuth}
 """
 
-Aesthetic 输出格式（对齐专业视频脚本，一条高密度风格锚，可中英混合但关键词必须来自用户）：
-例：Cinematic wuxia atmosphere, elegant Chinese beauty commercial, warm oil-lantern glow cutting through cool rainy mist, rich red hanfu, delicate makeup, premium beauty advertisement, subtle film grain, realistic skin texture, cinematic lighting
-（上例仅说明密度与结构；内容必须按用户主题重写，禁止照抄例句情节）
-
-页面下拉风格仅作弱参考（当前：${styleCn} / ${input.style}），主题有画风时忽略它：
+页面下拉风格仅作弱参考（当前：${styleCn} / ${input.style}），主题里已经有味道时忽略它：
 ${fallback}`
   }
 
@@ -200,14 +193,14 @@ async function realStoryboard(input: StoryboardInput): Promise<{
       ? `
 【参考图（已附带 ${input.productImages.length} 张）】
 先看图再写分镜：
-- 图里如果有人物/动物/吉祥物，必须把他们列为 subjects，description 按图中真实外貌写，fromReference=true，不要另造一张脸
-- 图里如果是产品，也列为 kind=other 的主体，外貌按真实产品写
-- visualPrompt 里的人物必须和 subjects 描述完全一致（同一套衣服、发型、年龄）
-- 每个镜头都要让产品/主角清晰可见`
+- 图里有人/动物/吉祥物，列为 subjects，外貌按图里真实样子写，fromReference=true，别另造一张脸
+- 图里是产品，列为 kind=other，按真实产品写
+- 后面每一镜的人都要和 subjects 同一套衣服、发型、年龄
+- 产品/主角每镜都要让人看清`
       : `
 【没有参考图】
-先从文案里列出所有会反复出现的人物/动物（subjects）和地点（scenes）。
-同一人物在所有分镜里必须用完全相同的外貌描述（名字、年龄、发型、衣服、配饰一字不差）。`
+先从文案里列出会反复出现的人/动物（subjects）和地点（scenes）。
+同一人全片同一套外貌：名字、年龄、发型、衣服、配饰不要变着写。`
 
   const stylePriority = buildStylePriorityBlock(input)
   const styleCn = styleLabel(input.style)
@@ -218,41 +211,34 @@ async function realStoryboard(input: StoryboardInput): Promise<{
     input.keywords
   )
   const hasUserStyle = Boolean(userStyleAuth.trim())
+  const directorPlaybook = getSkillBody('storyboard-director')
 
-  const userText = `请以「专业剧本编剧 + 镜头导演 + 美术指导」的身份，按导演策划工作流撰写分镜。
+  const userText = `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
 
-文案主题（画风圣经，最高优先级）：
+文案主题：
 """
 ${input.topic || '（未填）'}
 """
 
 文案内容：
 """
-${input.content?.trim() || '（未填写正文。请根据参考图撰写口播与分镜。）'}
+${input.content?.trim() || '（没写正文。有参考图就按图编口播和镜头。）'}
 """
 ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
 
 视频比例：${input.aspectRatio}
-分镜时长参考基准：约 ${input.shotDuration} 秒（只作节奏参考，不要每个镜头都写成同一个秒数）
+时长参考：大约每镜 ${input.shotDuration} 秒（只是节奏，别所有镜头同一秒数）
 
 ${stylePriority}
 ${productNote}
 
-工作流（必须按顺序）：
-1. 先精读「文案主题」，提炼画风，写出一条高密度 aesthetic（格式对齐专业视频脚本 Aesthetic），再写 styleBrief / colorPalette / lightingNote
-2. 再锁 subjects（含 role、stateVariants）与 scenes（含 mainAnchor、lighting）
-3. 再拆 shots：先定 purpose / shotSize / blocking / eyeline / continuity / propFocus / duration / voiceover / cameraMovement，再写超详细 visualPrompt（对齐参考脚本的 Visual Prompt 密度）
-
-硬性要求：
-1. voiceover、audioDescription、导演字段用简体中文；aesthetic 与 visualPrompt 用高密度可喂给视频/配图模型的写法（可中英混合），但画风关键词必须来自用户主题
-2. 每个 visualPrompt 8–12 句或等长密度、画面信息完整，禁止一两句空话
-3. ${
-    hasUserStyle
-      ? '每个 visualPrompt 与 aesthetic 必须锁住用户主题里的画风，禁止用下拉风格套话覆盖'
-      : `每个 visualPrompt 必须明确写出「${styleCn} / ${styleGuide.medium}」`
-  }
-4. 每个 shot.duration 按本镜口播字数单独填写（整数秒，5-10）
-5. 严格按 system JSON 模板输出，不要思考过程`
+顺序：先锁人物和地点，再拆镜头。每镜写清干什么、口播、时长、镜头怎么动、画面里发生什么。
+${
+  hasUserStyle
+    ? '画风用用户主题里的原词，写进人话句子，不要下拉风格套话。'
+    : `主题没提画风时，画面里带上「${styleCn} / ${styleGuide.medium}」。`
+}
+直接输出 JSON，不要解释。`
 
   const userContent: string | LLMContentPart[] =
     input.productImages && input.productImages.length > 0
@@ -268,60 +254,52 @@ ${productNote}
   const messages: LLMMessage[] = [
     {
       role: 'system',
-      content: `你是一位专业的剧本编剧、镜头导演与美术指导。你写的 aesthetic / visualPrompt 要能直接用于生成视频的脚本提示词。
-最高原则：用户「视频主题」里写明的画风与美学 = 全片圣经。先锁主题画风，再拆镜，再写提示词。不要用页面下拉风格覆盖主题。
+      content: `${directorPlaybook}
 
-【字段语言】
-- aesthetic、visualPrompt：高密度，可中英混合（对齐专业 I2V 脚本）；画风词必须来自用户主题
-- title、voiceover、audioDescription、blocking、eyeline、continuity、propFocus、purpose、shotSize：简体中文
 ${productNote}
 
 ${stylePriority}
 
-【画风优先级（死规则）】
-1. 文案主题 = 最高指令
-2. 文案正文里的画风句 = 次高
-3. 下拉风格「${styleCn}」= 仅主题完全没提画风时才用
-4. 禁止把主题画风擅自改成电影感/日系动画等通用套话
+【字段全用简体中文】aesthetic、visualPrompt 也是中文白话，像跟摄像说戏。禁止 cinematic / aesthetic / film grain / premium 这类英文标签堆砌。
 
-【输出 JSON 结构】
+【输出 JSON】
 {
-  "aesthetic": "<一条高密度 Aesthetic，对齐专业视频脚本；必须锁住用户主题画风>",
-  "styleBrief": "<中文风格简报：题材冲突爽点 + 主题画风要点>",
-  "colorPalette": "<色彩锚点，对齐主题>",
-  "lightingNote": "<光线时辰，对齐主题>",
+  "aesthetic": "<一两句人话，说出全片味道，用用户主题里的词>",
+  "styleBrief": "<这片图啥、冲突在哪、凭什么不划走>",
+  "colorPalette": "<几处能看见的颜色，别写色板编号>",
+  "lightingNote": "<几点钟、灯从哪来>",
   "subjects": [
     {
       "id": "sub_1",
-      "name": "中文短名",
+      "name": "街上能喊出来的短名",
       "kind": "person|animal|other",
-      "description": "<中文外貌锁定，100-180字>",
-      "role": "<戏剧功能>",
-      "stateVariants": "<状态变体或「单一状态」>",
+      "description": "<外貌锁定，写成能去夜市买同款：年龄、发型、衣服、鞋、疤或习惯动作>",
+      "role": "<这人在片里干什么>",
+      "stateVariants": "<会不会换衣服；不会就写单一状态>",
       "fromReference": false
     }
   ],
   "scenes": [
     {
       "id": "scn_1",
-      "name": "中文地点名",
-      "description": "<中文环境锁定，80字以上，空镜>",
-      "mainAnchor": "<主锚>",
-      "lighting": "<时辰光源>"
+      "name": "地点短名",
+      "description": "<人还没进来时这个地方什么样，80字以上>",
+      "mainAnchor": "<摄像能对着的实在东西>",
+      "lighting": "<时辰和光源>"
     }
   ],
   "shots": [
     {
-      "title": "中文标题 3-8 字",
-      "purpose": "<戏剧功能>",
-      "shotSize": "<景别>",
-      "blocking": "<相对主锚站位朝向>",
-      "eyeline": "<视线>",
-      "continuity": "<起始 → 变化 → 末态>",
-      "propFocus": "<道具焦点>",
-      "visualPrompt": "<超详细 Visual Prompt，密度对齐专业脚本，可直接喂视频/配图>",
-      "audioDescription": "<音效短句，中文，逗号分隔>",
-      "voiceover": "<中文口播；可含语气提示>",
+      "title": "场记板上能写的 3-8 字",
+      "purpose": "钩子/说明/反应/揭示/收口",
+      "shotSize": "<远近 + 为什么>",
+      "blocking": "<相对主锚站哪、脸朝哪>",
+      "eyeline": "<看谁/看哪>",
+      "continuity": "<开始什么样 → 这几秒变了啥 → 结束定在哪>",
+      "propFocus": "<这镜要看清的物件，没有写无>",
+      "visualPrompt": "<中文白话说戏：在哪、什么光、谁、穿什么、正在干什么、镜头怎么走。4–8 句够用，别堆术语>",
+      "audioDescription": "<现场能听到的，逗号分隔>",
+      "voiceover": "<这一镜要念的；没有就空字符串>",
       "duration": <5-10>,
       "cameraMovement": "push|pull|pan|tilt|static|orbit",
       "subjectIds": ["sub_1"],
@@ -330,36 +308,10 @@ ${stylePriority}
   ]
 }
 
-【Aesthetic 写法】（项目级，一条，不要写成散文水词）
-从用户主题提炼，密度参考：
-Cinematic wuxia atmosphere, elegant Chinese beauty commercial, warm oil-lantern glow cutting through cool rainy mist, rich red hanfu, delicate makeup, premium beauty advertisement, subtle film grain, realistic skin texture, cinematic lighting
-必须替换成用户主题对应的关键词，禁止照抄例句情节。
-
-【visualPrompt 铁律】（每镜）
-密度与结构参考：
-Starting from the reference frame. Inside a wooden canopy boat drifting slowly across a misty lake at night, the young woman in elegant red embroidered hanfu sits beside a small wooden vanity. ... Rain falls softly outside the boat, creating a dreamy cinematic atmosphere.
-要求：
-1. 开篇锁用户主题画风原词
-2. 写清环境、主锚、光线、外貌、站位、连贯动作（覆盖本镜秒数）、道具、景别运镜、气氛
-3. 8–12 句或同等信息密度；可直接作 I2V/配图提示
-4. 同场景前后镜动作与道具连续
-5. ${
-    hasUserStyle
-      ? '禁止用下拉风格覆盖主题画风'
-      : `点名「${styleCn}」「${styleGuide.medium}」；${styleGuide.avoid}`
-  }
-
-【audioDescription / voiceover】
-- audioDescription：环境音效，如「淅沥雨声、木船轻微摇晃声、灯火燃烧声」
-- voiceover：中文口播；可前缀语气，如「[年轻女声/温柔自然] 姑娘们，…」
-
-【站位承接 / duration】
-- 末态=下一镜起始；道具连续；景别起伏；每镜 5–10 秒且有差异；口播匹配时长
-
-【硬性要求】
-- aesthetic 必须看得出用户主题画风
-- 每个 visualPrompt 必须锁同一套主题画风
-- 直接输出合法 JSON，无解释无 markdown 无思考标签`
+画风：主题原文 > 文案里的味道 > 下拉「${styleCn}」（仅主题完全没提时）。
+${hasUserStyle ? '' : `${styleGuide.avoid}。`}
+口播大约每秒 4 个字；前后镜人的位置和手里的东西要接上。
+只输出合法 JSON。`
     },
     {
       role: 'user',
@@ -367,15 +319,14 @@ Starting from the reference frame. Inside a wooden canopy boat drifting slowly a
     }
   ]
 
-  const baseUrl = import.meta.env.VITE_LLM_BASE_URL
-  const model = import.meta.env.VITE_LLM_MODEL
+  const { baseUrl, model } = getLlmConfig()
   log(
     `→ 调用 LLM: ${baseUrl}/chat/completions (model: ${model}, images: ${input.productImages?.length ?? 0})`
   )
 
   const resp = await callLLM({
     messages,
-    temperature: 0.65,
+    temperature: 0.72,
     jsonMode: !(input.productImages && input.productImages.length > 0),
     maxTokens: 12288
   })
@@ -624,7 +575,7 @@ export function normalizeStoryboard(
       optStr(raw?.styleBrief) ??
       (styleLockFromUser
         ? `画风严格遵循用户主题：${styleLockFromUser.split('\n')[0]}`
-        : `${styleCn}短片，强调叙事节奏与视觉统一`),
+        : `${styleCn}短片，先让人看下去，再把事讲清楚`),
     colorPalette: optStr(raw?.colorPalette),
     lightingNote: optStr(raw?.lightingNote),
     subjects,
@@ -692,8 +643,6 @@ function enrichVisualPrompt(
     }
     if (body.replace(/\s+/g, '').length < 160) {
       body = `${body.trim()}。${guide.sampleTail} 必须体现：${guide.mustInclude}。${guide.avoid}`
-    } else if (!body.includes(guide.sampleTail.slice(0, 6))) {
-      body = `${body.trim()}。${guide.sampleTail}`
     }
   }
 
@@ -724,7 +673,7 @@ export async function generateStoryboard(
   log(`当前 AI 模式：${mode}`)
 
   if (mode === 'real') {
-    onProgress?.('🎯 正在调用 APIYI 大模型（专业编剧 + 镜头导演）...')
+      onProgress?.('正在按编剧手册拆能拍的镜头...')
     try {
       const { result, model } = await realStoryboard(input)
       onProgress?.(`✓ 模型返回 ${result.shots.length} 个分镜`)

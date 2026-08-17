@@ -11,7 +11,20 @@ export default defineConfig({
     vue(),
     electron({
       main: { entry: 'electron/main.ts' },
-      preload: { input: path.join(__dirname, 'electron/preload.ts') }
+      preload: {
+        input: path.join(__dirname, 'electron/preload.ts'),
+        vite: {
+          build: {
+            rollupOptions: {
+              output: {
+                format: 'cjs',
+                entryFileNames: 'preload.cjs',
+                inlineDynamicImports: true
+              }
+            }
+          }
+        }
+      }
     })
   ],
   resolve: {
