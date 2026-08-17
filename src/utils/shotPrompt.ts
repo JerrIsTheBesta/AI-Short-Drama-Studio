@@ -1,11 +1,11 @@
 /**
- * 分镜提示词拼装：导演字段摘要 + visualPrompt
- * 配图 / 视频优先用合成结果，保证站位与跨镜承接进模型。
+ * 分镜提示词：画面描述本身应已是完整镜头语言。
+ * 配图 / 视频用独立覆盖优先，不再把导演表单拼回去。
  */
 
 import type { Shot } from '@/types'
 
-/** 把站位 / 承接 / 道具等导演备注压成短摘要 */
+/** 把站位 / 承接 / 道具等导演备注压成短摘要（场记用，不拼进画面描述） */
 export function composeDirectingNotes(shot: Pick<
   Shot,
   'purpose' | 'shotSize' | 'blocking' | 'eyeline' | 'continuity' | 'propFocus' | 'cameraMovement'
@@ -20,7 +20,7 @@ export function composeDirectingNotes(shot: Pick<
   return parts.join('\n')
 }
 
-/** 供配图/视频使用的最终画面提示（覆盖字段优先） */
+/** 供配图/视频使用的画面提示 */
 export function composeShotVisualPrompt(
   shot: Shot,
   kind: 'image' | 'video' | 'base' = 'base'
@@ -31,13 +31,5 @@ export function composeShotVisualPrompt(
       : kind === 'video'
         ? shot.videoPrompt
         : undefined
-  const base = (override ?? shot.visualPrompt ?? '').trim()
-  const notes = composeDirectingNotes(shot)
-  if (!notes) return base
-  if (!base) return notes
-  // 若画面描述已包含导演摘要，避免重复
-  if (base.includes(notes) || notes.split('\n').every((line) => base.includes(line))) {
-    return base
-  }
-  return `${base}\n\n【导演备注】\n${notes}`
+  return (override ?? shot.visualPrompt ?? '').trim()
 }

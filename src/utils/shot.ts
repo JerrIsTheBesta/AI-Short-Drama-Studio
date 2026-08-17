@@ -1,12 +1,12 @@
 import type { Shot } from '@/types'
 import { composeShotVisualPrompt } from '@/utils/shotPrompt'
 
-/** 配图实际使用的提示词：独立覆盖优先，否则用分镜画面描述 + 导演备注 */
+/** 配图实际使用的提示词：独立覆盖优先，否则用分镜画面描述 */
 export function effectiveImagePrompt(shot: Shot): string {
   return composeShotVisualPrompt(shot, 'image')
 }
 
-/** 视频实际使用的提示词：独立覆盖优先，否则用分镜画面描述 + 导演备注 */
+/** 视频实际使用的提示词：独立覆盖优先，否则用分镜画面描述 */
 export function effectiveVideoPrompt(shot: Shot): string {
   return composeShotVisualPrompt(shot, 'video')
 }

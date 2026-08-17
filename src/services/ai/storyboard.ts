@@ -11,15 +11,12 @@
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, Subject, VisualStyle } from '@/types'
-import { composeShotVisualPrompt } from '@/utils/shotPrompt'
 import { getSkillBody } from '@/skills'
 import { getLlmConfig } from './runtime'
 import {
   buildStyleBriefForLLM,
   extractUserMediumPhrase,
   lookFromTexts,
-  mediumLockText,
-  promptHasTechnique,
   promptMentionsStyle,
   resolveVisualStyle,
   styleLabel,
@@ -139,30 +136,27 @@ function buildStylePriorityBlock(input: StoryboardInput): string {
   const mediumPhrase = extractUserMediumPhrase(input.topic, input.content, ...(input.keywords ?? []))
 
   if (mediumPhrase) {
-    const technique = look.matched
-      ? `2. 按该媒介的专业技法写：${VISUAL_STYLE_GUIDE[look.matched].mustInclude}
-3. ${VISUAL_STYLE_GUIDE[look.matched].avoid}
-4. 结尾锁一句：「${VISUAL_STYLE_GUIDE[look.matched].sampleTail}」`
-      : `2. 按「${mediumPhrase}」这个媒介本身的专业做法写（材料、技法、光影、质感），写到画师能直接画。
-3. 禁止改写成用户没点名的其他画风，也不要用页面下拉的默认风格覆盖。`
-
     return `【画风听用户的 · 硬性】
-用户点名了画风。这是全片最高优先级。
-禁止翻译成别的画风套话，除非用户要的就是那个。
-禁止只写剧情不写媒介。
+用户点名了画风。画风写进画面实物里，不要单独开一段技法说明书。
 
-用户点名的画风原词（必须出现在每一镜 visualPrompt 的第一句）：「${mediumPhrase}」
+用户点名的画风原词（文中点一次即可）：「${mediumPhrase}」
 
 用户主题/画风原文：
 """
 ${userAuth}
 """
 
-每一镜 visualPrompt 必须：
-1. 第一句写出画风，用用户原词「${mediumPhrase}」，不要改成英文标签。
-${technique}
-
-${look.matched ? `已对上已知画种：${styleLabel(look.matched)}\n${fallback}` : '这是用户自定义画风，不要套页面下拉风格。'}`
+每一镜 visualPrompt 必须是镜头语言：
+1. 写画面里能看见的一切：地面/建筑/水/植物/天空/道具，近到远。
+2. 写动态：水波、风、衣摆、烟尘；不动也要写明静止。
+3. 写光从哪来、影子落在哪。
+4. 人：衣服、手脚、朝向、手里的具体物件、这一秒在做什么。
+5. 「${mediumPhrase}」在文中自然出现一次；技法只写在实物上。禁止开头「${mediumPhrase}。」然后空讲站位，禁止结尾抄画风套话。
+${
+  look.matched
+    ? `6. 该媒介画在实物上时注意：${VISUAL_STYLE_GUIDE[look.matched].mustInclude}。${VISUAL_STYLE_GUIDE[look.matched].avoid}`
+    : `6. 按「${mediumPhrase}」这个媒介本身的材料与质感来写实物，不要套页面下拉风格。`
+}`
   }
 
   if (userAuth) {
@@ -263,11 +257,11 @@ ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
 ${stylePriority}
 ${productNote}
 
-顺序：先锁人物和地点，再拆镜头。每镜写清干什么、口播、时长、镜头怎么动、画面里发生什么。
+顺序：先锁人物和地点，再拆镜头。每镜 visualPrompt 用镜头语言写画面里的实物、动态、光和人，不要写成画风说明书。
 ${
   hasUserStyle
-    ? `画风硬性：每一镜 visualPrompt 第一句必须出现用户原词「${mediumPhrase}」。按这个媒介自己的专业技法写，禁止偷换成用户没点名的其他画风。`
-    : `主题没提画风时，画面里带上「${styleCn} / ${styleGuide.medium}」。`
+    ? `画风「${mediumPhrase}」在画面描述里点一次，写进桥、水、衣这些实物上。禁止第一句只写画风、结尾再抄一段技法套话。禁止只写「两人相对拱手」这种站位摘要。`
+    : `主题没提画风时，画面里带上「${styleCn}」，同样要写清环境实物与动态。`
 }
 直接输出 JSON，不要解释。`
 
@@ -314,7 +308,7 @@ ${stylePriority}
     {
       "id": "scn_1",
       "name": "地点短名",
-      "description": "<人还没进来时这个地方什么样，80字以上>",
+      "description": "<人还没进来时这个地方：地面、水、植物、建筑、风是否在动、光从哪来，80字以上>",
       "mainAnchor": "<摄像能对着的实在东西>",
       "lighting": "<时辰和光源>"
     }
@@ -324,11 +318,11 @@ ${stylePriority}
       "title": "场记板上能写的 3-8 字",
       "purpose": "钩子/说明/反应/揭示/收口",
       "shotSize": "<远近 + 为什么>",
-      "blocking": "<相对主锚站哪、脸朝哪>",
-      "eyeline": "<看谁/看哪>",
-      "continuity": "<开始什么样 → 这几秒变了啥 → 结束定在哪>",
-      "propFocus": "<这镜要看清的物件，没有写无>",
-      "visualPrompt": "<第一句必须写出用户点名的画风原词。接着白话说戏：在哪、什么光、谁、穿什么、正在干什么。必须含该媒介技法，禁止只写剧情不写画风>",
+      "blocking": "<人踩在什么上、相对哪件实物站哪、脸朝哪，写得出地面和身边物件>",
+      "eyeline": "<看谁/看哪件实物>",
+      "continuity": "<开始什么样 → 这几秒环境或人变了啥（风、水、脚步）→ 结束定在哪>",
+      "propFocus": "<这镜要看清的物件及它现在的状态，没有写无>",
+      "visualPrompt": "<镜头语言：近到远写清画面里所有实物；水/风/衣摆动或不动；光从哪来；人穿什么、踩哪、手拿什么、正在做什么。画风词点一次。禁止画风套话段，禁止只写站位>",
       "audioDescription": "<现场能听到的，逗号分隔>",
       "voiceover": "<这一镜要念的；没有就空字符串>",
       "duration": <5-10>,
@@ -339,8 +333,8 @@ ${stylePriority}
   ]
 }
 
-画风：用户原词 > 主题原文 > 下拉「${styleCn}」（仅主题完全没提时）。
-每一镜 visualPrompt 若缺少画风句，视为不合格。
+画风：用户原词写进画面实物，不要单独成段。主题完全没提才用下拉「${styleCn}」。
+visualPrompt 若只有站位没有环境实物、或开头结尾是画风套话，视为不合格。
 ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉风格。' : `${styleGuide.avoid}。`}
 口播大约每秒 4 个字；前后镜人的位置和手里的东西要接上。
 只输出合法 JSON。`
@@ -544,7 +538,7 @@ export function normalizeStoryboard(
     const propFocus = optStr(s?.propFocus)
     let visualPrompt = String(s?.visualPrompt || '').trim()
 
-    // 画风缺失或过短：优先补用户主题画风，其次下拉风格
+    // 只补极短/缺画风词的镜头；不把技法套话和导演表单拼进画面描述
     visualPrompt = enrichVisualPrompt(visualPrompt, {
       style,
       userStyleLock: styleLockFromUser,
@@ -558,8 +552,7 @@ export function normalizeStoryboard(
       sceneAnchor: scenes.find((sc) => sc.id === (sceneIds[0] || defaultScn))?.mainAnchor
     })
 
-    // 若模型未把导演字段写进画面描述，自动拼装一层，保证下游配图/视频能吃到
-    const draft: StoryboardShot = {
+    return {
       title: String(s?.title || '镜头'),
       visualPrompt,
       audioDescription: String(s?.audioDescription || ''),
@@ -575,38 +568,21 @@ export function normalizeStoryboard(
       continuity,
       propFocus
     }
-    visualPrompt = composeShotVisualPrompt(
-      {
-        ...draft,
-        id: `tmp_${i}`,
-        index: i,
-        status: 'draft'
-      } as Shot,
-      'base'
-    )
-
-    return { ...draft, visualPrompt }
   })
 
   const look = lookFromTexts(style, options.topic, options.content, options.keywords)
   const styleCn = styleLabel(look.matched ?? style)
-  const guide = look.matched ? VISUAL_STYLE_GUIDE[look.matched] : VISUAL_STYLE_GUIDE[style]
   let aesthetic = optStr(raw?.aesthetic)
   if (look.userNamed) {
     if (!aesthetic) {
-      aesthetic = `【画风锁定】${look.medium}\n${mediumLockText(look)}`
+      aesthetic = look.medium
     } else if (!aesthetic.includes(look.medium)) {
-      aesthetic = `【画风锁定】${look.medium}\n${aesthetic}`
-    }
-    if (look.matched && !promptHasTechnique(aesthetic, look.matched)) {
-      aesthetic = `${aesthetic}\n${guide.sampleTail}。${guide.avoid}`
-    } else if (!look.matched && !aesthetic.includes('必须按用户原词')) {
-      aesthetic = `${aesthetic}\n${mediumLockText(look)}`
+      aesthetic = `${look.medium}。${aesthetic}`
     }
   } else if (aesthetic && !promptMentionsStyle(aesthetic, style)) {
-    aesthetic = `【${styleCn}·${guide.medium}】\n${aesthetic}`
+    aesthetic = `${styleCn}。${aesthetic}`
   } else if (!aesthetic) {
-    aesthetic = `【${styleCn}·${guide.medium}】\n${guide.sampleTail}`
+    aesthetic = styleCn
   }
 
   return {
@@ -624,7 +600,7 @@ export function normalizeStoryboard(
   }
 }
 
-/** 只认画风词，剧名命中不算已经写了画风。自定义画风不套下拉技法。 */
+/** 画面描述缺画风词时点一下名字；禁止往镜头语言前面堆技法说明书。 */
 function enrichVisualPrompt(
   prompt: string,
   ctx: {
@@ -641,20 +617,17 @@ function enrichVisualPrompt(
   }
 ): string {
   const look = ctx.look ?? lookFromTexts(ctx.style, ctx.userStyleLock)
-  const lock = mediumLockText(look)
-  const header = `【画风锁定】${look.medium}。${lock}`
   let body = prompt.trim()
 
   if (!body) {
     body = [
-      ctx.sceneName ? `场景：${ctx.sceneName}` : '',
-      ctx.sceneAnchor ? `主锚：${ctx.sceneAnchor}` : '',
+      ctx.sceneName ? `${ctx.sceneName}` : '',
+      ctx.sceneAnchor ? `看得见${ctx.sceneAnchor}` : '',
       ctx.sceneLighting ? `光线：${ctx.sceneLighting}` : '',
-      ctx.blocking ? `站位：${ctx.blocking}` : '',
-      ctx.shotSize ? `景别：${ctx.shotSize}` : '',
-      ctx.propFocus ? `道具：${ctx.propFocus}` : '',
-      ctx.purpose ? `戏剧功能：${ctx.purpose}` : '',
-      '画面需呈现完整环境材质、人物姿态表情与连贯动作，细节清晰可读。'
+      ctx.blocking ? ctx.blocking : '',
+      ctx.shotSize ? ctx.shotSize : '',
+      ctx.propFocus && ctx.propFocus !== '无' ? `手里/近处：${ctx.propFocus}` : '',
+      '写清地面、水或风是否在动、光从哪来。'
     ]
       .filter(Boolean)
       .join('。')
@@ -665,13 +638,8 @@ function enrichVisualPrompt(
       (look.matched != null && promptMentionsStyle(body, look.matched))
     : promptMentionsStyle(body, look.style)
 
-  if (!hasMedium) {
-    body = `${header}\n${body}`
-  } else if (look.matched && !promptHasTechnique(body, look.matched)) {
-    const g = VISUAL_STYLE_GUIDE[look.matched]
-    body = `${body.trim()}\n${g.sampleTail} 必须体现：${g.mustInclude}。${g.avoid}`
-  } else if (look.userNamed && !look.matched && !body.includes('必须按用户原词')) {
-    body = `${body.trim()}\n${lock}`
+  if (!hasMedium && look.medium) {
+    body = `${body.trim()}（${look.medium}）`
   }
 
   return body

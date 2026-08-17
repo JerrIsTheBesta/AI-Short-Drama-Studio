@@ -1,28 +1,49 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
 import { emptyCanvas } from '@/types/canvas'
 
-const NODE_W = 240
-const NODE_H = 228
+export const NODE_W = 240
 const GAP = 14
 const PAD = 16
 const HEAD = 44
 const COL_GAP = 32
 const SCRIPT_W = 460
 const SCRIPT_H = 720
+/** 标题栏 + 按钮等，不含画面区 */
+const NODE_CHROME = 108
 
-function groupBox(rows: number, cols: number) {
+function aspectValue(ar?: string): number {
+  const [a, b] = String(ar || '16:9').split(':').map(Number)
+  if (!a || !b) return 16 / 9
+  return a / b
+}
+
+/** 画布节点高度：画面区跟片比例走，避免竖屏被裁成横条 */
+export function pipelineNodeHeight(aspectRatio?: string): number {
+  return NODE_CHROME + Math.round(NODE_W / aspectValue(aspectRatio))
+}
+
+/** CSS aspect-ratio，如 16 / 9 */
+export function cssAspectRatio(ar?: string): string {
+  const [a, b] = String(ar || '16:9').split(':')
+  const w = Number(a)
+  const h = Number(b)
+  if (!w || !h) return '16 / 9'
+  return `${w} / ${h}`
+}
+
+function groupBox(rows: number, cols: number, nodeH: number) {
   const r = Math.max(1, rows)
   const c = Math.max(1, cols)
   return {
     width: PAD * 2 + c * NODE_W + (c - 1) * GAP,
-    height: HEAD + PAD + r * NODE_H + Math.max(0, r - 1) * GAP + PAD
+    height: HEAD + PAD + r * nodeH + Math.max(0, r - 1) * GAP + PAD
   }
 }
 
-function cell(row: number, col: number) {
+function cell(row: number, col: number, nodeH: number) {
   return {
     x: PAD + col * (NODE_W + GAP),
-    y: HEAD + PAD + row * (NODE_H + GAP)
+    y: HEAD + PAD + row * (nodeH + GAP)
   }
 }
 
@@ -46,6 +67,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const subjects = project.subjects ?? []
   const scenes = project.scenes ?? []
   const shots = project.shots
+  const shotH = pipelineNodeHeight(project.settings?.aspectRatio)
+  const sheetH = pipelineNodeHeight('16:9')
 
   const prevScript = prevAny.get('script')
   const scriptW = prevScript?.data.width || SCRIPT_W
@@ -68,10 +91,10 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     status: prevScript?.status ?? 'idle'
   })
 
-  const subBox = groupBox(subjects.length, 1)
-  const scnBox = groupBox(scenes.length, 1)
-  const shotBox = groupBox(shots.length, 3)
-  const expBox = groupBox(1, 1)
+  const subBox = groupBox(subjects.length, 1, sheetH)
+  const scnBox = groupBox(scenes.length, 1, shotH)
+  const shotBox = groupBox(shots.length, 3, shotH)
+  const expBox = groupBox(1, 1, sheetH)
 
   let x = 24 + scriptW + COL_GAP
   const y = 24
@@ -110,7 +133,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-subjects', {
       id,
       type: 'subject',
-      position: pos(prev, id, cell(i, 0)),
+      position: cell(i, 0, sheetH),
       data: { subjectId: s.id, label: s.name },
       status: prev.get(id)?.status ?? (s.designSheetAssetId ? 'success' : 'idle'),
       parentGroupId: 'group-subjects'
@@ -129,7 +152,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-scenes', {
       id,
       type: 'scene',
-      position: pos(prev, id, cell(i, 0)),
+      position: cell(i, 0, shotH),
       data: { sceneId: s.id, label: s.name },
       status: prev.get(id)?.status ?? (s.plateAssetId ? 'success' : 'idle'),
       parentGroupId: 'group-scenes'
@@ -150,7 +173,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-shots', {
       id: imgId,
       type: 'shotImage',
-      position: pos(prev, imgId, cell(i, 0)),
+      position: cell(i, 0, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
       status: prev.get(imgId)?.status ?? (shot.imageAssetId ? 'success' : 'idle'),
       parentGroupId: 'group-shots'
@@ -158,7 +181,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-shots', {
       id: vidId,
       type: 'shotVideo',
-      position: pos(prev, vidId, cell(i, 1)),
+      position: cell(i, 1, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
       status: prev.get(vidId)?.status ?? (shot.videoAssetId ? 'success' : 'idle'),
       parentGroupId: 'group-shots'
@@ -166,7 +189,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-shots', {
       id: audId,
       type: 'audio',
-      position: pos(prev, audId, cell(i, 2)),
+      position: cell(i, 2, shotH),
       data: { shotId: shot.id, label: '口播' },
       status: prev.get(audId)?.status ?? (shot.audioAssetId ? 'success' : 'idle'),
       parentGroupId: 'group-shots'
@@ -223,7 +246,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   attach('group-export', {
     id: 'export',
     type: 'export',
-    position: pos(prev, 'export', cell(0, 0)),
+    position: cell(0, 0, sheetH),
     data: { label: '成片导出' },
     status: prev.get('export')?.status ?? 'idle',
     parentGroupId: 'group-export'

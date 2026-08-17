@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onUnmounted, computed } from 'vue'
+import { openLightbox } from '@/composables/useLightbox'
 
 const props = defineProps<{
   src: string
@@ -72,9 +73,11 @@ onUnmounted(() => {
     <img
       v-if="type === 'image'"
       :src="src"
-      class="img"
+      class="img zoomable"
       :class="{ rounded }"
       alt=""
+      title="点击查看大图"
+      @click="openLightbox(src)"
     />
     <template v-else-if="type === 'video'">
       <video

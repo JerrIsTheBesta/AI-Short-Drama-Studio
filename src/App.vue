@@ -5,6 +5,7 @@ import { useProjectStore, useAssetsStore } from '@/stores'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TitleBar from '@/components/layout/TitleBar.vue'
 import ToastContainer from '@/components/common/ToastContainer.vue'
+import ImageLightbox from '@/components/common/ImageLightbox.vue'
 
 const route = useRoute()
 const project = useProjectStore()
@@ -24,6 +25,7 @@ onMounted(async () => {
     <TitleBar />
     <div class="app-body">
       <ToastContainer />
+      <ImageLightbox />
       <template v-if="showLayout">
         <AppLayout>
           <router-view v-slot="{ Component }">

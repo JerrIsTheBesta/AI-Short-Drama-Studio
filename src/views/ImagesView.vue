@@ -16,6 +16,7 @@ import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import { lookFromScript } from '@/utils/visualStyle'
+import { openLightbox } from '@/composables/useLightbox'
 import type { Shot, ID, Subject, Scene } from '@/types'
 
 const router = useRouter()
@@ -528,7 +529,14 @@ function next() {
       <div v-else class="cast-grid">
         <div v-for="sub in subjects" :key="sub.id" class="cast-card">
           <div class="cast-thumb">
-            <img v-if="sheetUrls[sub.id]" :src="sheetUrls[sub.id]" :alt="sub.name" />
+            <img
+              v-if="sheetUrls[sub.id]"
+              class="zoomable"
+              :src="sheetUrls[sub.id]"
+              :alt="sub.name"
+              title="点击查看大图"
+              @click="openLightbox(sheetUrls[sub.id], 'image', sub.name)"
+            />
             <div v-else-if="generating.has(sub.id)" class="placeholder generating-placeholder">
               <ProgressRing :progress="0.5" :size="40" :stroke-width="3" />
               <div class="progress-msg">{{ progress[sub.id] }}</div>
@@ -572,7 +580,14 @@ function next() {
       <div v-else class="cast-grid">
         <div v-for="scn in scenes" :key="scn.id" class="cast-card">
           <div class="cast-thumb">
-            <img v-if="plateUrls[scn.id]" :src="plateUrls[scn.id]" :alt="scn.name" />
+            <img
+              v-if="plateUrls[scn.id]"
+              class="zoomable"
+              :src="plateUrls[scn.id]"
+              :alt="scn.name"
+              title="点击查看大图"
+              @click="openLightbox(plateUrls[scn.id], 'image', scn.name)"
+            />
             <div v-else-if="generating.has(scn.id)" class="placeholder generating-placeholder">
               <ProgressRing :progress="0.5" :size="40" :stroke-width="3" />
               <div class="progress-msg">{{ progress[scn.id] }}</div>
@@ -618,7 +633,13 @@ function next() {
       </div>
       <div v-else class="pr-list">
         <div v-for="(url, i) in projectRefUrls" :key="i" class="pr-item">
-          <img :src="url" alt="" />
+          <img
+            class="zoomable"
+            :src="url"
+            alt=""
+            title="点击查看大图"
+            @click="openLightbox(url)"
+          />
           <button
             class="pr-del"
             @click="removeProjectRef(projectRefIdList[i])"
@@ -653,8 +674,11 @@ function next() {
         <div class="shot-image">
           <img
             v-if="imageUrls[shot.id]"
+            class="zoomable"
             :src="imageUrls[shot.id]"
             :alt="shot.title"
+            title="点击查看大图"
+            @click="openLightbox(imageUrls[shot.id], 'image', shot.title)"
           />
           <div v-else-if="generating.has(shot.id)" class="placeholder generating-placeholder">
             <ProgressRing :progress="0.5" :size="60" :stroke-width="3" />
@@ -678,7 +702,14 @@ function next() {
             title="切回这个版本"
             @click="restoreHistory(shot, hid)"
           >
-            <img v-if="historyUrls[hid]" :src="historyUrls[hid]" alt="" />
+            <img
+              v-if="historyUrls[hid]"
+              class="zoomable"
+              :src="historyUrls[hid]"
+              alt=""
+              title="查看大图并切回这个版本"
+              @click="openLightbox(historyUrls[hid])"
+            />
           </button>
         </div>
 
@@ -712,7 +743,14 @@ function next() {
               class="ref-item inherited"
               :title="item.label"
             >
-              <img v-if="item.url" :src="item.url" alt="" />
+              <img
+                v-if="item.url"
+                class="zoomable"
+                :src="item.url"
+                alt=""
+                title="点击查看大图"
+                @click="openLightbox(item.url)"
+              />
             </div>
           </div>
           <div v-else class="refs-empty">还没有人设/场景图。请先在上方生成。</div>
@@ -744,7 +782,13 @@ function next() {
               :key="`s-${i}`"
               class="ref-item"
             >
-              <img :src="url" alt="" />
+              <img
+                class="zoomable"
+                :src="url"
+                alt=""
+                title="点击查看大图"
+                @click="openLightbox(url)"
+              />
               <button
                 v-if="shot.referenceAssetIds?.[i]"
                 class="ref-del"

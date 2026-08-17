@@ -5,6 +5,8 @@ import { useAssetsStore, useProjectStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
+import { cssAspectRatio } from '@/services/canvas/layout'
+import { openLightbox } from '@/composables/useLightbox'
 import type { CanvasNodeType } from '@/types'
 
 const props = defineProps<{
@@ -23,11 +25,26 @@ const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 const project = useProjectStore()
 const assets = useAssetsStore()
 const mediaUrl = ref('')
+const videoUrl = ref('')
+const videoEl = ref<HTMLVideoElement | null>(null)
+const playing = ref(false)
 
 const nodeMeta = computed(() => {
   const p = project.current
   const canvasNode = p?.canvas?.nodes.find((n) => n.id === props.id)
   return canvasNode
+})
+
+const shot = computed(() =>
+  props.data.shotId
+    ? project.current?.shots.find((s) => s.id === props.data.shotId)
+    : undefined
+)
+
+const durationLabel = computed(() => {
+  const d = shot.value?.duration
+  if (!d || d <= 0) return ''
+  return Number.isInteger(d) ? `${d}s` : `${Number(d).toFixed(1)}s`
 })
 
 const title = computed(() => {
@@ -38,10 +55,7 @@ const title = computed(() => {
   if (type.value === 'scene') {
     return (project.current?.scenes ?? []).find((s) => s.id === props.data.sceneId)?.name || '场景'
   }
-  if (props.data.shotId) {
-    const s = project.current?.shots.find((x) => x.id === props.data.shotId)
-    return s ? `${s.index + 1}. ${s.title}` : props.data.label
-  }
+  if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
   return props.data.label || type.value
 })
 
@@ -50,7 +64,9 @@ const subtitle = computed(() => {
   if (type.value === 'subject') return '多角度人设'
   if (type.value === 'scene') return '场景底板'
   if (type.value === 'shotImage') return '分镜配图'
-  if (type.value === 'shotVideo') return '分镜视频'
+  if (type.value === 'shotVideo') {
+    return durationLabel.value ? `分镜视频 · ${durationLabel.value}` : '分镜视频'
+  }
   if (type.value === 'audio') return '口播 TTS'
   if (type.value === 'export') return '成片导出'
   return ''
@@ -71,6 +87,12 @@ const assetId = computed(() => {
   if (type.value === 'shotVideo') return shot.videoAssetId
   if (type.value === 'audio') return shot.audioAssetId
   return undefined
+})
+
+/** 画面框跟项目片比走，contain 不裁切 */
+const mediaAspect = computed(() => {
+  if (type.value === 'subject') return cssAspectRatio('16:9')
+  return cssAspectRatio(project.current?.settings.aspectRatio)
 })
 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
@@ -112,18 +134,70 @@ watch(
 
 async function loadMedia() {
   const id = assetId.value
+  playing.value = false
   if (!id) {
     mediaUrl.value = ''
+    videoUrl.value = ''
     return
   }
   if (type.value === 'shotVideo') {
-    mediaUrl.value = (await assets.ensureThumb(id)) || (await assets.getUrl(id)) || ''
+    videoUrl.value = (await assets.getUrl(id)) || ''
+    mediaUrl.value = (await assets.ensureThumb(id)) || videoUrl.value
   } else {
+    videoUrl.value = ''
     mediaUrl.value = (await assets.getUrl(id)) || ''
   }
 }
 
 defineExpose({ loadMedia })
+
+function showVideoFrame(ev: Event) {
+  const v = ev.target as HTMLVideoElement
+  if (!v || v.currentTime > 0) return
+  try {
+    v.currentTime = 0.05
+  } catch {
+    /* ignore */
+  }
+}
+
+async function togglePlay(ev: Event) {
+  ev.stopPropagation()
+  const v = videoEl.value
+  if (!v || !videoUrl.value) return
+  if (v.paused) {
+    try {
+      v.muted = false
+      await v.play()
+      playing.value = true
+    } catch {
+      try {
+        v.muted = true
+        await v.play()
+        playing.value = true
+      } catch {
+        /* 浏览器拦截自动播放时忽略 */
+      }
+    }
+  } else {
+    v.pause()
+    playing.value = false
+  }
+}
+
+function onVideoPlay() {
+  playing.value = true
+}
+
+function onVideoPause() {
+  playing.value = false
+}
+
+function onVideoEnded() {
+  playing.value = false
+  const v = videoEl.value
+  if (v) v.currentTime = 0
+}
 </script>
 
 <template>
@@ -178,12 +252,47 @@ defineExpose({ loadMedia })
       {{ (project.current?.script?.content || '还没有正文，在右侧填写或让智能体拆分镜').slice(0, 120) }}
     </div>
     <div v-else-if="type === 'audio'" class="pnode-body wave">
-      {{ project.current?.shots.find((s) => s.id === data.shotId)?.voiceover?.slice(0, 40) || '无口播' }}
+      {{ shot?.voiceover?.slice(0, 40) || '无口播' }}
     </div>
     <div v-else-if="type === 'export'" class="pnode-body text">拼接时间线 · 字幕 · BGM</div>
-    <div v-else class="pnode-media">
-      <img v-if="mediaUrl" :src="mediaUrl" alt="" />
+    <div v-else class="pnode-media" :style="{ aspectRatio: mediaAspect }">
+      <template v-if="type === 'shotVideo' && videoUrl">
+        <video
+          ref="videoEl"
+          class="nodrag nowheel"
+          :src="videoUrl"
+          :poster="mediaUrl && mediaUrl !== videoUrl ? mediaUrl : undefined"
+          playsinline
+          preload="metadata"
+          title="点击播放 / 暂停"
+          @loadedmetadata="showVideoFrame"
+          @play="onVideoPlay"
+          @pause="onVideoPause"
+          @ended="onVideoEnded"
+          @click.stop="togglePlay"
+          @mousedown.stop
+        />
+        <button
+          v-if="!playing"
+          class="play-btn nodrag"
+          type="button"
+          title="播放"
+          @click.stop="togglePlay"
+          @mousedown.stop
+        >
+          ▶
+        </button>
+      </template>
+      <img
+        v-else-if="mediaUrl"
+        :src="mediaUrl"
+        alt=""
+        title="点击查看大图"
+        @click.stop="openLightbox(mediaUrl, 'image', title)"
+        @mousedown.stop
+      />
       <div v-else class="ph">{{ type === 'shotVideo' ? '▶' : '＋' }}</div>
+      <span v-if="type === 'shotVideo' && durationLabel" class="dur">{{ durationLabel }}</span>
     </div>
     <div v-if="nodeMeta?.error" class="pnode-err">{{ nodeMeta.error }}</div>
     <button
@@ -239,17 +348,66 @@ defineExpose({ loadMedia })
   text-overflow: ellipsis;
 }
 .pnode-media {
-  height: 112px;
+  position: relative;
+  width: 100%;
+  background: #0b0b14;
+  overflow: hidden;
+}
+.pnode-media img,
+.pnode-media video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
   background: #0b0b14;
 }
 .pnode-media img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+  cursor: zoom-in;
+}
+.pnode-media video {
+  cursor: pointer;
+}
+.play-btn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0 0 2px 3px;
+  border: none;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.play-btn:hover {
+  background: rgba(124, 58, 237, 0.9);
+}
+.dur {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  padding: 1px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  letter-spacing: 0.02em;
 }
 .ph {
-  height: 100%;
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;

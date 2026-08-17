@@ -9,6 +9,7 @@ import { assetContext } from '@/utils/assetLabel'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
+import { openLightbox } from '@/composables/useLightbox'
 
 const props = defineProps<{
   open: boolean
@@ -130,6 +131,15 @@ function labelOf(a: Asset) {
                 <img v-if="urls[a.id] && a.kind === 'image'" :src="urls[a.id]" alt="" />
                 <img v-else-if="urls[a.id] && a.kind === 'video'" :src="urls[a.id]" alt="" />
                 <div v-else class="ph">{{ a.kind === 'video' ? '🎥' : '🖼' }}</div>
+                <button
+                  v-if="urls[a.id]"
+                  class="zoom"
+                  type="button"
+                  title="查看大图"
+                  @click.stop="openLightbox(urls[a.id])"
+                >
+                  放大
+                </button>
               </div>
               <div class="meta">
                 <div class="name" :title="labelOf(a).title">{{ labelOf(a).title }}</div>
@@ -237,6 +247,7 @@ function labelOf(a: Asset) {
   box-shadow: 0 0 0 1px var(--color-accent);
 }
 .thumb {
+  position: relative;
   aspect-ratio: 16/10;
   background: #000;
 }
@@ -246,6 +257,16 @@ function labelOf(a: Asset) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.zoom {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
 }
 .ph {
   width: 100%;

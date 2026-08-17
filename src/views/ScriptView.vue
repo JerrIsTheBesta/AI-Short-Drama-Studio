@@ -5,6 +5,7 @@ import { useProjectStore, useToastStore, useSettingsStore, useAssetsStore } from
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
+import { openLightbox } from '@/composables/useLightbox'
 import type { Script, VisualStyle, AspectRatio } from '@/types'
 
 const MAX_PRODUCT_IMAGES = 5
@@ -220,7 +221,14 @@ async function removeProductImage(id: string) {
             </p>
             <div class="product-row">
               <div v-for="id in productIds" :key="id" class="product-thumb">
-                <img v-if="productUrls[id]" :src="productUrls[id]" alt="产品图" />
+                <img
+                  v-if="productUrls[id]"
+                  class="zoomable"
+                  :src="productUrls[id]"
+                  alt="产品图"
+                  title="点击查看大图"
+                  @click="openLightbox(productUrls[id])"
+                />
                 <button class="product-del" title="移除" @click="removeProductImage(id)">×</button>
               </div>
               <button

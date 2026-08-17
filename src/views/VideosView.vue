@@ -10,6 +10,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
+import { openLightbox } from '@/composables/useLightbox'
 import type { Shot, ID } from '@/types'
 
 const router = useRouter()
@@ -279,7 +280,14 @@ function next() {
             <div class="progress-msg">{{ progress[shot.id] || '处理中...' }}</div>
           </div>
           <div v-else class="placeholder">
-            <img v-if="imageUrls[shot.id]" :src="imageUrls[shot.id]" class="still" alt="" />
+            <img
+              v-if="imageUrls[shot.id]"
+              :src="imageUrls[shot.id]"
+              class="still zoomable"
+              alt=""
+              title="点击查看大图"
+              @click="openLightbox(imageUrls[shot.id], 'image', shot.title)"
+            />
             <div v-else class="placeholder-icon">🎬</div>
             <div class="placeholder-text">未生成</div>
           </div>
@@ -297,7 +305,14 @@ function next() {
             title="切回这个版本"
             @click="restoreHistory(shot, hid)"
           >
-            <img v-if="historyUrls[hid]" :src="historyUrls[hid]" alt="" />
+            <img
+              v-if="historyUrls[hid]"
+              class="zoomable"
+              :src="historyUrls[hid]"
+              alt=""
+              title="查看大图并切回这个版本"
+              @click="openLightbox(historyUrls[hid])"
+            />
           </button>
         </div>
 

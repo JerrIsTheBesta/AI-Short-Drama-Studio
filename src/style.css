@@ -219,3 +219,7 @@ a {
 .spin {
   animation: spin 1s linear infinite;
 }
+
+img.zoomable {
+  cursor: zoom-in;
+}

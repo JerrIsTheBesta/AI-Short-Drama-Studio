@@ -4,11 +4,9 @@ import { useRouter } from 'vue-router'
 import { VueFlow, useVueFlow, type Connection, type Edge, type Node } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
-import { MiniMap } from '@vue-flow/minimap'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
-import '@vue-flow/minimap/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
 import { setCanvasReveal } from '@/services/canvas/canvasBridge'
@@ -224,8 +222,7 @@ function goClassic() {
           @node-click="onNodeClick"
         >
           <Background :gap="22" color="rgba(255,255,255,0.06)" />
-          <Controls />
-          <MiniMap pannable zoomable />
+          <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
       </div>
       <aside v-if="rightOpen" class="dock">
@@ -339,6 +336,42 @@ function goClassic() {
 }
 .flow-wrap :deep(.vue-flow) {
   background: radial-gradient(ellipse at top, rgba(124, 58, 237, 0.08), transparent 50%), #0a0a14;
+}
+.flow-wrap :deep(.vue-flow__controls) {
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  margin: 12px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(18, 18, 31, 0.9);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.flow-wrap :deep(.vue-flow__controls-button) {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-bottom: none;
+  border-radius: 8px;
+  background: transparent;
+  box-sizing: border-box;
+}
+.flow-wrap :deep(.vue-flow__controls-button svg) {
+  max-width: 14px;
+  max-height: 14px;
+  fill: var(--color-text-2);
+}
+.flow-wrap :deep(.vue-flow__controls-button:hover) {
+  background: rgba(124, 58, 237, 0.32);
+}
+.flow-wrap :deep(.vue-flow__controls-button:hover svg) {
+  fill: #fff;
+}
+.flow-wrap :deep(.vue-flow__controls-button:disabled) {
+  opacity: 0.35;
 }
 .flow-wrap :deep(.vue-flow__node-groupFrame) {
   padding: 0;

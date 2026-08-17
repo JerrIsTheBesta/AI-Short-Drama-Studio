@@ -7,6 +7,8 @@ import { isNodeRunning } from '@/services/canvas/jobs'
 import { pushHistory } from '@/utils/shot'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import GradientButton from '@/components/common/GradientButton.vue'
+import { openLightbox } from '@/composables/useLightbox'
+import { cssAspectRatio } from '@/services/canvas/layout'
 import type { CanvasNode } from '@/types'
 
 const props = defineProps<{
@@ -66,13 +68,21 @@ const actionLabel = computed(() => {
 
 const canRun = computed(() => !running.value && !gateBlocked.value)
 
+const previewAspect = computed(() => {
+  if (props.node?.type === 'subject') return cssAspectRatio('16:9')
+  return cssAspectRatio(project.current?.settings.aspectRatio)
+})
+
 const kindLabel = computed(() => {
   const t = props.node?.type
   if (t === 'script') return '完整剧本'
   if (t === 'subject') return '人物 · 人设图'
   if (t === 'scene') return '场景 · 底板图'
   if (t === 'shotImage') return '分镜 · 配图'
-  if (t === 'shotVideo') return '分镜 · 视频'
+  if (t === 'shotVideo') {
+    const d = shot.value?.duration
+    return d ? `分镜 · 视频 · ${d}s` : '分镜 · 视频'
+  }
   if (t === 'audio') return '分镜 · 口播'
   if (t === 'export') return '成片'
   return t || ''
@@ -207,13 +217,31 @@ function resetVideoPrompt() {
       <h3>{{ title }}</h3>
       <p v-if="node.error" class="err">{{ node.error }}</p>
       <p v-else-if="hasAsset && node.type !== 'script' && node.type !== 'export'" class="hint">
-        改下面提示词后点重新生成，只动这一个节点
+        改下面提示词后点重新生成，只动这一个节点。点缩略图可看大图。
       </p>
 
       <p v-else-if="node.type === 'script'" class="hint">
         拆完先看左侧完整剧本。确认通过后才做人设和配图；说「全流程」才会自动跑完。
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
+
+      <div v-if="preview && node.type === 'shotVideo'" class="prev prev-video">
+        <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
+          <video :src="preview" controls playsinline />
+        </div>
+      </div>
+      <button
+        v-else-if="preview"
+        class="prev"
+        type="button"
+        title="点击查看大图"
+        @click="openLightbox(preview, 'image', title)"
+      >
+        <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
+          <img :src="preview" alt="" />
+        </div>
+        <span>查看大图</span>
+      </button>
 
       <template v-if="node.type === 'script' && project.current">
         <label>主题</label>
@@ -240,7 +268,7 @@ function resetVideoPrompt() {
       <template v-else-if="node.type === 'subject' && subject">
         <label>人设生图提示词</label>
         <textarea
-          rows="7"
+          rows="9"
           :value="subject.description"
           placeholder="外貌、服装、年龄、气质。改完点重新生成。"
           @input="project.updateSubject(subject.id, { description: ($event.target as HTMLTextAreaElement).value })"
@@ -250,7 +278,7 @@ function resetVideoPrompt() {
       <template v-else-if="node.type === 'scene' && scene">
         <label>场景生图提示词</label>
         <textarea
-          rows="7"
+          rows="9"
           :value="scene.description"
           placeholder="地点、时间、天气、光线、材质。改完点重新生成。"
           @input="project.updateScene(scene.id, { description: ($event.target as HTMLTextAreaElement).value })"
@@ -263,7 +291,7 @@ function resetVideoPrompt() {
           <button class="link" type="button" @click="resetImagePrompt">恢复分镜原文</button>
         </div>
         <textarea
-          rows="7"
+          rows="9"
           :value="imagePromptValue"
           placeholder="这一镜要画什么。只影响配图，不影响视频提示词。"
           @input="project.updateShot(shot.id, { imagePrompt: ($event.target as HTMLTextAreaElement).value })"
@@ -276,10 +304,19 @@ function resetVideoPrompt() {
           <button class="link" type="button" @click="resetVideoPrompt">恢复分镜原文</button>
         </div>
         <textarea
-          rows="6"
+          rows="8"
           :value="videoPromptValue"
           placeholder="运镜、动作、节奏。只影响视频，不改配图。"
           @input="project.updateShot(shot.id, { videoPrompt: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <label>时长（秒）</label>
+        <input
+          type="number"
+          min="5"
+          max="10"
+          step="1"
+          :value="shot.duration"
+          @change="project.updateShot(shot.id, { duration: Math.min(10, Math.max(5, Math.round(Number(($event.target as HTMLInputElement).value) || shot.duration))) })"
         />
         <label>运镜</label>
         <select
@@ -306,26 +343,20 @@ function resetVideoPrompt() {
         />
       </template>
 
-      <div v-if="preview && node.type === 'shotVideo'" class="prev">
-        <video :src="preview" controls playsinline />
-      </div>
-      <div v-else-if="preview" class="prev">
-        <img :src="preview" alt="" />
-      </div>
-
       <div v-if="historyIds.length" class="hist">
         <span>历史版本（点一下切回）</span>
         <div class="hist-row">
-          <button
-            v-for="hid in historyIds"
-            :key="hid"
-            class="hist-item"
-            type="button"
-            title="切回这个版本"
-            @click="restoreHistory(hid)"
-          >
-            <img v-if="historyUrls[hid]" :src="historyUrls[hid]" alt="" />
-          </button>
+          <div v-for="hid in historyIds" :key="hid" class="hist-item">
+            <button
+              class="hist-thumb"
+              type="button"
+              title="查看大图"
+              @click="openLightbox(historyUrls[hid], 'image')"
+            >
+              <img v-if="historyUrls[hid]" :src="historyUrls[hid]" alt="" />
+            </button>
+            <button class="hist-use" type="button" @click="restoreHistory(hid)">切回</button>
+          </div>
         </div>
       </div>
 
@@ -396,11 +427,46 @@ select {
   font: inherit;
   font-size: 12px;
 }
+textarea {
+  min-height: 120px;
+  flex: 1;
+}
+.prev {
+  align-self: flex-start;
+  width: 148px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-bg-3);
+  cursor: zoom-in;
+}
+.prev-frame {
+  position: relative;
+  width: 100%;
+  background: #0b0b14;
+}
 .prev img,
 .prev video {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  border-radius: 8px;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
   display: block;
+}
+.prev span {
+  display: block;
+  font-size: 10px;
+  color: var(--color-text-4);
+  padding: 4px 6px 5px;
+  text-align: center;
+}
+.prev-video {
+  width: 100%;
+  max-width: 220px;
+  cursor: default;
 }
 .hist {
   display: flex;
@@ -417,18 +483,36 @@ select {
   flex-wrap: wrap;
 }
 .hist-item {
-  width: 48px;
-  height: 36px;
+  width: 56px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: none;
+}
+.hist-thumb {
+  width: 56px;
+  height: 40px;
   padding: 0;
   border-radius: 6px;
   overflow: hidden;
   background: var(--color-bg-3);
+  cursor: zoom-in;
 }
-.hist-item img {
+.hist-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.hist-use {
+  font-size: 10px;
+  padding: 1px 0;
+  color: var(--color-text-4);
+  background: none;
+}
+.hist-use:hover {
+  color: var(--color-accent);
 }
 .ghost {
   font-size: 12px;
