@@ -15,6 +15,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
+import { lookFromScript } from '@/utils/visualStyle'
 import type { Shot, ID, Subject, Scene } from '@/types'
 
 const router = useRouter()
@@ -174,11 +175,12 @@ async function generateSubjectSheet(sub: Subject) {
     progress.value[sub.id] = '生成人设图...'
     const refs = await productRefBlobs()
     const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
-    const prompt = characterSheetPrompt(sub, style.value, useRefs)
+    const look = lookFromScript(project.current.script)
+    const prompt = characterSheetPrompt(sub, look.style, useRefs, look)
     const result = await generateImage(
       {
         prompt,
-        style: style.value,
+        style: look.style,
         width: 1792,
         height: 1024,
         aspectRatio: '16:9',
@@ -214,11 +216,12 @@ async function generateScenePlate(scn: Scene) {
   generating.value.add(scn.id)
   try {
     progress.value[scn.id] = '生成场景底板...'
-    const prompt = scenePlatePrompt(scn, style.value)
+    const look = lookFromScript(project.current.script)
+    const prompt = scenePlatePrompt(scn, look.style, look)
     const result = await generateImage(
       {
         prompt,
-        style: style.value,
+        style: look.style,
         width: width.value,
         height: height.value,
         aspectRatio: aspectRatio.value
@@ -278,7 +281,7 @@ async function generateOne(shot: Shot) {
     const result = await generateImage(
       {
         prompt,
-        style: style.value,
+        style: lookFromScript(project.current.script).style,
         width: width.value,
         height: height.value,
         aspectRatio: aspectRatio.value,

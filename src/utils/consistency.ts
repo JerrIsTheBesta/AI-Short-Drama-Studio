@@ -1,4 +1,5 @@
 import type { ID, Project, Scene, Shot, Subject } from '@/types'
+import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 
 export interface ShotRefBundle {
   ids: ID[]
@@ -116,5 +117,7 @@ export function composeShotImagePrompt(
     )
   }
   if (aesthetic) parts.push(aesthetic)
+  const look = lookFromScript(project.script)
+  parts.push(mediumLockText(look))
   return parts.filter(Boolean).join('\n')
 }

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import { generateStoryboard, storyboardToShots } from '@/services/ai'
 import { getAIMode, blobToChatImageUrl } from '@/services/ai/client'
+import { lookFromScript } from '@/utils/visualStyle'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -113,11 +114,12 @@ async function generate() {
     if (productImages.length) {
       toast.info(`已附带 ${productImages.length} 张产品图给多模态模型`, 2000)
     }
+    const look = lookFromScript(project.current.script)
     const runResult = await generateStoryboard(
       {
         topic: project.current.script.topic,
         content: project.current.script.content,
-        style: project.current.script.style,
+        style: look.style,
         shotDuration: project.current.script.shotDuration,
         aspectRatio: project.current.settings.aspectRatio,
         keywords: project.current.script.keywords,
@@ -136,6 +138,7 @@ async function generate() {
       const r = runResult.result
       project.setScript({
         ...project.current.script,
+        ...(look.matched ? { style: look.matched } : {}),
         ...(r.aesthetic ? { aesthetic: r.aesthetic } : {}),
         ...(r.styleBrief ? { styleBrief: r.styleBrief } : {}),
         ...(r.colorPalette ? { colorPalette: r.colorPalette } : {}),

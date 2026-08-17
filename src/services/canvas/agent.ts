@@ -12,6 +12,7 @@ import {
   generateMissingAudio
 } from './runner'
 import { rebuildCanvasGraph } from './layout'
+import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { mapPool } from './jobs'
 import { revealCanvas } from './canvasBridge'
 import {
@@ -676,20 +677,29 @@ async function execTool(
     const text = String(action.text || '').trim()
     const cur = project.current
     if (!cur) throw new Error('请先创建项目')
-    const topic = text.replace(/\s+/g, ' ').slice(0, 24) || cur.name
+    const topic = text.replace(/\s+/g, ' ').slice(0, 48) || cur.name
+    const inferred = inferVisualStyleFromText(text)
+    const style = inferred || cur.script?.style || 'cinematic'
     if (!cur.script) {
       project.setScript({
         id: 's_' + Date.now().toString(36),
         topic,
         content: text,
         keywords: [],
-        style: 'cinematic',
+        style,
         aspectRatio: cur.settings.aspectRatio,
         shotDuration: cur.settings.defaultShotDuration || 5,
         createdAt: Date.now()
       })
     } else if (!(cur.script.content || '').trim() && text) {
-      project.setScript({ ...cur.script, topic: cur.script.topic || topic, content: text })
+      project.setScript({
+        ...cur.script,
+        topic: cur.script.topic || topic,
+        content: text,
+        style
+      })
+    } else if (inferred && inferred !== cur.script.style) {
+      project.setScript({ ...cur.script, style: inferred })
     }
     onEvent({ kind: 'log', label: '文案已写入，接着拆剧本' })
     return '文案已准备好'

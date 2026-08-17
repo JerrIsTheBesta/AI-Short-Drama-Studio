@@ -14,7 +14,7 @@ import { getAIMode } from './client'
 import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
 import type { VisualStyle, AspectRatio } from '@/types'
-import { styleLockSuffix } from '@/utils/visualStyle'
+import { professionalQualityLock, styleLockSuffix } from '@/utils/visualStyle'
 
 export interface ImageGenInput {
   prompt: string
@@ -222,14 +222,13 @@ async function blobToChatImageDataUri(
 function buildPrompt(input: ImageGenInput, withRefs: boolean): string {
   // 主题/分镜里若已写清画风，禁止再用下拉枚举（如 cinematic）覆盖
   const headed = prependAspect(input.prompt, input.aspectRatio)
-  const alreadyStyled =
-    /【画风|画风：|风格：|动画|二次元|电影感|水墨|像素|油画|水彩|三维渲染|写实摄影|赛璐璐|胶片|手绘|插画|国风/.test(
-      headed
-    )
+  const alreadyStyled = /【画风|画风锁定|必须按用户原词|风格：/.test(headed)
   const stylePart = alreadyStyled
     ? '严格保持提示词中指定的画风与媒介，不要换成其他风格'
     : styleLockSuffix(input.style)
-  const base = `${headed}。${stylePart}`
+  const base = alreadyStyled
+    ? `${headed}。${stylePart}`
+    : `${headed}。${stylePart}。${professionalQualityLock(input.style)}`
   if (!withRefs) return base
 
   const labels =

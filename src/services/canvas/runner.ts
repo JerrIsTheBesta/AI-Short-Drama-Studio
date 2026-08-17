@@ -16,6 +16,7 @@ import {
 } from '@/utils/consistency'
 import { effectiveImagePrompt, effectiveVideoPrompt, pushHistory } from '@/utils/shot'
 import { rebuildCanvasGraph } from './layout'
+import { lookFromScript, styleLabel } from '@/utils/visualStyle'
 import { mapPool, withNodeJob } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import type { CanvasNode, Scene, Shot, Subject } from '@/types'
@@ -49,10 +50,11 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  const style = project.current.script?.style ?? 'cinematic'
+  const look = lookFromScript(project.current.script)
+  const style = look.style
   const refs = await productRefBlobs()
   const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
-  const prompt = characterSheetPrompt(sub, style, useRefs)
+  const prompt = characterSheetPrompt(sub, style, useRefs, look)
   onProgress?.('生成人设图...')
   const result = await generateImage(
     {
@@ -89,8 +91,9 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  const style = project.current.script?.style ?? 'cinematic'
-  const prompt = scenePlatePrompt(scn, style)
+  const look = lookFromScript(project.current.script)
+  const style = look.style
+  const prompt = scenePlatePrompt(scn, style, look)
   onProgress?.('生成场景底板...')
   const result = await generateImage(
     {
@@ -119,7 +122,8 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  const style = project.current.script?.style ?? 'cinematic'
+  const look = lookFromScript(project.current.script)
+  const style = look.style
   const bundle = collectShotRefIds(shot, project.current)
   const blobs: Blob[] = []
   const labels: string[] = []
@@ -245,15 +249,23 @@ export async function runStoryboard(onProgress?: (msg: string) => void) {
       /* skip */
     }
   }
+  const look = lookFromScript(project.current.script)
+  if (look.matched && look.matched !== project.current.script.style) {
+    onProgress?.(`已按你的原话锁定画风：${styleLabel(look.matched)}`)
+    project.setScript({ ...project.current.script, style: look.matched })
+  } else if (!look.matched && look.userNamed) {
+    onProgress?.(`已按你的原话锁定画风：${look.medium}`)
+  }
   onProgress?.('拆解分镜...')
   const run = await generateStoryboard(
     {
       topic: project.current.script.topic,
       content: project.current.script.content,
-      style: project.current.script.style,
+      style: look.style,
       shotDuration: project.current.script.shotDuration,
       aspectRatio: project.current.settings.aspectRatio,
-      productImages
+      productImages,
+      keywords: project.current.script.keywords
     },
     onProgress
   )
@@ -261,8 +273,12 @@ export async function runStoryboard(onProgress?: (msg: string) => void) {
   project.setShots(shots)
   project.setSubjects(run.result.subjects ?? [])
   project.setScenes(run.result.scenes ?? [])
-  if (run.result.aesthetic && project.current.script) {
-    project.setScript({ ...project.current.script, aesthetic: run.result.aesthetic })
+  if (project.current.script) {
+    project.setScript({
+      ...project.current.script,
+      ...(look.matched ? { style: look.matched } : {}),
+      ...(run.result.aesthetic ? { aesthetic: run.result.aesthetic } : {})
+    })
   }
   project.setCanvas(rebuildCanvasGraph(project.current, false))
   project.setPlayApproved(false)

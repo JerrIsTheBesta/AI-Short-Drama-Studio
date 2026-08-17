@@ -16,7 +16,12 @@ import { getSkillBody } from '@/skills'
 import { getLlmConfig } from './runtime'
 import {
   buildStyleBriefForLLM,
+  extractUserMediumPhrase,
+  lookFromTexts,
+  mediumLockText,
+  promptHasTechnique,
   promptMentionsStyle,
+  resolveVisualStyle,
   styleLabel,
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
@@ -129,20 +134,45 @@ export function extractUserStyleAuthority(
 
 function buildStylePriorityBlock(input: StoryboardInput): string {
   const userAuth = extractUserStyleAuthority(input.topic, input.content, input.keywords)
-  const fallback = buildStyleBriefForLLM(input.style)
-  const styleCn = styleLabel(input.style)
+  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
+  const fallback = buildStyleBriefForLLM(look.style)
+  const mediumPhrase = extractUserMediumPhrase(input.topic, input.content, ...(input.keywords ?? []))
 
-  if (userAuth) {
-    return `【画风听用户的】
-用户在「视频主题」和文案开头写了想要的味道。这是全片最高优先级，别翻译成「电影感 / 日系动画」套话。
-把用户原词写进人话句子里（灯笼就灯笼，雨就下雨），不要改成英文标签。
+  if (mediumPhrase) {
+    const technique = look.matched
+      ? `2. 按该媒介的专业技法写：${VISUAL_STYLE_GUIDE[look.matched].mustInclude}
+3. ${VISUAL_STYLE_GUIDE[look.matched].avoid}
+4. 结尾锁一句：「${VISUAL_STYLE_GUIDE[look.matched].sampleTail}」`
+      : `2. 按「${mediumPhrase}」这个媒介本身的专业做法写（材料、技法、光影、质感），写到画师能直接画。
+3. 禁止改写成用户没点名的其他画风，也不要用页面下拉的默认风格覆盖。`
+
+    return `【画风听用户的 · 硬性】
+用户点名了画风。这是全片最高优先级。
+禁止翻译成别的画风套话，除非用户要的就是那个。
+禁止只写剧情不写媒介。
+
+用户点名的画风原词（必须出现在每一镜 visualPrompt 的第一句）：「${mediumPhrase}」
 
 用户主题/画风原文：
 """
 ${userAuth}
 """
 
-页面下拉风格仅作弱参考（当前：${styleCn} / ${input.style}），主题里已经有味道时忽略它：
+每一镜 visualPrompt 必须：
+1. 第一句写出画风，用用户原词「${mediumPhrase}」，不要改成英文标签。
+${technique}
+
+${look.matched ? `已对上已知画种：${styleLabel(look.matched)}\n${fallback}` : '这是用户自定义画风，不要套页面下拉风格。'}`
+  }
+
+  if (userAuth) {
+    return `【画风听用户的】
+用户主题原文（保留味道，但主题没点名具体媒介）：
+"""
+${userAuth}
+"""
+
+画面媒介以下拉风格为准（当前：${styleLabel(input.style)} / ${input.style}）：
 ${fallback}`
   }
 
@@ -203,14 +233,15 @@ async function realStoryboard(input: StoryboardInput): Promise<{
 同一人全片同一套外貌：名字、年龄、发型、衣服、配饰不要变着写。`
 
   const stylePriority = buildStylePriorityBlock(input)
-  const styleCn = styleLabel(input.style)
-  const styleGuide = VISUAL_STYLE_GUIDE[input.style]
-  const userStyleAuth = extractUserStyleAuthority(
+  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
+  const styleCn = styleLabel(look.style)
+  const styleGuide = VISUAL_STYLE_GUIDE[look.style]
+  const mediumPhrase = extractUserMediumPhrase(
     input.topic,
     input.content,
-    input.keywords
+    ...(input.keywords ?? [])
   )
-  const hasUserStyle = Boolean(userStyleAuth.trim())
+  const hasUserStyle = Boolean(mediumPhrase)
   const directorPlaybook = getSkillBody('storyboard-director')
 
   const userText = `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
@@ -235,7 +266,7 @@ ${productNote}
 顺序：先锁人物和地点，再拆镜头。每镜写清干什么、口播、时长、镜头怎么动、画面里发生什么。
 ${
   hasUserStyle
-    ? '画风用用户主题里的原词，写进人话句子，不要下拉风格套话。'
+    ? `画风硬性：每一镜 visualPrompt 第一句必须出现用户原词「${mediumPhrase}」。按这个媒介自己的专业技法写，禁止偷换成用户没点名的其他画风。`
     : `主题没提画风时，画面里带上「${styleCn} / ${styleGuide.medium}」。`
 }
 直接输出 JSON，不要解释。`
@@ -297,7 +328,7 @@ ${stylePriority}
       "eyeline": "<看谁/看哪>",
       "continuity": "<开始什么样 → 这几秒变了啥 → 结束定在哪>",
       "propFocus": "<这镜要看清的物件，没有写无>",
-      "visualPrompt": "<中文白话说戏：在哪、什么光、谁、穿什么、正在干什么、镜头怎么走。4–8 句够用，别堆术语>",
+      "visualPrompt": "<第一句必须写出用户点名的画风原词。接着白话说戏：在哪、什么光、谁、穿什么、正在干什么。必须含该媒介技法，禁止只写剧情不写画风>",
       "audioDescription": "<现场能听到的，逗号分隔>",
       "voiceover": "<这一镜要念的；没有就空字符串>",
       "duration": <5-10>,
@@ -308,8 +339,9 @@ ${stylePriority}
   ]
 }
 
-画风：主题原文 > 文案里的味道 > 下拉「${styleCn}」（仅主题完全没提时）。
-${hasUserStyle ? '' : `${styleGuide.avoid}。`}
+画风：用户原词 > 主题原文 > 下拉「${styleCn}」（仅主题完全没提时）。
+每一镜 visualPrompt 若缺少画风句，视为不合格。
+${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉风格。' : `${styleGuide.avoid}。`}
 口播大约每秒 4 个字；前后镜人的位置和手里的东西要接上。
 只输出合法 JSON。`
     },
@@ -397,7 +429,12 @@ export function normalizeStoryboard(
     typeof opts === 'string'
       ? { style: opts as VisualStyle }
       : opts
-  const style = options.style ?? 'cinematic'
+  const style = resolveVisualStyle(
+    options.style ?? 'cinematic',
+    options.topic,
+    options.content,
+    options.keywords
+  )
   const userStyleAuth = extractUserStyleAuthority(
     options.topic ?? '',
     options.content ?? '',
@@ -511,6 +548,7 @@ export function normalizeStoryboard(
     visualPrompt = enrichVisualPrompt(visualPrompt, {
       style,
       userStyleLock: styleLockFromUser,
+      look: lookFromTexts(style, options.topic, options.content, options.keywords),
       shotSize,
       blocking,
       propFocus,
@@ -550,18 +588,20 @@ export function normalizeStoryboard(
     return { ...draft, visualPrompt }
   })
 
-  const styleCn = styleLabel(style)
-  const guide = VISUAL_STYLE_GUIDE[style]
+  const look = lookFromTexts(style, options.topic, options.content, options.keywords)
+  const styleCn = styleLabel(look.matched ?? style)
+  const guide = look.matched ? VISUAL_STYLE_GUIDE[look.matched] : VISUAL_STYLE_GUIDE[style]
   let aesthetic = optStr(raw?.aesthetic)
-  if (styleLockFromUser) {
-    // 主题画风优先：缺 aesthetic 时用主题浓缩；已有则不强制套下拉风格头
+  if (look.userNamed) {
     if (!aesthetic) {
-      aesthetic = styleLockFromUser
-    } else {
-      const tip = styleLockFromUser.split(/[；;\n]/)[0]?.trim().slice(0, 24)
-      if (tip && !aesthetic.includes(tip) && tip.length >= 4) {
-        aesthetic = `${styleLockFromUser}\n\n${aesthetic}`
-      }
+      aesthetic = `【画风锁定】${look.medium}\n${mediumLockText(look)}`
+    } else if (!aesthetic.includes(look.medium)) {
+      aesthetic = `【画风锁定】${look.medium}\n${aesthetic}`
+    }
+    if (look.matched && !promptHasTechnique(aesthetic, look.matched)) {
+      aesthetic = `${aesthetic}\n${guide.sampleTail}。${guide.avoid}`
+    } else if (!look.matched && !aesthetic.includes('必须按用户原词')) {
+      aesthetic = `${aesthetic}\n${mediumLockText(look)}`
     }
   } else if (aesthetic && !promptMentionsStyle(aesthetic, style)) {
     aesthetic = `【${styleCn}·${guide.medium}】\n${aesthetic}`
@@ -584,12 +624,13 @@ export function normalizeStoryboard(
   }
 }
 
-/** 补强过短或未点名画风的画面描述；有用户主题画风时绝不套下拉风格句 */
+/** 只认画风词，剧名命中不算已经写了画风。自定义画风不套下拉技法。 */
 function enrichVisualPrompt(
   prompt: string,
   ctx: {
     style: VisualStyle
     userStyleLock?: string
+    look?: ReturnType<typeof lookFromTexts>
     shotSize?: string
     blocking?: string
     propFocus?: string
@@ -599,12 +640,9 @@ function enrichVisualPrompt(
     sceneAnchor?: string
   }
 ): string {
-  const styleCn = styleLabel(ctx.style)
-  const guide = VISUAL_STYLE_GUIDE[ctx.style]
-  const userLock = ctx.userStyleLock?.trim()
-  const header = userLock
-    ? `【画风：${userLock.split('\n')[0].slice(0, 120)}】`
-    : `【${styleCn}·${guide.medium}】`
+  const look = ctx.look ?? lookFromTexts(ctx.style, ctx.userStyleLock)
+  const lock = mediumLockText(look)
+  const header = `【画风锁定】${look.medium}。${lock}`
   let body = prompt.trim()
 
   if (!body) {
@@ -622,28 +660,18 @@ function enrichVisualPrompt(
       .join('。')
   }
 
-  if (userLock) {
-    const tokens = userLock
-      .split(/[；;，,、\n\s]+/)
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 2)
-      .slice(0, 12)
-    const hit = tokens.some((t) => body.includes(t))
-    if (!hit && !body.startsWith('【画风')) {
-      body = `${header}\n${body}`
-    }
-    // 结尾再用主题画风点一次，不用下拉 sampleTail
-    const topicTip = userLock.split('\n')[0].slice(0, 80)
-    if (topicTip && body.replace(/\s+/g, '').length < 200) {
-      body = `${body.trim()}\n再次强调画风（来自用户主题）：${topicTip}`
-    }
-  } else {
-    if (!promptMentionsStyle(body, ctx.style)) {
-      body = `${header}${body}`
-    }
-    if (body.replace(/\s+/g, '').length < 160) {
-      body = `${body.trim()}。${guide.sampleTail} 必须体现：${guide.mustInclude}。${guide.avoid}`
-    }
+  const hasMedium = look.userNamed
+    ? body.includes(look.medium) ||
+      (look.matched != null && promptMentionsStyle(body, look.matched))
+    : promptMentionsStyle(body, look.style)
+
+  if (!hasMedium) {
+    body = `${header}\n${body}`
+  } else if (look.matched && !promptHasTechnique(body, look.matched)) {
+    const g = VISUAL_STYLE_GUIDE[look.matched]
+    body = `${body.trim()}\n${g.sampleTail} 必须体现：${g.mustInclude}。${g.avoid}`
+  } else if (look.userNamed && !look.matched && !body.includes('必须按用户原词')) {
+    body = `${body.trim()}\n${lock}`
   }
 
   return body
@@ -670,12 +698,19 @@ export async function generateStoryboard(
   onProgress?: (msg: string) => void
 ): Promise<StoryboardRunResult> {
   const mode = getAIMode()
+  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
+  const resolved: StoryboardInput = { ...input, style: look.style }
+  if (look.matched && look.matched !== input.style) {
+    log(`画风已从用户原话对上已知画种：${input.style} → ${look.matched}（${look.medium}）`)
+  } else if (look.userNamed && !look.matched) {
+    log(`画风按用户原词锁定：${look.medium}（不套下拉枚举）`)
+  }
   log(`当前 AI 模式：${mode}`)
 
   if (mode === 'real') {
-      onProgress?.('正在按编剧手册拆能拍的镜头...')
+      onProgress?.(`正在按「${look.medium}」拆能拍的镜头...`)
     try {
-      const { result, model } = await realStoryboard(input)
+      const { result, model } = await realStoryboard(resolved)
       onProgress?.(`✓ 模型返回 ${result.shots.length} 个分镜`)
       return { result, source: 'real', model }
     } catch (e: any) {
@@ -685,13 +720,13 @@ export async function generateStoryboard(
       onProgress?.(`⚠ 大模型失败：${msg.slice(0, 100)}，回退演示`)
       const result = normalizeStoryboard(
         mockStoryboardFromPrompt(
-          `style: ${input.style} duration: ${input.shotDuration} """${input.content}"""`
+          `style: ${resolved.style} duration: ${resolved.shotDuration} """${resolved.content}"""`
         ),
         {
-          style: input.style,
-          topic: input.topic,
-          content: input.content,
-          keywords: input.keywords
+          style: resolved.style,
+          topic: resolved.topic,
+          content: resolved.content,
+          keywords: resolved.keywords
         }
       )
       return { result, source: 'mock-fallback', error: msg }
@@ -701,13 +736,13 @@ export async function generateStoryboard(
   onProgress?.('🎭 演示模式（未配置 VITE_AI_REAL_MODE=true）')
   const result = normalizeStoryboard(
     mockStoryboardFromPrompt(
-      `style: ${input.style} duration: ${input.shotDuration} """${input.content}"""`
+      `style: ${resolved.style} duration: ${resolved.shotDuration} """${resolved.content}"""`
     ),
     {
-      style: input.style,
-      topic: input.topic,
-      content: input.content,
-      keywords: input.keywords
+      style: resolved.style,
+      topic: resolved.topic,
+      content: resolved.content,
+      keywords: resolved.keywords
     }
   )
   return { result, source: 'mock' }

@@ -16,6 +16,56 @@ export const VISUAL_STYLE_LABEL: Record<VisualStyle, string> = {
   'ink-wash': '中国水墨'
 }
 
+/** 用户口语别名。更长短语在前，便于从原文抽出「水墨风」而不是只命中「墨」 */
+export const STYLE_ALIASES: Record<VisualStyle, string[]> = {
+  'ink-wash': [
+    '中国水墨画',
+    '中国水墨',
+    '水墨写意',
+    '水墨风格',
+    '水墨风',
+    '水墨画',
+    '写意画',
+    'ink-wash',
+    'ink wash',
+    'inkwash',
+    '水墨',
+    '国画',
+    '写意',
+    '工笔',
+    '宣纸'
+  ],
+  watercolor: ['水彩画风', '水彩画', '水彩风', 'watercolor', '水彩'],
+  'oil-painting': ['古典油画', '油画风', 'oil painting', 'oil-painting', '厚涂', '油画'],
+  'pixel-art': ['像素风格', '像素风', 'pixel-art', 'pixel art', '像素画', '像素'],
+  '3d-render': ['三维渲染', '3d渲染', '3d-render', 'blender', 'octane', 'c4d', '三维', '3d'],
+  anime: ['日系动画', '二次元', '赛璐璐', '动漫风', '动画风', 'anime', '动漫', '动画'],
+  photorealistic: ['写实摄影', '超写实', 'photorealistic', '纪实摄影', '真人实拍'],
+  cinematic: ['电影剧照', '院线电影', '胶片摄影', '电影感', 'cinematic', '胶片颗粒']
+}
+
+const INFER_ORDER: VisualStyle[] = [
+  'ink-wash',
+  'watercolor',
+  'oil-painting',
+  'pixel-art',
+  '3d-render',
+  'anime',
+  'photorealistic',
+  'cinematic'
+]
+
+const TECHNIQUE_HINT: Record<VisualStyle, RegExp> = {
+  'ink-wash': /宣纸|墨色|墨分|焦浓|浓淡|留白|飞白|晕染|笔锋/,
+  watercolor: /晕染|水渍|纸纹|渗化|透明叠色/,
+  'oil-painting': /厚涂|笔触|布面|伦勃朗/,
+  'pixel-art': /像素格|色板|抖动/,
+  '3d-render': /pbr|全局光|octane|blender/i,
+  anime: /赛璐璐|线稿|分阶|眼睛高光/,
+  photorealistic: /毛孔|浅景深|纪实|织物纹理/,
+  cinematic: /胶片|剧照|景深|焦段|光比|颗粒/
+}
+
 /** 每种风格必须写进 visualPrompt 的媒介/技法锚点 */
 export const VISUAL_STYLE_GUIDE: Record<
   VisualStyle,
@@ -83,17 +133,210 @@ export const VISUAL_STYLE_GUIDE: Record<
       '复古像素画风：清晰像素格、有限色板、轻微抖动，如经典主机游戏画面。'
   },
   'ink-wash': {
-    medium: '中国水墨画',
+    medium: '中国水墨 / 宣纸写意',
     mustInclude:
-      '墨色浓淡干湿、飞白与留白、笔锋提按、山水或写意人物意趣、宣纸感',
-    avoid: '禁止西方油画厚涂、禁止赛璐璐动漫、禁止超写实摄影',
+      '墨分五色（焦浓重淡清）、干湿飞白、中锋侧锋提按、大面积留白、宣纸纤维与水渍、写意人物衣纹或淡远山水',
+    avoid:
+      '禁止真人照片与皮肤毛孔、禁止摄影棚灰底三视图、禁止塑料三维、禁止赛璐璐平涂、禁止西方油画厚涂、禁止电影胶片调色套话',
     sampleTail:
-      '中国水墨写意：墨色层层晕染，飞白与留白得当，笔锋有提按，宣纸质感。'
+      '中国水墨写意：宣纸上的笔墨，焦浓重淡清层次分明，飞白与留白得当，衣纹中锋勾勒，远景淡墨晕开，纸纹隐现。'
   }
 }
 
 export function styleLabel(style: VisualStyle): string {
   return VISUAL_STYLE_LABEL[style] || style
+}
+
+function joinedText(...texts: Array<string | undefined>): string {
+  return texts.filter(Boolean).join('\n')
+}
+
+function flattenTexts(...texts: Array<string | string[] | undefined>): string[] {
+  return texts.flatMap((t) => (Array.isArray(t) ? t : t ? [t] : []))
+}
+
+/** 不是画风的「X风」 */
+const MEDIUM_STOP = new Set([
+  '台风',
+  '作风',
+  '学风',
+  '校风',
+  '门风',
+  '家风',
+  '文风',
+  '民风',
+  '通风',
+  '漏风',
+  '吹风',
+  '刮风',
+  '整风',
+  '党风',
+  '口风',
+  '耳风',
+  '上风',
+  '下风',
+  '中风',
+  '逆风',
+  '顺风',
+  '威风',
+  '风风',
+  '风光',
+  '风险',
+  '风波',
+  '风声',
+  '风头',
+  '风凉'
+])
+
+const OPEN_MEDIUM_CUE =
+  /风格|画风|质感|电影感|动画|动漫|二次元|写实|摄影|渲染|油画|水彩|像素|水墨|赛博|蒸汽朋克|复古|胶片|手绘|插画|国风|赛璐璐|厚涂|扁平|3d|黏土|粘土|剪纸|皮影|浮世绘|波普|定格/
+
+/** 从用户原话抽出画风词：先抓「X风/X风格」，再匹配已知画种。剧名不算画风。 */
+export function extractUserMediumPhrase(...texts: Array<string | undefined>): string {
+  const blob = joinedText(...texts)
+  if (!blob.trim()) return ''
+
+  const open: string[] = []
+  for (const m of blob.matchAll(/([\u4e00-\u9fffA-Za-z0-9]{1,12}(?:风格|画风))/g)) {
+    if (m[1]) open.push(m[1])
+  }
+  for (const m of blob.matchAll(/([\u4e00-\u9fffA-Za-z]{2,8}风)/g)) {
+    const w = m[1]
+    if (w && !MEDIUM_STOP.has(w)) open.push(w)
+  }
+  open.sort((a, b) => b.length - a.length)
+  if (open[0]) return open[0]
+
+  const lower = blob.toLowerCase()
+  const ranked = INFER_ORDER.flatMap((style) =>
+    STYLE_ALIASES[style].map((alias) => ({ alias, style }))
+  ).sort((a, b) => b.alias.length - a.alias.length)
+
+  for (const { alias } of ranked) {
+    if (alias.length < 2) continue
+    const hit = /[a-z]/i.test(alias) ? lower.includes(alias.toLowerCase()) : blob.includes(alias)
+    if (hit) return alias
+  }
+
+  const compact = blob.replace(/\s+/g, '')
+  if (compact.length > 0 && compact.length <= 16 && OPEN_MEDIUM_CUE.test(compact)) {
+    return blob.trim().slice(0, 24)
+  }
+  return ''
+}
+
+/** 主题/文案里点名了哪种画风。未点名返回 null，不要默认电影感。 */
+export function inferVisualStyleFromText(...texts: Array<string | undefined>): VisualStyle | null {
+  const blob = joinedText(...texts)
+  if (!blob.trim()) return null
+  const lower = blob.toLowerCase()
+  for (const style of INFER_ORDER) {
+    const hit = STYLE_ALIASES[style].some((alias) => {
+      if (alias.length < 2) return false
+      return /[a-z]/i.test(alias) ? lower.includes(alias.toLowerCase()) : blob.includes(alias)
+    })
+    if (hit) return style
+  }
+  return null
+}
+
+export function resolveVisualStyle(
+  fallback: VisualStyle,
+  ...texts: Array<string | string[] | undefined>
+): VisualStyle {
+  const flat = flattenTexts(...texts)
+  return inferVisualStyleFromText(...flat) ?? fallback
+}
+
+export interface VisualLook {
+  /** 接口仍要枚举：仅当原文能对上已知画种时才改，否则保持下拉值 */
+  style: VisualStyle
+  /** 展示用：用户原词，或下拉风格中文名 */
+  medium: string
+  /** 原文对上的已知画种，对不上则为 null（黏土风、剪纸等） */
+  matched: VisualStyle | null
+  /** 用户原文里点名了画风（X风/X风格/已知画种），不是我们拿下拉名填的 */
+  userNamed: boolean
+}
+
+export function lookFromTexts(
+  fallback: VisualStyle,
+  ...texts: Array<string | string[] | undefined>
+): VisualLook {
+  const flat = flattenTexts(...texts)
+  const named = extractUserMediumPhrase(...flat)
+  const matched = inferVisualStyleFromText(...flat)
+  return {
+    style: matched ?? fallback,
+    medium: named || styleLabel(matched ?? fallback),
+    matched,
+    userNamed: Boolean(named)
+  }
+}
+
+export function lookFromScript(
+  script?: {
+    style?: VisualStyle
+    topic?: string
+    content?: string
+    keywords?: string[]
+  } | null
+): VisualLook {
+  const fallback = script?.style ?? 'cinematic'
+  return lookFromTexts(fallback, script?.topic, script?.content, script?.keywords)
+}
+
+/** 用户点了非实拍媒介时，人设不要走摄影棚三视图 */
+export function isPhotographicLook(look: VisualLook): boolean {
+  if (look.matched) {
+    return look.matched === 'cinematic' || look.matched === 'photorealistic'
+  }
+  if (look.userNamed) {
+    return /电影|摄影|写实|实拍|纪实|胶片|剧照|真人/.test(look.medium)
+  }
+  return look.style === 'cinematic' || look.style === 'photorealistic'
+}
+
+/** 分镜/人设/配图共用的画风锁。有用户原词就锁原词；对得上词库才补该画种技法。 */
+export function mediumLockText(look: VisualLook): string {
+  if (look.userNamed && look.matched) {
+    const userBit =
+      look.medium !== styleLabel(look.matched)
+        ? `必须按用户原词「${look.medium}」绘制。`
+        : `必须按「${styleLabel(look.matched)}」绘制。`
+    return `${userBit}${styleLockSuffix(look.matched)} ${professionalQualityLock(look.matched)}`
+  }
+  if (look.userNamed) {
+    return `必须按用户原词「${look.medium}」绘制，用该媒介自己的材料、技法和质感做到专业完成度。禁止偷换成用户没点名的其他画风，也不要用页面下拉的默认风格覆盖。`
+  }
+  return `${styleLockSuffix(look.style)} ${professionalQualityLock(look.style)}`
+}
+
+export function promptHasTechnique(prompt: string, style: VisualStyle): boolean {
+  return TECHNIQUE_HINT[style]?.test(prompt) ?? false
+}
+
+/** 该媒介的专业完成度句子，配图时强制追加 */
+export function professionalQualityLock(style: VisualStyle): string {
+  const locks: Record<VisualStyle, string> = {
+    'ink-wash':
+      '专业完成度：墨分五色（焦、浓、重、淡、清），笔锋有提按与飞白，宣纸纤维与水渍可见，构图大面积留白；禁止真人写真、禁止现代摄影棚、禁止光滑CG、禁止彩色厚涂油画。',
+    watercolor:
+      '专业完成度：透明叠色、纸纹与水渍自然，边缘渗化可控；禁止超写实照片，禁止厚重油画堆砌。',
+    'oil-painting':
+      '专业完成度：可见厚涂笔触与布面纹理，古典明暗；禁止数码锐利照片感。',
+    'pixel-art':
+      '专业完成度：清晰像素格、有限色板、轮廓可读；禁止高清照片平滑。',
+    '3d-render':
+      '专业完成度：PBR 材质、全局光照、干净建模；禁止手绘涂抹。',
+    anime:
+      '专业完成度：干净线稿与赛璐璐分阶，眼睛高光明确；禁止真人皮肤毛孔。',
+    photorealistic:
+      '专业完成度：真实材质与自然光，摄影级清晰；禁止插画笔触。',
+    cinematic:
+      '专业完成度：电影调色与光比，景深层次清楚；禁止扁平插画。'
+  }
+  return locks[style]
 }
 
 /** 写进 LLM system/user 的完整风格说明块 */
@@ -121,12 +364,18 @@ export function styleLockSuffix(style: VisualStyle): string {
   return `${label}风格（${g.medium}），${g.sampleTail}`
 }
 
-/** 判断画面描述是否已体现该风格关键词（粗检） */
+/** 判断画面描述是否已体现该风格关键词（含口语别名，如「水墨风」） */
 export function promptMentionsStyle(prompt: string, style: VisualStyle): boolean {
   const p = prompt.toLowerCase()
   const label = styleLabel(style)
   const g = VISUAL_STYLE_GUIDE[style]
-  const keys = [style, label, g?.medium, ...(g?.medium.split(/[\/·]/) ?? [])]
+  const keys = [
+    style,
+    label,
+    g?.medium,
+    ...(g?.medium.split(/[\/·]/) ?? []),
+    ...STYLE_ALIASES[style]
+  ]
     .filter(Boolean)
     .map((k) => String(k).toLowerCase().trim())
   return keys.some((k) => k.length >= 2 && p.includes(k))
