@@ -23,6 +23,7 @@ import {
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
 import { synthesizeVideoPerformance, VIDEO_PERFORMANCE_SPEC, videoPerformanceIssue } from '@/utils/shotPrompt'
+import { extractJsonText, parseJsonRobust } from '@/utils/jsonRepair'
 
 export interface StoryboardInput {
   topic: string
@@ -39,6 +40,8 @@ export interface StoryboardInput {
    * full：兼容旧的一步到位（尽量少用）
    */
   mode?: 'extract' | 'full'
+  /** 覆盖设置页当前主 LLM，须是设置里已保存的模型名 */
+  model?: string
   signal?: AbortSignal
 }
 
@@ -186,64 +189,21 @@ ${fallback}`
 ${fallback}`
 }
 
-function extractJsonText(content: string): string {
-  let s = content
+export { repairJsonLocally } from '@/utils/jsonRepair'
 
-  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  s = s.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-  s = s.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-  s = s.replace(/<analysis>[\s\S]*?<\/analysis>/gi, '')
-
-  s = s.replace(/```json\s*/gi, '').replace(/```\s*/g, '')
-
-  s = s.trim()
-
-  if (!s) throw new Error('LLM 返回内容为空')
-
-  const start = s.indexOf('{')
-  const end = s.lastIndexOf('}')
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error(
-      `LLM 响应中找不到 JSON 对象（{...}）\n原始内容（前 300 字符）：${content.slice(0, 300)}`
-    )
-  }
-  return s.slice(start, end + 1)
-}
-
-/** 修正常见模型 JSON 小错误；不修改字段内容。 */
-export function repairJsonLocally(json: string): string {
-  return json
-    // 数组里的相邻对象漏逗号：} {...
-    .replace(/}\s*(?={)/g, '},')
-    // 属性值结束后下一行直接出现新属性
-    .replace(/([}\]])\s*\n\s*(?="[^"]+"\s*:)/g, '$1,\n')
-    .replace(/("(?:[^"\\]|\\.)*"|\b(?:true|false|null|-?\d+(?:\.\d+)?)\b)\s*\n\s*(?="[^"]+"\s*:)/g, '$1,\n')
-    // 尾逗号
-    .replace(/,\s*([}\]])/g, '$1')
-}
-
-/** 鲁棒 JSON 解析：原文失败后先做不改变内容的本地语法修复。 */
 function robustParseJson(content: string): any {
-  const jsonStr = extractJsonText(content)
+  return parseJsonRobust(content)
+}
 
-  try {
-    return JSON.parse(jsonStr)
-  } catch (firstError) {
-    const locallyRepaired = repairJsonLocally(jsonStr)
-    try {
-      return JSON.parse(locallyRepaired)
-    } catch (secondError) {
-      throw new Error(
-        `JSON.parse 失败：${(firstError as Error).message}；本地修复后仍失败：${(secondError as Error).message}\n尝试解析的内容（前 300 字符）：${jsonStr.slice(0, 300)}`
-      )
-    }
-  }
+function resolvePlayModel(input: Pick<StoryboardInput, 'model'>): string | undefined {
+  const model = input.model?.trim()
+  return model || undefined
 }
 
 /** 本地无法修复时，让主模型只修 JSON 语法，再进入业务质量验收。 */
 async function parseJsonWithModelRepair(
   content: string,
-  input: Pick<StoryboardInput, 'signal'>,
+  input: Pick<StoryboardInput, 'signal' | 'model'>,
   label: string
 ): Promise<any> {
   try {
@@ -257,32 +217,115 @@ async function parseJsonWithModelRepair(
         return content.trim()
       }
     })()
-    const repaired = await callLLM({
-      messages: [
-        {
-          role: 'system',
-          content: `你是 JSON 语法修复器。只修复逗号、引号、转义符、括号和被截断的容器结构；保留已有字段名、字段值、数组顺序和中文原文，不润色、不翻译、不总结、不新增事实。若末尾截断，只保留已经完整的数组元素并闭合 JSON。只输出一个合法 JSON 对象。`
-        },
-        { role: 'user', content: jsonCandidate }
-      ],
-      temperature: 0,
-      jsonMode: true,
-      maxTokens: 16384,
-      signal: input.signal,
-      timeoutMs: 180_000
-    })
-    try {
-      return robustParseJson(repaired.content)
-    } catch (repairError) {
-      throw new Error(
-        `${label} JSON 自动修复失败：${(repairError as Error).message}\n首次错误：${(parseError as Error).message}`
-      )
+    if (!jsonCandidate) {
+      throw new Error(`${label} JSON 自动修复失败：没有可修复的内容\n首次错误：${(parseError as Error).message}`)
     }
+    let repairedContent = ''
+    try {
+      const repaired = await callLLM({
+        messages: [
+          {
+            role: 'system',
+            content: `你是 JSON 语法修复器。只修复逗号、引号、转义符、括号和被截断的容器结构；保留已有字段名、字段值、数组顺序和中文原文，不润色、不翻译、不总结、不新增事实。若末尾截断，只保留已经完整的数组元素并闭合 JSON。只输出一个合法 JSON 对象。`
+          },
+          { role: 'user', content: jsonCandidate }
+        ],
+        model: resolvePlayModel(input),
+        temperature: 0,
+        jsonMode: true,
+        maxTokens: 24576,
+        signal: input.signal,
+        timeoutMs: 180_000
+      })
+      repairedContent = repaired.content || ''
+    } catch (llmError) {
+      log(`⚠ ${label} 模型修复调用失败：${(llmError as Error).message}`)
+    }
+    if (repairedContent.trim()) {
+      try {
+        return robustParseJson(repairedContent)
+      } catch (repairError) {
+        log(`⚠ ${label} 模型修复结果仍无法解析：${(repairError as Error).message.split('\n')[0]}`)
+      }
+    }
+    throw new Error(
+      `${label} JSON 自动修复失败：${(parseError as Error).message}`
+    )
   }
 }
 
+const QUALITY_REPAIR_ROUNDS = 3
+
+async function repairStoryboardOnce(
+  parsed: StoryboardResult,
+  input: StoryboardInput,
+  model: string,
+  issues: string[]
+): Promise<StoryboardResult> {
+  const extractHint =
+    input.mode === 'extract'
+      ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。遗漏人物必须补进 subjects——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。相关 shots 的 subjectIds 要挂上。'
+      : '每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。'
+  const repair = await callLLM({
+    messages: [
+      {
+        role: 'system',
+        content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。不新增用户没说的产品、人物、数字或事实；但用户原文中已经出现的人物、台词和事件必须补全。\n${extractHint}\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按镜头分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。口播必须像真人说话，一句一个意思；每镜口播字数不超过 duration*4。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${VIDEO_PERFORMANCE_SPEC}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
+      },
+      {
+        role: 'user',
+        content: `用户原文 / 剧本：\n${input.content}\n\n主题：${input.topic || '（未填）'}\n\n验收未通过（必须全部修掉）：\n- ${issues.join('\n- ')}\n\n待修 JSON：\n${JSON.stringify(parsed)}`
+      }
+    ],
+    model,
+    temperature: 0.2,
+    jsonMode: true,
+    maxTokens: 24576,
+    signal: input.signal,
+    timeoutMs: 180_000
+  })
+  return normalizeStoryboard(await parseJsonWithModelRepair(repair.content, input, '质量修订稿'), {
+    style: input.style,
+    topic: input.topic,
+    content: input.content,
+    keywords: input.keywords
+  })
+}
+
+/** 验收不通过就打回重提炼，不直接停流水线。 */
+async function ensureStoryboardQuality(
+  parsed: StoryboardResult,
+  input: StoryboardInput,
+  model: string,
+  onProgress?: (msg: string) => void
+): Promise<StoryboardResult> {
+  let current = parsed
+  for (let round = 0; round <= QUALITY_REPAIR_ROUNDS; round++) {
+    const issues = storyboardQualityIssues(current, input)
+    if (!issues.length) return current
+    const severe = issues.filter((issue) => issue.startsWith('严重'))
+    if (round > 0 && !severe.length) {
+      log(`⚠ 仍有非阻断问题，继续使用：${issues.join('；')}`)
+      return current
+    }
+    if (round === QUALITY_REPAIR_ROUNDS) {
+      throw new Error(
+        `脚本质量验收未通过（已打回重提炼 ${QUALITY_REPAIR_ROUNDS} 次）：${issues.join('；')}`
+      )
+    }
+    const n = round + 1
+    log(`⚠ 质量未通过，打回重提炼 ${n}/${QUALITY_REPAIR_ROUNDS}：${issues.join('；')}`)
+    onProgress?.(`验收未通过，打回重新提炼（${n}/${QUALITY_REPAIR_ROUNDS}）…`)
+    current = await repairStoryboardOnce(current, input, model, issues)
+  }
+  return current
+}
+
 /** 真实 LLM 调用 */
-async function realStoryboard(input: StoryboardInput): Promise<{
+async function realStoryboard(
+  input: StoryboardInput,
+  onProgress?: (msg: string) => void
+): Promise<{
   result: StoryboardResult
   model: string
 }> {
@@ -467,16 +510,18 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
     }
   ]
 
-  const { baseUrl, model } = getLlmConfig()
+  const { baseUrl, model: cfgModel } = getLlmConfig()
+  const model = resolvePlayModel(input) || cfgModel
   log(
     `→ 调用主 LLM: ${baseUrl}/chat/completions (model: ${model})`
   )
 
   const resp = await callLLM({
     messages,
+    model,
     temperature: 0.45,
     jsonMode: true,
-    maxTokens: 12288,
+    maxTokens: 24576,
     signal: input.signal,
     timeoutMs: 180_000
   })
@@ -499,37 +544,7 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
     )
   }
 
-  const issues = storyboardQualityIssues(parsed, input)
-  if (issues.length) {
-    log(`⚠ 首稿质量问题：${issues.join('；')}`)
-    const repair = await callLLM({
-      messages: [
-        {
-          role: 'system',
-          content: `你是短视频总编审。修复给出的 JSON，不新增用户没说的产品、人物、数字或事实；但用户原文中已经出现的人物、台词和事件必须补全。\n每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按镜头分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。口播必须像真人说话，一句一个意思；每镜口播字数不超过 duration*4。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${VIDEO_PERFORMANCE_SPEC}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
-        },
-        {
-          role: 'user',
-          content: `用户原文：\n${input.content}\n\n质量问题：\n- ${issues.join('\n- ')}\n\n待修 JSON：\n${JSON.stringify(parsed)}`
-        }
-      ],
-      temperature: 0.2,
-      jsonMode: true,
-      maxTokens: 12288,
-      signal: input.signal,
-      timeoutMs: 180_000
-    })
-    parsed = normalizeStoryboard(await parseJsonWithModelRepair(repair.content, input, '质量修订稿'), {
-      style: input.style,
-      topic: input.topic,
-      content: input.content,
-      keywords: input.keywords
-    })
-    const remaining = storyboardQualityIssues(parsed, input)
-    if (remaining.some((issue) => issue.startsWith('严重'))) {
-      throw new Error(`脚本质量验收未通过：${remaining.join('；')}`)
-    }
-  }
+  parsed = await ensureStoryboardQuality(parsed, input, model, onProgress)
 
   log(
     `✓ 解析成功，${parsed.subjects?.length ?? 0} 个主体 / ${parsed.scenes?.length ?? 0} 个场景 / ${parsed.shots.length} 个分镜`
@@ -962,13 +977,13 @@ export async function generateStoryboard(
         : `正在按「${look.medium}」拆能拍的镜头...`
     )
     try {
-      const { result, model } = await realStoryboard(resolved)
+      const { result, model } = await realStoryboard(resolved, onProgress)
       onProgress?.(`✓ 模型返回 ${result.shots.length} 个分镜并通过质量检查`)
       return { result, source: 'real', model }
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       log(`✗ 真实 LLM 调用失败：${msg}`)
-      throw new Error(`脚本生成失败，已停止后续流水线：${msg}`)
+      throw new Error(msg.startsWith('脚本') ? msg : `脚本生成失败：${msg}`)
     }
   }
 
@@ -1153,12 +1168,15 @@ ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
     }
   ]
 
-  const { model } = getLlmConfig()
+  const { model: cfgModel } = getLlmConfig()
+  const model = resolvePlayModel(input) || cfgModel
+  log(`→ 写剧本 LLM: ${model}`)
   const resp = await callLLM({
     messages,
+    model,
     temperature: 0.45,
     jsonMode: true,
-    maxTokens: 8192,
+    maxTokens: 16384,
     signal: input.signal,
     timeoutMs: 120_000
   })

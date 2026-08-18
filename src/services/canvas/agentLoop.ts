@@ -9,6 +9,7 @@ import {
   validateToolAction,
   type AgentToolAction
 } from './toolRegistry'
+import { TOOL_LABEL } from './pipeline'
 import { beginAgentTask, getAgentState, patchAgentTask } from './taskStore'
 
 export interface ReplanInput {
@@ -63,16 +64,17 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
       if (options.signal?.aborted) throw new AgentToolError('任务已取消', 'agent', 'cancelled')
       const action = actions.shift()!
       const stepKey = `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || ''}`
-      options.onEvent({ kind: 'step', step: stepKey, label: action.tool, status: 'running' })
+      const stepLabel = TOOL_LABEL[action.tool] || action.tool
+      options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'running' })
       await patchAgentTask(task.id, { currentStep: action.tool })
       try {
         const detail = await executeRegisteredTool(action, {
           signal: options.signal,
-          onLog: (label) => options.onEvent({ kind: 'log', label })
+          onLog: (label) => options.onEvent({ kind: 'log', label, step: stepKey })
         })
         completed.push(action)
         results.push({ tool: action.tool, ok: true, detail })
-        options.onEvent({ kind: 'step', step: stepKey, label: action.tool, status: 'done' })
+        options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'done' })
         await patchAgentTask(task.id, {
           completedTools: completed.map((item) => item.tool),
           currentStep: undefined
@@ -82,7 +84,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
           ? error
           : new AgentToolError(error?.message ?? String(error), action.tool, 'execution_failed')
         results.push({ tool: action.tool, ok: false, detail: toolError.message })
-        options.onEvent({ kind: 'step', step: stepKey, label: action.tool, status: 'fail' })
+        options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'fail' })
         options.onEvent({ kind: 'log', label: `已暂停：${toolError.message}` })
 
         if (

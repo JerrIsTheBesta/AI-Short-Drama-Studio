@@ -1,4 +1,4 @@
-import { useProjectStore, useAssetsStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useSettingsStore } from '@/stores'
 import {
   generateImage,
   generateVideo,
@@ -83,6 +83,12 @@ async function productRefBlobs() {
     if (b) blobs.push(b)
   }
   return blobs.slice(0, 3)
+}
+
+function resolveLlmModel(override?: string): string | undefined {
+  const picked = override?.trim()
+  if (picked) return picked
+  return useSettingsStore().config.llm.model?.trim() || undefined
 }
 
 export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: string) => void, signal?: AbortSignal) {
@@ -331,7 +337,11 @@ export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) =
   return asset
 }
 
-export async function runGeneratePlay(onProgress?: (msg: string) => void, signal?: AbortSignal) {
+export async function runGeneratePlay(
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+  model?: string
+) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
   if (
@@ -369,7 +379,8 @@ export async function runGeneratePlay(onProgress?: (msg: string) => void, signal
       shotDuration: project.current.script.shotDuration,
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
-      keywords: project.current.script.keywords
+      keywords: project.current.script.keywords,
+      model: resolveLlmModel(model)
     },
     onProgress,
     signal
@@ -398,7 +409,8 @@ export async function runGeneratePlay(onProgress?: (msg: string) => void, signal
 /** 第二步：从完整剧本提炼人物 / 场景 / 分镜节点 */
 export async function runExtractStoryboard(
   onProgress?: (msg: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  model?: string
 ) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
@@ -428,7 +440,8 @@ export async function runExtractStoryboard(
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
-      mode: 'extract'
+      mode: 'extract',
+      model: resolveLlmModel(model)
     },
     onProgress,
     signal
@@ -464,7 +477,8 @@ export async function runExtractStoryboard(
 export async function runScriptNode(
   kind: 'play' | 'extract' = 'play',
   onProgress?: RunProgress,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  model?: string
 ) {
   return withNodeJob('script', async () => {
     ensureNotCancelled(signal)
@@ -473,9 +487,9 @@ export async function runScriptNode(
     patchNode(project, 'script', 'running')
     try {
       if (kind === 'extract') {
-        await runExtractStoryboard(report, signal)
+        await runExtractStoryboard(report, signal, model)
       } else {
-        await runGeneratePlay(report, signal)
+        await runGeneratePlay(report, signal, model)
       }
       patchNode(project, 'script', 'success')
     } catch (e: any) {

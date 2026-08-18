@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from '@/stores'
+import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
 import { runCanvasNode, runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory, synthesizeVideoPerformance } from '@/utils/shot'
@@ -19,6 +20,7 @@ const props = defineProps<{
 const project = useProjectStore()
 const assets = useAssetsStore()
 const toast = useToastStore()
+const settings = useSettingsStore()
 const preview = ref('')
 const historyUrls = ref<Record<string, string>>({})
 const running = computed(() => (props.node ? isNodeRunning(props.node.id) : false))
@@ -308,7 +310,7 @@ async function run() {
   }
   try {
     if (props.node.type === 'script') {
-      await runScriptNode('play')
+      await runScriptNode('play', undefined, undefined, llmModel.value)
     } else {
       await runCanvasNode(props.node.id, () => {})
     }
@@ -323,7 +325,7 @@ async function run() {
 async function runExtract() {
   if (!props.node) return
   try {
-    await runScriptNode('extract')
+    await runScriptNode('extract', undefined, undefined, llmModel.value)
     toast.success('节点已从剧本提炼出来')
   } catch (e: any) {
     toast.error(e.message || '提炼失败')
@@ -355,6 +357,20 @@ watch(running, (now, was) => {
     loadHistory()
   }
 })
+
+const llmGroups = computed(() => llmModelGroups(settings.config.llms ?? []))
+const llmChoice = computed({
+  get() {
+    const id = settings.config.activeLlmId
+    const model = settings.config.llm.model
+    return id && model ? llmChoiceKey(id, model) : ''
+  },
+  set(v: string) {
+    const parsed = parseLlmChoiceKey(v)
+    if (parsed) settings.selectLlmModel(parsed.profileId, parsed.model)
+  }
+})
+const llmModel = computed(() => settings.config.llm.model)
 
 function patchScript(field: 'topic' | 'content', value: string) {
   if (!project.current?.script) return
@@ -510,6 +526,13 @@ function resetVideoPrompt() {
         >
           确认通过，往下做人设
         </GradientButton>
+        <label>写剧本用的 LLM</label>
+        <select v-model="llmChoice">
+          <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
+          <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
+            <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">{{ m }}</option>
+          </optgroup>
+        </select>
       </template>
 
       <template v-else-if="node.type === 'subject' && subject">

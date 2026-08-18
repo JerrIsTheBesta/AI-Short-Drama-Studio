@@ -167,27 +167,48 @@ const storagePct = computed(() => {
   if (!storage.value.quota) return 0
   return (storage.value.usage / storage.value.quota) * 100
 })
+
+type SettingsTab = 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'system'
+const tabs: { id: SettingsTab; label: string }[] = [
+  { id: 'llm', label: 'LLM' },
+  { id: 'vision', label: '视觉' },
+  { id: 'image', label: '生图' },
+  { id: 'tts', label: '配音' },
+  { id: 'video', label: '视频' },
+  { id: 'system', label: '系统' }
+]
+const tab = ref<SettingsTab>('llm')
 </script>
 
 <template>
   <div class="page">
     <header class="page-head">
       <div>
-        <h1>⚙ 设置</h1>
-        <p>管理 AI 能力、素材库、引擎状态</p>
+        <h1>设置</h1>
+        <p>按模块配置。改完立刻生效，不用重启。</p>
       </div>
       <GradientButton type="ghost" @click="router.back()">← 返回</GradientButton>
     </header>
 
-    <div class="grid">
-      <GlassCard padding="lg">
-        <h2>🤖 AI 能力配置</h2>
-        <p class="card-desc">主智能体使用 DeepSeek；Qwen 仅用于看图和多模态质量验收。配置改完立即生效。</p>
-        <StudioSettings />
-      </GlassCard>
+    <nav class="tabs" aria-label="设置模块">
+      <button
+        v-for="t in tabs"
+        :key="t.id"
+        type="button"
+        :class="{ on: tab === t.id }"
+        @click="tab = t.id"
+      >
+        {{ t.label }}
+      </button>
+    </nav>
 
+    <GlassCard v-if="tab !== 'system'" padding="lg">
+      <StudioSettings :module="tab === 'system' ? 'llm' : tab" />
+    </GlassCard>
+
+    <div v-else class="sys-grid">
       <GlassCard padding="lg">
-        <h2>🔧 引擎状态</h2>
+        <h2>引擎状态</h2>
         <p class="card-desc">FFmpeg 在浏览器里跑，首次使用时会下载约 30MB 核心</p>
 
         <div class="engine-row">
@@ -350,14 +371,41 @@ const storagePct = computed(() => {
 <style scoped>
 .page {
   padding: var(--space-6);
-  max-width: 1100px;
+  max-width: 920px;
   margin: 0 auto;
 }
 .page-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: var(--space-5);
+  margin-bottom: var(--space-4);
+}
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--space-4);
+}
+.tabs button {
+  margin: 0;
+  padding: 8px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-2);
+  color: var(--color-text-3);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.tabs button.on {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: #fff;
+}
+.sys-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-4);
 }
 .page-head h1 {
   font-size: 24px;
@@ -368,11 +416,6 @@ const storagePct = computed(() => {
   font-size: 13px;
   color: var(--color-text-3);
   margin: 0;
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-  gap: var(--space-4);
 }
 h2 {
   font-size: 16px;

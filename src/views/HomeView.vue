@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
+import { useProjectStore, useToastStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -13,7 +13,6 @@ import type { AspectRatio } from '@/types'
 
 const router = useRouter()
 const project = useProjectStore()
-const settings = useSettingsStore()
 const toast = useToastStore()
 
 const search = ref('')
@@ -278,14 +277,6 @@ function fmtDuration(sec: number) {
               {{ fmtDuration(totalDuration) }}
             </div>
             <div class="stat-label">成片总时长</div>
-          </div>
-          <div class="stat">
-            <div class="stat-value">
-              <Tag :type="settings.config.aiMode === 'real' ? 'success' : 'warning'">
-                {{ settings.config.aiMode === 'real' ? '真实 API' : '演示模式' }}
-              </Tag>
-            </div>
-            <div class="stat-label">AI 模式</div>
           </div>
         </div>
       </div>

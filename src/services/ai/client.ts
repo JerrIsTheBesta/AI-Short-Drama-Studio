@@ -1,7 +1,5 @@
 /**
  * AI 服务通用 client
- *
- * mock：本地演示；real：设置页或 .env 里的真实接口
  */
 
 export type { AIMode } from '@/stores/settings'
@@ -47,6 +45,38 @@ export function messageText(content: LLMMessage['content']): string {
     .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
     .map((p) => p.text)
     .join('\n')
+}
+
+function flattenText(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value
+      .map((part) =>
+        typeof part === 'string' ? part : flattenText((part as any)?.text ?? (part as any)?.content)
+      )
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (typeof value === 'object') {
+    return flattenText((value as any).text ?? (value as any).content)
+  }
+  return String(value)
+}
+
+/** 推理模型常把正文放进 reasoning_content，content 会是空字符串。 */
+function pickMessageContent(message: any): string {
+  const candidates = [
+    message?.content,
+    message?.reasoning_content,
+    message?.reasoning,
+    message?.reasoningContent
+  ]
+  for (const item of candidates) {
+    const text = flattenText(item).trim()
+    if (text) return flattenText(item)
+  }
+  return ''
 }
 
 function hasImageParts(messages: LLMMessage[]): boolean {
@@ -139,16 +169,17 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       )
     }
     if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)
-    const data = await resp.json()
-    const rawContent = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.message?.reasoning_content ?? ''
-    const content = Array.isArray(rawContent)
-      ? rawContent
-          .map((part: any) => typeof part === 'string' ? part : part?.text ?? part?.content ?? '')
-          .filter(Boolean)
-          .join('\n')
-      : rawContent
+    let data = await resp.json()
+    let content = pickMessageContent(data.choices?.[0]?.message)
+    if (!content.trim() && body.response_format) {
+      delete body.response_format
+      ;({ resp, errText } = await post(body))
+      if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)
+      data = await resp.json()
+      content = pickMessageContent(data.choices?.[0]?.message)
+    }
     return {
-      content: typeof content === 'string' ? content : JSON.stringify(content),
+      content,
       model: data.model ?? model,
       usage: data.usage
         ? {

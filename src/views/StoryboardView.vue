@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import { generateStoryboard, storyboardToShots } from '@/services/ai'
-import { getAIMode, blobToChatImageUrl } from '@/services/ai/client'
+import { blobToChatImageUrl } from '@/services/ai/client'
 import { lookFromScript } from '@/utils/visualStyle'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
@@ -46,9 +46,6 @@ function shotCastLabel(s: Shot) {
   return [names.join('、') || null, scene].filter(Boolean).join(' · ')
 }
 
-const aiMode = ref(getAIMode())
-const lastSource = ref<'real' | 'mock' | 'mock-fallback' | null>(null)
-const lastError = ref<string | null>(null)
 const editingAesthetic = ref(false)
 const aestheticDraft = ref('')
 const styleBriefDraft = ref('')
@@ -99,7 +96,6 @@ async function generate() {
     if (!ok) return
   }
   generating.value = true
-  lastError.value = null
   try {
     const productImages: string[] = []
     for (const id of (project.current.script.referenceAssetIds ?? []).slice(0, 5)) {
@@ -127,7 +123,6 @@ async function generate() {
       },
       (msg) => toast.info(msg, 2000)
     )
-    lastSource.value = runResult.source
     const newShots = storyboardToShots(runResult.result)
     project.setShots(newShots)
     project.setSubjects(runResult.result.subjects ?? [])
@@ -145,20 +140,9 @@ async function generate() {
         ...(r.lightingNote ? { lightingNote: r.lightingNote } : {})
       })
     }
-    if (runResult.source === 'real') {
-      toast.success(
-        `已生成 ${newShots.length} 个分镜 · ${runResult.result.subjects?.length ?? 0} 个主体 · ${runResult.result.scenes?.length ?? 0} 个场景`
-      )
-    } else if (runResult.source === 'mock-fallback') {
-      lastError.value = runResult.error ?? null
-      toast.warn(
-        `大模型失败已回退演示，生成 ${newShots.length} 个分镜\n` +
-          (runResult.error ? `错误：${runResult.error.slice(0, 100)}` : ''),
-        8000
-      )
-    } else {
-      toast.info(`演示模式生成 ${newShots.length} 个分镜（未调真实接口）`, 4000)
-    }
+    toast.success(
+      `已生成 ${newShots.length} 个分镜 · ${runResult.result.subjects?.length ?? 0} 个主体 · ${runResult.result.scenes?.length ?? 0} 个场景`
+    )
   } catch (e: any) {
     toast.error('生成分镜失败：' + e.message, 8000)
   } finally {
@@ -237,12 +221,6 @@ function movementLabel(m: Shot['cameraMovement']): string {
         <p>先锁定整片的人物和场景，再拆镜头。后面配图会用人设图 + 场景底板保证长得一样。</p>
       </div>
       <div class="head-actions">
-        <Tag :type="aiMode === 'real' ? 'success' : 'warning'" size="sm">
-          {{ aiMode === 'real' ? '🔌 真实 API' : '🎭 演示模式' }}
-        </Tag>
-        <Tag v-if="lastSource" :type="lastSource === 'real' ? 'success' : (lastSource === 'mock-fallback' ? 'error' : 'warning')" size="sm">
-          {{ lastSource === 'real' ? '✓ 已调用真实模型' : (lastSource === 'mock-fallback' ? '⚠ 失败已回退演示' : '🎭 演示生成') }}
-        </Tag>
         <GradientButton type="ghost" @click="router.push('/script')">← 上一步</GradientButton>
         <GradientButton
           icon="✨"
@@ -410,29 +388,8 @@ function movementLabel(m: Shot['cameraMovement']): string {
       <LoadingDots text="专业编剧与镜头导演正在撰写分镜与口播..." />
     </div>
 
-    <GlassCard v-if="aiMode === 'mock'" padding="md" class="mock-warn">
-      <div class="mock-warn-content">
-        <div>
-          <h4>🎭 当前是演示模式，没有调用任何真实接口</h4>
-          <p>
-            分镜结果是用关键词启发算法生成的，不是真实 AI。
-            要用真实接口（APIYI 大模型写分镜 / APIYI 图像）请：
-          </p>
-          <ol>
-            <li>在项目根目录创建 <code>.env</code>（复制 <code>.env.example</code>）</li>
-            <li>确认 <code>VITE_AI_REAL_MODE=true</code> 在文件里</li>
-            <li>确认大模型 / 图像 API 密钥填好</li>
-            <li>重启 <code>npm run dev</code></li>
-          </ol>
-        </div>
-        <GradientButton size="sm" type="secondary" @click="router.push('/settings')">
-          ⚙ 打开设置
-        </GradientButton>
-      </div>
-    </GlassCard>
-
     <EmptyState
-      v-else-if="shots.length === 0"
+      v-if="shots.length === 0"
       icon="🎬"
       title="还没有分镜"
       description="点击「AI 生成分镜」让 AI 帮你规划每个镜头的画面和口播"
@@ -713,46 +670,6 @@ function movementLabel(m: Shot['cameraMovement']): string {
 .generating {
   text-align: center;
   padding: var(--space-12);
-}
-
-.mock-warn {
-  margin-bottom: var(--space-4);
-  border-color: var(--color-warning);
-  background: rgba(245, 158, 11, 0.06);
-}
-.mock-warn-content {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-}
-.mock-warn-content > div {
-  flex: 1;
-}
-.mock-warn h4 {
-  font-size: 14px;
-  margin: 0 0 8px;
-  color: var(--color-warning);
-}
-.mock-warn p {
-  font-size: 12px;
-  color: var(--color-text-2);
-  margin: 0 0 8px;
-  line-height: 1.6;
-}
-.mock-warn ol {
-  font-size: 12px;
-  color: var(--color-text-2);
-  margin: 0;
-  padding-left: 20px;
-  line-height: 1.8;
-}
-.mock-warn code {
-  background: var(--color-bg-1);
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-accent-2);
 }
 
 .aesthetic-card {

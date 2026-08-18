@@ -37,7 +37,7 @@ export interface AgentToolResult {
 }
 
 export interface AgentEvent {
-  kind?: 'log' | 'step' | 'focus'
+  kind?: 'log' | 'step' | 'focus' | 'think'
   label: string
   step?: string
   status?: 'running' | 'done' | 'fail'
@@ -213,7 +213,7 @@ export async function runAgentTurn(
   if (isContinueRequest(userText) && !wantAll(userText)) {
     plan = continuePlan(p0)
   } else if (getAIMode() === 'real' && !isContinueRequest(userText)) {
-    onEvent({ kind: 'log', label: '在想怎么做…' })
+    onEvent({ kind: 'think', label: '在想怎么做…' })
     const chat = history
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .slice(-8)

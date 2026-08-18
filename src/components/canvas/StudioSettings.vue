@@ -2,229 +2,247 @@
 import { ref } from 'vue'
 import { useProjectStore, useSettingsStore } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
-import { getAIMode } from '@/services/ai/client'
+import EndpointForm from '@/components/settings/EndpointForm.vue'
+import {
+  IMAGE_PROVIDERS,
+  LLM_PROVIDERS,
+  MUSIC_PROVIDERS,
+  TTS_PROVIDERS,
+  VISION_PROVIDERS,
+  applyProviderPreset,
+  findProvider
+} from '@/services/ai/providers'
+
+defineProps<{
+  module: 'llm' | 'vision' | 'image' | 'tts' | 'video'
+}>()
 
 const settings = useSettingsStore()
 const project = useProjectStore()
-const llmDraft = ref('')
-const visionDraft = ref('')
-const imageDraft = ref('')
-const ttsDraft = ref('')
-
-function addLlm() {
-  settings.addModel('llm', llmDraft.value)
-  llmDraft.value = ''
-}
-function addVision() {
-  settings.addModel('vision', visionDraft.value)
-  visionDraft.value = ''
-}
-function addImage() {
-  settings.addModel('image', imageDraft.value)
-  imageDraft.value = ''
-}
-function addTts() {
-  settings.addModel('tts', ttsDraft.value)
-  ttsDraft.value = ''
-}
+const addingLlm = ref(false)
 
 function onVoice(v: string) {
   settings.patchTts({ voice: v })
   if (project.current) project.setSettings({ ttsVoice: v })
 }
+
+function createLlm(providerId: string) {
+  const preset = findProvider(providerId, LLM_PROVIDERS)
+  const applied = applyProviderPreset(
+    { baseUrl: '', apiKey: '', model: '', models: [] },
+    preset
+  )
+  const names = new Set((settings.config.llms ?? []).map((p) => p.name))
+  let name = preset.id === 'custom' ? '自定义 LLM' : preset.name
+  if (names.has(name)) {
+    let i = 2
+    while (names.has(`${name} ${i}`)) i += 1
+    name = `${name} ${i}`
+  }
+  settings.addLlm({
+    name,
+    baseUrl: applied.baseUrl,
+    apiKey: '',
+    model: applied.model,
+    models: applied.models,
+    provider: applied.provider
+  })
+  addingLlm.value = false
+}
+
+function removeActiveLlm() {
+  const id = settings.config.activeLlmId
+  if (!id) return
+  settings.removeLlm(id)
+}
 </script>
 
 <template>
-  <div class="panel">
-    <p class="lead">配好地址和密钥，模型就能在下拉里选。改完立刻生效，不用重启。</p>
-
-    <section>
-      <h4>模式</h4>
-      <div class="seg">
-        <button :class="{ on: settings.config.aiMode === 'mock' }" @click="settings.update({ aiMode: 'mock' })">
-          演示
-        </button>
-        <button :class="{ on: settings.config.aiMode === 'real' }" @click="settings.update({ aiMode: 'real' })">
-          真实 API
+  <div class="mods">
+    <section v-if="module === 'llm'" class="llm-lib">
+      <div class="llm-head">
+        <h4>已保存的 LLM</h4>
+        <button type="button" class="add-llm" @click="addingLlm = !addingLlm">
+          {{ addingLlm ? '取消' : '添加' }}
         </button>
       </div>
-      <p class="hint">当前：{{ getAIMode() === 'real' ? '走真实接口' : '演示数据' }}</p>
-    </section>
-
-    <section>
-      <h4>主 LLM · DeepSeek（智能体 / 分镜 / 文案）</h4>
-      <label>接口地址</label>
-      <input
-        :value="settings.config.llm.baseUrl"
-        placeholder="https://api.deepseek.com"
-        @change="settings.patchLlm({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>API Key</label>
-      <input
-        type="password"
-        autocomplete="off"
-        :value="settings.config.llm.apiKey"
-        placeholder="sk-…"
-        @change="settings.patchLlm({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>当前模型</label>
-      <select
-        :value="settings.config.llm.model"
-        @change="settings.patchLlm({ model: ($event.target as HTMLSelectElement).value })"
-      >
-        <option v-for="m in settings.config.llm.models" :key="m" :value="m">{{ m }}</option>
-      </select>
-      <div class="add-row">
-        <input v-model="llmDraft" placeholder="添加模型名" @keydown.enter.prevent="addLlm" />
-        <button class="mini" @click="addLlm">添加</button>
+      <p class="hint">每种接入保存成一项（官方或聚合）。同一项下面可加多个模型名，智能体和写剧本时就能切换。</p>
+      <div v-if="addingLlm" class="add-pick">
+        <p>选择接入方式</p>
+        <button
+          v-for="p in LLM_PROVIDERS"
+          :key="p.id"
+          type="button"
+          :title="p.hint"
+          @click="createLlm(p.id)"
+        >
+          {{ p.name }}
+        </button>
+      </div>
+      <div class="llm-cards">
+        <button
+          v-for="p in settings.config.llms"
+          :key="p.id"
+          type="button"
+          :class="{ on: p.id === settings.config.activeLlmId }"
+          @click="settings.selectLlm(p.id)"
+        >
+          <strong>{{ p.name }}</strong>
+          <span>{{ p.models?.length ? `${p.models.length} 个模型 · ${p.model || '未选'}` : p.model || '未选模型' }}</span>
+        </button>
       </div>
     </section>
 
-    <section>
-      <h4>视觉理解 · Qwen（看图 / 多模态质检）</h4>
-      <p class="hint">仅在需要读取图片或验收画面时调用，不参与智能体规划。</p>
-      <label>接口地址</label>
+    <template v-if="module === 'llm'">
+      <label class="name-label">名称</label>
       <input
-        :value="settings.config.vision.baseUrl"
-        placeholder="https://api.apiyi.com/v1"
-        @change="settings.patchVision({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+        class="name-input"
+        :value="settings.config.llms.find((p) => p.id === settings.config.activeLlmId)?.name"
+        placeholder="例如 DeepSeek 官方"
+        @change="settings.renameLlm(($event.target as HTMLInputElement).value)"
       />
-      <label>API Key</label>
-      <input
-        type="password"
-        autocomplete="off"
-        :value="settings.config.vision.apiKey"
-        placeholder="sk-…"
-        @change="settings.patchVision({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
+      <EndpointForm
+        title="连接信息"
+        hint="智能体、写剧本、提炼分镜都用当前选中的这一套。聚合平台只需一套 Key，在下方把要用的模型名都加进来。"
+        :presets="LLM_PROVIDERS"
+        :base-url="settings.config.llm.baseUrl"
+        :api-key="settings.config.llm.apiKey"
+        :model="settings.config.llm.model"
+        :models="settings.config.llm.models"
+        :provider="settings.config.llm.provider"
+        @patch="settings.patchLlm($event)"
+        @add-model="settings.addModel('llm', $event)"
+        @remove-model="settings.removeModel('llm', $event)"
       />
-      <label>当前模型</label>
-      <select
-        :value="settings.config.vision.model"
-        @change="settings.patchVision({ model: ($event.target as HTMLSelectElement).value })"
+      <button
+        v-if="(settings.config.llms?.length || 0) > 1"
+        type="button"
+        class="danger"
+        @click="removeActiveLlm"
       >
-        <option v-for="m in settings.config.vision.models" :key="m" :value="m">{{ m }}</option>
-      </select>
-      <div class="add-row">
-        <input v-model="visionDraft" placeholder="添加视觉模型名" @keydown.enter.prevent="addVision" />
-        <button class="mini" @click="addVision">添加</button>
-      </div>
-    </section>
+        删除这项 LLM
+      </button>
+    </template>
 
-    <section>
-      <h4>生图</h4>
-      <label>接口地址</label>
-      <input
-        :value="settings.config.image.baseUrl"
-        placeholder="https://api.apiyi.com/v1"
-        @change="settings.patchImage({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>API Key</label>
-      <input
-        type="password"
-        autocomplete="off"
-        :value="settings.config.image.apiKey"
-        placeholder="sk-…"
-        @change="settings.patchImage({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>当前模型</label>
-      <select
-        :value="settings.config.image.model"
-        @change="settings.patchImage({ model: ($event.target as HTMLSelectElement).value })"
-      >
-        <option v-for="m in settings.config.image.models" :key="m" :value="m">{{ m }}</option>
-      </select>
-      <div class="add-row">
-        <input v-model="imageDraft" placeholder="添加模型名" @keydown.enter.prevent="addImage" />
-        <button class="mini" @click="addImage">添加</button>
-      </div>
-    </section>
+    <EndpointForm
+      v-else-if="module === 'vision'"
+      title="视觉理解"
+      hint="只在看图、对画面做质检时调用，不参与写剧本。"
+      :presets="VISION_PROVIDERS"
+      :base-url="settings.config.vision.baseUrl"
+      :api-key="settings.config.vision.apiKey"
+      :model="settings.config.vision.model"
+      :models="settings.config.vision.models"
+      :provider="settings.config.vision.provider"
+      @patch="settings.patchVision($event)"
+      @add-model="settings.addModel('vision', $event)"
+      @remove-model="settings.removeModel('vision', $event)"
+    />
 
-    <section>
-      <h4>配音</h4>
-      <label>接口地址</label>
-      <input
-        :value="settings.config.tts.baseUrl"
-        placeholder="https://dashscope.aliyuncs.com/api/v1"
-        @change="settings.patchTts({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>API Key</label>
-      <input
-        type="password"
-        autocomplete="off"
-        :value="settings.config.tts.apiKey"
-        placeholder="sk-…"
-        @change="settings.patchTts({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>当前模型</label>
-      <select
-        :value="settings.config.tts.model"
-        @change="settings.patchTts({ model: ($event.target as HTMLSelectElement).value })"
-      >
-        <option v-for="m in settings.config.tts.models" :key="m" :value="m">{{ m }}</option>
-      </select>
-      <div class="add-row">
-        <input v-model="ttsDraft" placeholder="添加模型名" @keydown.enter.prevent="addTts" />
-        <button class="mini" @click="addTts">添加</button>
-      </div>
-      <label>音色</label>
+    <EndpointForm
+      v-else-if="module === 'image'"
+      title="生图"
+      hint="人设、空镜、分镜配图。选接入方式后填 Key。"
+      :presets="IMAGE_PROVIDERS"
+      :base-url="settings.config.image.baseUrl"
+      :api-key="settings.config.image.apiKey"
+      :model="settings.config.image.model"
+      :models="settings.config.image.models"
+      :provider="settings.config.image.provider"
+      @patch="settings.patchImage($event)"
+      @add-model="settings.addModel('image', $event)"
+      @remove-model="settings.removeModel('image', $event)"
+    />
+
+    <EndpointForm
+      v-else-if="module === 'tts'"
+      title="配音 TTS"
+      hint="后期独立口播。百炼走语音合成接口，不是聊天补全。"
+      :presets="TTS_PROVIDERS"
+      :base-url="settings.config.tts.baseUrl"
+      :api-key="settings.config.tts.apiKey"
+      :model="settings.config.tts.model"
+      :models="settings.config.tts.models"
+      :provider="settings.config.tts.provider"
+      @patch="settings.patchTts($event)"
+      @add-model="settings.addModel('tts', $event)"
+      @remove-model="settings.removeModel('tts', $event)"
+    >
+      <label class="extra-label">音色</label>
       <select :value="settings.config.tts.voice" @change="onVoice(($event.target as HTMLSelectElement).value)">
         <option v-for="v in TTS_VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
       </select>
-    </section>
+    </EndpointForm>
 
-    <section>
-      <h4>图生视频</h4>
-      <label>ComfyUI 地址</label>
-      <input
-        :value="settings.config.video.baseUrl"
-        placeholder="https://host:port"
-        @change="settings.patchVideo({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+    <template v-else-if="module === 'video'">
+      <section class="video">
+        <h3>图生视频</h3>
+        <p class="hint">MiniMax H3 / ComfyUI。填工作流地址和 ID。</p>
+        <label>服务地址</label>
+        <input
+          :value="settings.config.video.baseUrl"
+          placeholder="https://host:port 或云端 Comfy 地址"
+          @change="settings.patchVideo({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+        />
+        <label>工作流 ID</label>
+        <input
+          :value="settings.config.video.workflowId"
+          placeholder="minimax_h3_light2v-1"
+          @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
+        />
+        <label>API Key（可空）</label>
+        <input
+          type="password"
+          autocomplete="off"
+          :value="settings.config.video.apiKey"
+          placeholder="没有就留空"
+          @change="settings.patchVideo({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
+        />
+      </section>
+
+      <EndpointForm
+        title="配乐"
+        hint="整片 BGM，可选。"
+        :presets="MUSIC_PROVIDERS"
+        :base-url="settings.config.music.baseUrl"
+        :api-key="settings.config.music.apiKey"
+        :model="settings.config.music.model"
+        :models="settings.config.music.models"
+        :provider="settings.config.music.provider"
+        @patch="settings.patchMusic($event)"
+        @add-model="settings.addModel('music', $event)"
+        @remove-model="settings.removeModel('music', $event)"
       />
-      <label>工作流 ID</label>
-      <input
-        :value="settings.config.video.workflowId"
-        @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
-      />
-      <label>API Key（可空）</label>
-      <input
-        type="password"
-        autocomplete="off"
-        :value="settings.config.video.apiKey"
-        @change="settings.patchVideo({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
-      />
-    </section>
+    </template>
   </div>
 </template>
 
 <style scoped>
-.panel {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 18px;
+.mods {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
 }
-.lead {
-  grid-column: 1 / -1;
-}
-.lead,
-.hint {
-  margin: 0;
-  font-size: 11px;
-  color: var(--color-text-4);
-  line-height: 1.5;
-}
-section {
+.video {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-width: 560px;
 }
-h4 {
+.video h3 {
   margin: 0 0 2px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-2);
+  font-size: 16px;
+  font-weight: 700;
 }
-label {
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-4);
+  line-height: 1.5;
+}
+label,
+.extra-label {
+  margin-top: 6px;
   font-size: 11px;
   color: var(--color-text-4);
 }
@@ -235,43 +253,110 @@ select {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   color: var(--color-text-1);
-  padding: 7px 8px;
+  padding: 8px 10px;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
 }
-.seg {
+.llm-lib {
+  max-width: 560px;
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
 }
-.seg button {
-  flex: 1;
+.llm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.llm-head h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+.add-llm {
+  margin: 0;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: var(--color-accent);
+  color: #fff;
   font-size: 12px;
-  padding: 6px;
-  border-radius: 6px;
-  color: var(--color-text-3);
+  font-weight: 650;
+}
+.add-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
   background: var(--color-bg-2);
 }
-.seg button.on {
+.add-pick p {
+  width: 100%;
+  margin: 0 0 2px;
+  font-size: 12px;
+  color: var(--color-text-4);
+}
+.add-pick button {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-3);
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+.add-pick button:hover {
   color: var(--color-text-1);
   background: var(--color-accent);
 }
-.add-row {
+.llm-cards {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.add-row input {
-  flex: 1;
-  min-width: 0;
-}
-.mini {
-  font-size: 12px;
-  padding: 0 10px;
-  border-radius: 6px;
+.llm-cards button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin: 0;
+  min-width: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-2);
   color: var(--color-text-2);
-  background: var(--color-bg-3);
-  white-space: nowrap;
+  text-align: left;
 }
-.mini:hover {
+.llm-cards button.on {
+  border-color: var(--color-accent);
   color: var(--color-text-1);
+  background: rgba(124, 58, 237, 0.16);
+}
+.llm-cards strong {
+  font-size: 13px;
+}
+.llm-cards span {
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.name-label {
+  margin-top: 0;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.name-input {
+  max-width: 560px;
+}
+.danger {
+  max-width: 560px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 8px;
+  background: transparent;
+  color: #fca5a5;
+  font-size: 12px;
 }
 </style>

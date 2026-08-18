@@ -6,6 +6,7 @@ import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
+import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import type { ShotAudioMode } from '@/types'
 
@@ -126,7 +127,7 @@ function openDetail() {
 </script>
 
 <template>
-  <div class="anode" :class="[`st-${status}`, { on: selected && panelOpen }]">
+  <div class="anode" :class="[`st-${status}`, { on: selected && panelOpen, busy: generating }]">
     <Handle id="in" type="target" :position="Position.Left" class="hndl" />
 
     <div class="anode-top">
@@ -158,8 +159,8 @@ function openDetail() {
         {{ playing ? '❚❚' : '▶' }}
       </button>
       <span v-else class="hint">{{ canTts ? '待合成 TTS' : mode === 'none' ? '无口播' : '随视频出声' }}</span>
-      <span v-if="generating" class="busy">合成中…</span>
     </div>
+    <NodeBusyOverlay v-if="generating" label="合成中" />
 
     <transition name="float-down">
       <div v-if="selected && panelOpen" class="panel nodrag nowheel" @mousedown.stop @click.stop>
@@ -218,8 +219,21 @@ function openDetail() {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
   z-index: 4;
 }
-.anode.st-running {
-  border-color: var(--color-accent);
+.anode.st-running,
+.anode.busy {
+  border-color: #c4b5fd;
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  animation: node-busy 1.35s ease-in-out infinite;
+  z-index: 5;
+}
+@keyframes node-busy {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+  }
 }
 .anode.st-failed {
   border-color: var(--color-error);
@@ -280,13 +294,9 @@ function openDetail() {
   font-size: 11px;
   cursor: pointer;
 }
-.hint,
-.busy {
+.hint {
   font-size: 11px;
   color: var(--color-text-4);
-}
-.busy {
-  color: var(--color-accent);
 }
 .panel {
   position: absolute;

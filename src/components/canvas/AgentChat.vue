@@ -1,86 +1,227 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, ref } from 'vue'
 import { runAgentTurn, type AgentEvent, type AgentMessage } from '@/services/canvas/agent'
-import GradientButton from '@/components/common/GradientButton.vue'
 import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/canvas/taskStore'
 import { estimateRequestText } from '@/services/canvas/toolRegistry'
+import { useSettingsStore } from '@/stores'
+import { llmModelGroups } from '@/stores/settings'
 import type { AgentAutonomy } from '@/types'
 
-const messages = ref<AgentMessage[]>([
+type StepStatus = 'running' | 'done' | 'fail'
+type TraceRow = {
+  key: string
+  kind: 'think' | 'plan' | 'step' | 'log'
+  label: string
+  status?: StepStatus
+  detail?: string
+}
+
+type FeedItem =
+  | { id: string; type: 'msg'; role: 'user' | 'assistant'; content: string }
+  | { id: string; type: 'run'; rows: TraceRow[] }
+
+const feed = ref<FeedItem[]>([
   {
+    id: 'welcome',
+    type: 'msg',
     role: 'assistant',
     content:
       '跟我说你要拍什么。需求不清楚我会先问。拆完剧本会写到画布左侧，每一步做完问你要不要继续。说「全流程」才自动跑完。'
   }
 ])
+const messages = computed<AgentMessage[]>(() =>
+  feed.value
+    .filter((item): item is Extract<FeedItem, { type: 'msg' }> => item.type === 'msg')
+    .map((item) => ({ role: item.role, content: item.content }))
+)
 const input = ref('')
 const busy = ref(false)
+const thinking = ref(false)
 const log = ref('')
-const steps = ref<{ key: string; label: string; status: 'running' | 'done' | 'fail' }[]>([])
+const trace = ref<TraceRow[]>([])
 const chips = ref<{ label: string; text: string }[]>([
   { label: '拆剧本', text: '拆剧本' },
   { label: '全流程', text: '全流程跑完' }
 ])
 const box = ref<HTMLElement | null>(null)
 const autonomy = ref<AgentAutonomy>('gated')
+const modeOpen = ref(false)
+const modelOpen = ref(false)
+const hoverMode = ref<AgentAutonomy | null>(null)
+const settings = useSettingsStore()
 let controller: AbortController | null = null
 
+const MODES: { id: AgentAutonomy; label: string; desc: string }[] = [
+  {
+    id: 'assist',
+    label: '陪我做',
+    desc: '每一步都先问你再动手，适合一起磨剧本、分镜和提示词。'
+  },
+  {
+    id: 'gated',
+    label: '关键确认',
+    desc: '能连续做几步，但写完剧本、提炼节点、验收这些关键点会停下来问你。'
+  },
+  {
+    id: 'autopilot',
+    label: '全自动',
+    desc: '按你这句话尽量一路做完，中途失败才停。要出片仍需说「全流程」。'
+  }
+]
+
+const currentMode = computed(() => MODES.find((m) => m.id === autonomy.value) || MODES[1])
+const modeTip = computed(() => {
+  const id = hoverMode.value || autonomy.value
+  return MODES.find((m) => m.id === id)?.desc || ''
+})
+
+const llmList = computed(() => settings.config.llms ?? [])
+const llmGroups = computed(() => llmModelGroups(llmList.value))
+const activeLlm = computed(
+  () => llmList.value.find((p) => p.id === settings.config.activeLlmId) || llmList.value[0]
+)
+const activeLlmLabel = computed(() => {
+  const p = activeLlm.value
+  if (!p) return '选择 LLM'
+  return p.model ? `${p.name} · ${p.model}` : p.name
+})
+
 const estimate = computed(() => estimateRequestText(input.value))
+const statusText = computed(() => {
+  if (!busy.value) return currentMode.value.label
+  if (thinking.value) return '思考中'
+  return log.value || '执行中'
+})
 
 onMounted(() => {
   const saved = getAgentState()
   autonomy.value = saved.autonomy
   if (saved.messages.length) {
-    messages.value = saved.messages.map((message) => ({ role: message.role, content: message.content }))
+    feed.value = saved.messages
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .map((message, i) => ({
+        id: `saved-${i}`,
+        type: 'msg' as const,
+        role: message.role as 'user' | 'assistant',
+        content: message.content
+      }))
   }
+  window.addEventListener('pointerdown', onDocPointer, true)
 })
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onDocPointer, true)
+})
+
+function onDocPointer(ev: PointerEvent) {
+  const el = ev.target as HTMLElement | null
+  if (!el?.closest('.bar-pop')) {
+    modeOpen.value = false
+    modelOpen.value = false
+  }
+}
+
+function pickLlmModel(profileId: string, model: string) {
+  settings.selectLlmModel(profileId, model)
+  modelOpen.value = false
+}
 
 async function chooseAutonomy(mode: AgentAutonomy) {
   autonomy.value = mode
+  modeOpen.value = false
+  hoverMode.value = null
   await setAgentAutonomy(mode)
+}
+
+async function scrollToEnd() {
+  await nextTick()
+  box.value?.scrollTo({ top: box.value.scrollHeight, behavior: 'smooth' })
+}
+
+function upsertStep(key: string, patch: Partial<TraceRow>) {
+  const i = trace.value.findIndex((s) => s.key === key)
+  if (i >= 0) {
+    trace.value[i] = { ...trace.value[i], ...patch }
+  } else {
+    trace.value = [...trace.value, { key, kind: 'step', label: patch.label || key, ...patch }]
+  }
 }
 
 function onProgress(ev: AgentEvent) {
   log.value = ev.label
-  if (ev.kind === 'step' && ev.step) {
-    const i = steps.value.findIndex((s) => s.key === ev.step)
-    const row = { key: ev.step, label: ev.label, status: ev.status || 'running' }
-    if (i >= 0) steps.value[i] = row
-    else steps.value = [...steps.value, row]
+  if (ev.kind === 'think') {
+    thinking.value = true
+    const i = trace.value.findIndex((s) => s.kind === 'think')
+    const row: TraceRow = { key: 'think', kind: 'think', label: ev.label, status: 'running' }
+    if (i >= 0) trace.value[i] = row
+    else trace.value = [row, ...trace.value]
+  } else if (ev.kind === 'step' && ev.step) {
+    thinking.value = false
+    const think = trace.value.find((s) => s.kind === 'think' && s.status === 'running')
+    if (think) think.status = 'done'
+    upsertStep(ev.step, {
+      kind: 'step',
+      label: ev.label,
+      status: ev.status || 'running'
+    })
+  } else if (ev.kind === 'log') {
+    thinking.value = ev.label.includes('想')
+    const running = [...trace.value].reverse().find((s) => s.kind === 'step' && s.status === 'running')
+    if (running && ev.step === running.key) {
+      running.detail = ev.label
+    } else if (running && !ev.step) {
+      running.detail = ev.label
+    } else {
+      trace.value = [
+        ...trace.value,
+        { key: `log-${trace.value.length}`, kind: 'log', label: ev.label }
+      ]
+    }
   }
+  void scrollToEnd()
 }
 
 async function sendText(text: string) {
   const t = text.trim()
   if (!t || busy.value) return
   input.value = ''
-  messages.value.push({ role: 'user', content: t })
+  feed.value.push({ id: `u-${Date.now()}`, type: 'msg', role: 'user', content: t })
   await appendAgentMessage('user', t)
   busy.value = true
+  thinking.value = true
   log.value = '开始…'
-  steps.value = []
+  trace.value = [{ key: 'think', kind: 'think', label: '在想怎么做…', status: 'running' }]
   chips.value = []
   const turnController = new AbortController()
   controller = turnController
+  await scrollToEnd()
   try {
     const result = await runAgentTurn(messages.value, t, onProgress, {
       signal: turnController.signal,
       autonomy: autonomy.value
     })
-    messages.value.push({ role: 'assistant', content: result.reply })
+    thinking.value = false
+    const think = trace.value.find((s) => s.kind === 'think' && s.status === 'running')
+    if (think) think.status = 'done'
+    if (trace.value.length) {
+      feed.value.push({ id: `run-${Date.now()}`, type: 'run', rows: trace.value.map((row) => ({ ...row })) })
+    }
+    feed.value.push({ id: `a-${Date.now()}`, type: 'msg', role: 'assistant', content: result.reply })
     await appendAgentMessage('assistant', result.reply)
     chips.value = result.chips
   } catch (e: any) {
+    thinking.value = false
     const content = turnController.signal.aborted
       ? '已停止。已完成的产物会保留，未开始的步骤不会继续。'
       : '失败：' + (e.message || e)
-    messages.value.push({ role: 'assistant', content })
+    feed.value.push({ id: `a-${Date.now()}`, type: 'msg', role: 'assistant', content })
     await appendAgentMessage('assistant', content)
   } finally {
     busy.value = false
+    thinking.value = false
+    trace.value = []
     controller = null
-    await nextTick()
-    box.value?.scrollTo({ top: box.value.scrollHeight })
+    await scrollToEnd()
   }
 }
 
@@ -96,50 +237,140 @@ async function send() {
 
 <template>
   <aside class="agent">
-    <header>
+    <header class="head">
       <strong>智能体</strong>
-      <span :class="{ live: busy }">{{ busy ? log || '进行中…' : '做完一步再问你' }}</span>
+      <span :class="{ live: busy }">{{ statusText }}</span>
     </header>
-    <div class="autonomy" aria-label="智能体自主度">
-      <button :class="{ active: autonomy === 'assist' }" @click="chooseAutonomy('assist')">陪我做</button>
-      <button :class="{ active: autonomy === 'gated' }" @click="chooseAutonomy('gated')">关键确认</button>
-      <button :class="{ active: autonomy === 'autopilot' }" @click="chooseAutonomy('autopilot')">自动完成</button>
-    </div>
-    <div v-if="busy || steps.length" class="progress">
-      <div v-for="s in steps" :key="s.key" class="p-row" :class="s.status">
-        <i />
-        <span>{{ s.label }}</span>
-      </div>
-    </div>
+
     <div ref="box" class="msgs">
-      <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-        {{ m.content }}
+      <template v-for="item in feed" :key="item.id">
+        <div v-if="item.type === 'msg'" class="msg" :class="item.role">
+          {{ item.content }}
+        </div>
+        <div v-else class="turn">
+          <ol class="trace">
+            <li
+              v-for="s in item.rows.filter((row) => row.kind !== 'think')"
+              :key="s.key"
+              :class="[s.kind, s.status]"
+            >
+              <i />
+              <div>
+                <p>{{ s.label }}</p>
+                <small v-if="s.detail">{{ s.detail }}</small>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </template>
+
+      <div v-if="busy" class="turn live">
+        <div v-if="thinking" class="think">
+          <i class="dots" />
+          <span>思考中</span>
+        </div>
+        <ol class="trace">
+          <li
+            v-for="s in trace.filter((row) => row.kind !== 'think')"
+            :key="s.key"
+            :class="[s.kind, s.status]"
+          >
+            <i />
+            <div>
+              <p>{{ s.label }}</p>
+              <small v-if="s.detail && s.status === 'running'">{{ s.detail }}</small>
+            </div>
+          </li>
+        </ol>
       </div>
     </div>
+
     <div v-if="chips.length && !busy" class="chips">
       <button v-for="c in chips" :key="c.text + c.label" type="button" @click="sendText(c.text)">
         {{ c.label }}
       </button>
     </div>
+
     <form class="composer" @submit.prevent="send">
-      <div v-if="input.trim() && estimate.calls" class="estimate">
-        预计 {{ estimate.calls }} 次生成调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
+      <p v-if="input.trim() && estimate.calls" class="estimate">
+        预计 {{ estimate.calls }} 次调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
+      </p>
+      <div class="box">
+        <textarea
+          v-model="input"
+          rows="5"
+          :disabled="busy"
+          placeholder="说主题，或点「继续」。需求不清我会先问。"
+          @keydown.enter.exact.prevent="send"
+        />
+        <div class="bar">
+          <div class="bar-pop">
+            <button
+              type="button"
+              class="bar-btn"
+              :disabled="busy"
+              :title="currentMode.desc"
+              @click.stop="modeOpen = !modeOpen; modelOpen = false"
+            >
+              {{ currentMode.label }}
+              <i />
+            </button>
+            <div v-if="modeOpen" class="menu" @click.stop>
+              <button
+                v-for="m in MODES"
+                :key="m.id"
+                type="button"
+                :class="{ on: autonomy === m.id }"
+                @mouseenter="hoverMode = m.id"
+                @mouseleave="hoverMode = null"
+                @click="chooseAutonomy(m.id)"
+              >
+                {{ m.label }}
+              </button>
+              <p class="tip">{{ modeTip }}</p>
+            </div>
+          </div>
+          <div class="bar-pop model-pop">
+            <button
+              type="button"
+              class="bar-btn model-btn"
+              :disabled="busy"
+              :title="activeLlmLabel"
+              @click.stop="modelOpen = !modelOpen; modeOpen = false"
+            >
+              <span>{{ activeLlmLabel }}</span>
+              <i />
+            </button>
+            <div v-if="modelOpen" class="menu model-menu" @click.stop>
+              <p class="menu-k">选择模型</p>
+              <p v-if="!llmGroups.length" class="empty">请先到设置里添加 LLM，并填模型名</p>
+              <template v-for="g in llmGroups" :key="g.id">
+                <p class="menu-g">{{ g.name }}</p>
+                <p v-if="!g.models.length" class="empty">这项还没填模型名</p>
+                <button
+                  v-for="m in g.models"
+                  :key="`${g.id}::${m}`"
+                  type="button"
+                  class="model-item"
+                  :class="{ on: g.id === settings.config.activeLlmId && m === settings.config.llm.model }"
+                  @click="pickLlmModel(g.id, m)"
+                >
+                  <span>{{ m }}</span>
+                </button>
+              </template>
+            </div>
+          </div>
+          <button v-if="busy" type="button" class="stop" @click="cancel">停止</button>
+          <button v-else type="submit" class="send" :disabled="!input.trim()">发送</button>
+        </div>
       </div>
-      <textarea
-        v-model="input"
-        rows="3"
-        placeholder="说主题，或点下面的「继续」。需求不清我会先问。"
-        @keydown.enter.exact.prevent="send"
-      />
-      <button v-if="busy" type="button" class="stop" @click="cancel">停止任务</button>
-      <GradientButton v-else size="sm" :disabled="!input.trim()" @click="send">发送</GradientButton>
     </form>
   </aside>
 </template>
 
 <style scoped>
 .agent {
-  width: 300px;
+  width: 360px;
   flex-shrink: 0;
   border-right: 1px solid var(--color-border);
   background: var(--color-bg-1);
@@ -147,158 +378,334 @@ async function send() {
   flex-direction: column;
   min-height: 0;
 }
-header {
-  padding: 12px 14px 8px;
-  border-bottom: 1px solid var(--color-border);
+.head {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px 10px;
 }
-.autonomy {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--color-border);
+.head strong {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
 }
-.autonomy button {
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-2);
-  color: var(--color-text-3);
-  border-radius: 7px;
-  padding: 6px 4px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.autonomy button.active {
-  color: var(--color-text-1);
-  border-color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-bg-2));
-}
-.estimate {
-  color: var(--color-text-3);
-  font-size: 11px;
-  margin-bottom: 6px;
-}
-.stop {
-  border: 1px solid var(--color-danger, #ef4444);
-  color: var(--color-danger, #ef4444);
-  background: transparent;
-  border-radius: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-header span {
+.head span {
   font-size: 11px;
   color: var(--color-text-4);
 }
-header span.live {
+.head span.live {
   color: #c4b5fd;
-}
-.progress {
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  background: rgba(124, 58, 237, 0.06);
-  max-height: 160px;
-  overflow-y: auto;
-  flex-shrink: 0;
-}
-.p-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--color-text-3);
-}
-.p-row i {
-  width: 7px;
-  height: 7px;
-  border-radius: 99px;
-  background: var(--color-text-4);
-  flex-shrink: 0;
-}
-.p-row.running {
-  color: #ddd6fe;
-}
-.p-row.running i {
-  background: #a78bfa;
-  box-shadow: 0 0 8px #a78bfa;
-}
-.p-row.done {
-  color: #6ee7b7;
-}
-.p-row.done i {
-  background: #34d399;
-}
-.p-row.fail {
-  color: #fca5a5;
-}
-.p-row.fail i {
-  background: #f87171;
 }
 .msgs {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 8px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.msg {
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  max-width: 100%;
+}
+.msg.user {
+  align-self: flex-end;
+  max-width: 88%;
+  padding: 8px 12px;
+  border-radius: 12px 12px 4px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-1);
+}
+.msg.assistant {
+  color: var(--color-text-2);
+  padding: 0;
+  background: none;
+}
+.turn {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 10px 0 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
-.msg {
+.think {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
-  line-height: 1.5;
-  padding: 8px 10px;
-  border-radius: 10px;
-  white-space: pre-wrap;
+  color: #c4b5fd;
 }
-.msg.user {
-  background: var(--grad-primary-soft);
-  align-self: flex-end;
-  max-width: 92%;
+.dots {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 12px 0 0 #a78bfa, 24px 0 0 #a78bfa;
+  animation: pulse 1s ease-in-out infinite;
+  margin-right: 24px;
 }
-.msg.assistant {
-  background: var(--color-bg-2);
-  max-width: 100%;
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.trace {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trace li {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 5px 0;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+.trace li i {
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+}
+.trace li p,
+.trace li small {
+  margin: 0;
+}
+.trace li small {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.trace li.think.running,
+.trace li.step.running {
+  color: var(--color-text-1);
+}
+.trace li.running i {
+  background: #a78bfa;
+  box-shadow: 0 0 8px #a78bfa;
+}
+.trace li.done {
+  color: var(--color-text-3);
+}
+.trace li.done i {
+  background: #34d399;
+}
+.trace li.fail {
+  color: #fca5a5;
+}
+.trace li.fail i {
+  background: #f87171;
+}
+.trace li.log {
+  color: var(--color-text-4);
+}
+.trace li.log i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-text-4);
 }
 .chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 10px 0;
-  flex-shrink: 0;
+  padding: 0 16px 10px;
 }
 .chips button {
-  font-size: 11px;
+  margin: 0;
   padding: 5px 10px;
-  border-radius: 99px;
-  background: var(--color-bg-3);
-  color: var(--color-text-2);
   border: 1px solid var(--color-border);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--color-text-2);
+  font-size: 11px;
+  cursor: pointer;
 }
 .chips button:hover {
-  background: var(--color-accent);
-  color: #fff;
-  border-color: transparent;
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--color-text-1);
 }
 .composer {
-  padding: 10px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--color-border);
+}
+.estimate {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.box {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 8px 8px 6px;
 }
 textarea {
   width: 100%;
+  min-height: 108px;
   resize: none;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  background: transparent;
+  border: none;
+  outline: none;
   color: var(--color-text-1);
-  padding: 8px;
+  padding: 4px 6px 8px;
   font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+.bar-pop {
+  position: relative;
+  flex-shrink: 0;
+}
+.model-pop {
+  min-width: 0;
+  flex: 1;
+  max-width: 168px;
+}
+.bar-btn {
+  height: 28px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-2);
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+.model-btn {
+  width: 100%;
+  max-width: 100%;
+}
+.model-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar-btn i {
+  width: 0;
+  height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4px solid currentColor;
+  opacity: 0.7;
+}
+.menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 8;
+  width: 220px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: #1b1b24;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+.model-menu {
+  width: 248px;
+  max-height: 280px;
+  overflow: auto;
+  right: 0;
+  left: auto;
+}
+.menu-g {
+  margin: 8px 8px 4px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--color-text-4);
+}
+.menu-g:first-of-type {
+  margin-top: 2px;
+}
+.empty {
+  margin: 0 8px 8px;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.menu > button,
+.model-item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-2);
   font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.model-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.model-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.menu > button.on,
+.menu > button:hover,
+.model-item.on,
+.model-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-1);
+}
+.tip {
+  margin: 6px 2px 2px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-4);
+}
+.send,
+.stop {
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0 0 0 auto;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.send {
+  background: #fff;
+  color: #111;
+}
+.send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.stop {
+  background: transparent;
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.35);
 }
 </style>

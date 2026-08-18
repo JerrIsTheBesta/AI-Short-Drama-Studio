@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
-import { useProjectStore, useToastStore } from '@/stores'
+import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
+import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
 import { runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import {
@@ -11,9 +12,11 @@ import {
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { isPlayReady } from '@/services/ai'
+import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 
 const props = defineProps<{
   id: string
+  selected?: boolean
   data: {
     label?: string
     width?: number
@@ -26,8 +29,42 @@ const MIN_W = 320
 const MIN_H = 360
 
 const project = useProjectStore()
+const settings = useSettingsStore()
 const toast = useToastStore()
-const { getViewport } = useVueFlow()
+const { getViewport, findNode, removeSelectedNodes } = useVueFlow()
+const panelOpen = ref(false)
+
+watch(
+  () => props.selected,
+  (on) => {
+    panelOpen.value = Boolean(on)
+  },
+  { immediate: true }
+)
+
+const llmGroups = computed(() => llmModelGroups(settings.config.llms ?? []))
+const llmChoice = computed({
+  get() {
+    const id = settings.config.activeLlmId
+    const model = settings.config.llm.model
+    return id && model ? llmChoiceKey(id, model) : ''
+  },
+  set(v: string) {
+    const parsed = parseLlmChoiceKey(v)
+    if (parsed) settings.selectLlmModel(parsed.profileId, parsed.model)
+  }
+})
+const llmModel = computed(() => settings.config.llm.model)
+
+function patchTopic(v: string) {
+  if (!project.current?.script) return
+  project.setScript({ ...project.current.script, topic: v })
+}
+
+function patchDraftBrief(v: string) {
+  if (!project.current?.script) return
+  project.setScript({ ...project.current.script, content: v })
+}
 
 const nodeMeta = computed(() => project.current?.canvas?.nodes.find((n) => n.id === props.id))
 const width = computed(() => nodeMeta.value?.data.width || props.data.width || 460)
@@ -180,6 +217,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', onResizeEnd)
 })
 
+function dismissPanel() {
+  panelOpen.value = false
+  const n = findNode(props.id)
+  if (n) removeSelectedNodes([n])
+}
+
 async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   ev.stopPropagation()
   if (generating.value) return
@@ -191,8 +234,9 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
     toast.warn('请先写完整剧本，再提炼节点')
     return
   }
+  dismissPanel()
   try {
-    await runScriptNode(kind)
+    await runScriptNode(kind, undefined, undefined, llmModel.value)
   } catch {
     /* 节点上会显示失败 */
   }
@@ -200,7 +244,8 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
 </script>
 
 <template>
-  <div class="sdoc" :class="[`st-${status}`, { editing }]">
+  <div class="sdoc" :class="[`st-${status}`, { editing, on: selected && panelOpen, busy: generating }]">
+    <div class="sdoc-card">
     <div class="sdoc-head">
       <div class="sdoc-titles">
         <span class="sdoc-k">完整剧本</span>
@@ -215,17 +260,6 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
         </template>
         <template v-else>
           <button type="button" class="sdoc-btn" @click="startEdit" @mousedown.stop>✎ 编辑</button>
-          <button class="sdoc-gen" :disabled="generating" @click="generateThis($event, 'play')" @mousedown.stop>
-            {{ generating ? '生成中…' : playLabel }}
-          </button>
-          <button
-            class="sdoc-gen secondary"
-            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
-            @click="generateThis($event, 'extract')"
-            @mousedown.stop
-          >
-            {{ extractLabel }}
-          </button>
         </template>
       </div>
     </div>
@@ -238,7 +272,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
       @input="dirty = true"
       @mousedown.stop
     />
-    <div v-else class="sdoc-md nowheel nodrag" v-html="html" />
+    <div v-else class="sdoc-md nowheel nodrag" :class="{ 'has-panel': selected && panelOpen }" v-html="html" />
 
     <div v-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
       <span>完整剧本已写好，还没拆成节点。可先改字，再点「提炼节点」生成人物、场景、分镜。</span>
@@ -254,15 +288,86 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
       剧本已确认。仍可点「编辑」继续改；改完需重新确认。
     </div>
     <p v-if="nodeMeta?.error" class="sdoc-err">{{ nodeMeta.error }}</p>
+    <NodeBusyOverlay v-if="generating" label="生成中" />
     <Handle id="out" type="source" :position="Position.Right" class="hndl" />
     <div class="rz rz-e nodrag nopan" title="横向缩放" @pointerdown="onResizeStart('e', $event)" />
     <div class="rz rz-s nodrag nopan" title="纵向缩放" @pointerdown="onResizeStart('s', $event)" />
     <div class="rz rz-se nodrag nopan" title="拖动缩放" @pointerdown="onResizeStart('se', $event)" />
+    </div>
+
+    <transition name="float-down">
+      <div
+        v-if="selected && panelOpen && !editing"
+        class="prompt nodrag nowheel"
+        @mousedown.stop
+        @click.stop
+      >
+        <label>主题 / 你想拍什么</label>
+        <textarea
+          rows="4"
+          :value="project.current?.script?.topic || ''"
+          placeholder="主题、故事、风格、时长……想拍什么就写什么"
+          @input="patchTopic(($event.target as HTMLTextAreaElement).value)"
+        />
+        <template v-if="!playReady">
+          <label>草稿（可选）</label>
+          <textarea
+            rows="3"
+            :value="project.current?.script?.content || ''"
+            placeholder="已有大纲、台词或备注，会一起交给模型"
+            @input="patchDraftBrief(($event.target as HTMLTextAreaElement).value)"
+          />
+        </template>
+        <p v-else class="prompt-hint">会按主题和当前剧本重写。点「提炼节点」才拆人物 / 场景 / 分镜。</p>
+        <div class="prompt-foot">
+          <label class="model-pick">
+            <span>LLM</span>
+            <select v-model="llmChoice">
+              <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
+              <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
+                <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">{{ m }}</option>
+              </optgroup>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="ghost"
+            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
+            @click="generateThis($event, 'extract')"
+          >
+            {{ extractLabel }}
+          </button>
+          <button
+            type="button"
+            class="go"
+            :disabled="generating || !llmModel"
+            :title="playLabel"
+            @click="generateThis($event, 'play')"
+          >
+            ↑
+          </button>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
 <style scoped>
 .sdoc {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: visible;
+  color: var(--color-text-1);
+}
+.sdoc.on {
+  z-index: 4;
+}
+.sdoc.st-running,
+.sdoc.busy {
+  z-index: 5;
+}
+.sdoc-card {
   width: 100%;
   height: 100%;
   display: flex;
@@ -272,16 +377,31 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   border-radius: 14px;
   overflow: hidden;
   box-shadow: var(--shadow-md);
-  color: var(--color-text-1);
   position: relative;
 }
-.sdoc.editing {
+.sdoc.editing .sdoc-card {
   border-color: var(--color-accent);
 }
-.sdoc.st-running {
-  border-color: var(--color-accent);
+.sdoc.on .sdoc-card {
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
 }
-.sdoc.st-failed {
+.sdoc.st-running .sdoc-card,
+.sdoc.busy .sdoc-card {
+  border-color: #c4b5fd;
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  animation: node-busy 1.35s ease-in-out infinite;
+}
+@keyframes node-busy {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+  }
+}
+.sdoc.st-failed .sdoc-card {
   border-color: var(--color-error);
 }
 .sdoc-head {
@@ -318,8 +438,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   gap: 6px;
   flex-shrink: 0;
 }
-.sdoc-btn,
-.sdoc-gen {
+.sdoc-btn {
   flex-shrink: 0;
   font-size: 11px;
   padding: 5px 10px;
@@ -329,8 +448,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   border: none;
   cursor: pointer;
 }
-.sdoc-btn:hover,
-.sdoc-gen:hover:not(:disabled) {
+.sdoc-btn:hover {
   background: var(--color-accent);
   color: #fff;
 }
@@ -342,13 +460,6 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   background: transparent;
   border: 1px solid var(--color-border);
 }
-.sdoc-gen:disabled {
-  opacity: 0.6;
-}
-.sdoc-gen.secondary {
-  background: transparent;
-  border: 1px solid var(--color-border);
-}
 .sdoc-md,
 .sdoc-edit {
   flex: 1;
@@ -356,6 +467,9 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   overflow: auto;
   padding: 14px 16px 20px;
   cursor: text;
+}
+.sdoc-md.has-panel {
+  padding-bottom: 240px;
 }
 .sdoc-edit {
   width: 100%;
@@ -501,5 +615,119 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   height: 8px;
   border-right: 2px solid rgba(196, 181, 253, 0.85);
   border-bottom: 2px solid rgba(196, 181, 253, 0.85);
+}
+.prompt {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  top: auto;
+  z-index: 5;
+  width: auto;
+  transform: none;
+  transform-origin: 50% 100%;
+  background: #16161f;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+}
+.prompt label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 10px;
+  color: var(--color-text-4);
+}
+.prompt textarea {
+  width: 100%;
+  min-height: 72px;
+  margin: 0 0 8px;
+  resize: vertical;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+.prompt-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-4);
+}
+.prompt-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.model-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.model-pick span {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--color-text-4);
+}
+.model-pick select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 26px 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background-color: #2a2a38;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px;
+  color: #f5f5fa;
+  font-size: 11px;
+  appearance: none;
+}
+.prompt-foot .ghost {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+.prompt-foot .ghost:disabled,
+.prompt-foot .go:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.prompt-foot .go {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+.float-down-enter-active,
+.float-down-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.float-down-enter-from,
+.float-down-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 </style>

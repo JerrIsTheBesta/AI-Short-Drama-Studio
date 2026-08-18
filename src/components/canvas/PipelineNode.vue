@@ -9,6 +9,7 @@ import { cssAspectRatio } from '@/services/canvas/layout'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
+import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveImagePrompt, effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory } from '@/utils/shot'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
@@ -555,7 +556,7 @@ const cropStyle = computed(() => ({
 </script>
 
 <template>
-  <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset }]">
+  <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating || !!toolBusy }]">
     <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
     <Handle v-if="type === 'shotImage'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
     <Handle v-if="type === 'shotImage'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
@@ -631,8 +632,8 @@ const cropStyle = computed(() => ({
       </template>
       <img v-else-if="mediaUrl" :src="mediaUrl" alt="" />
       <div v-else class="ph">{{ isVideoNode ? '▶' : '＋' }}</div>
-      <span v-if="isVideoNode && durationLabel && !trimOn" class="dur">{{ durationLabel }}</span>
-      <span v-if="generating || toolBusy" class="busy">{{ toolBusy || '生成中…' }}</span>
+      <span v-if="isVideoNode && durationLabel && !trimOn && !generating && !toolBusy" class="dur">{{ durationLabel }}</span>
+      <NodeBusyOverlay v-if="generating || toolBusy" :label="toolBusy || '生成中'" />
       <div v-if="status === 'failed' && nodeMeta?.error && !selected" class="fail-dot" :title="nodeMeta.error" />
 
       <div v-if="cropOn" class="crop-mask nodrag nowheel" @mousedown.stop>
@@ -737,8 +738,21 @@ const cropStyle = computed(() => ({
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
   z-index: 4;
 }
-.pnode.st-running {
-  border-color: var(--color-accent);
+.pnode.st-running,
+.pnode.busy {
+  border-color: #c4b5fd;
+  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  animation: node-busy 1.35s ease-in-out infinite;
+  z-index: 5;
+}
+@keyframes node-busy {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+  }
 }
 .pnode.st-failed {
   border-color: var(--color-error);
@@ -860,9 +874,10 @@ const cropStyle = computed(() => ({
 .play-btn:hover {
   background: rgba(124, 58, 237, 0.9);
 }
-.dur,
-.busy {
+.dur {
   position: absolute;
+  right: 6px;
+  bottom: 6px;
   z-index: 2;
   font-size: 11px;
   font-weight: 700;
@@ -871,14 +886,6 @@ const cropStyle = computed(() => ({
   padding: 2px 6px;
   border-radius: 4px;
   pointer-events: none;
-}
-.dur {
-  right: 6px;
-  bottom: 6px;
-}
-.busy {
-  left: 6px;
-  top: 6px;
 }
 .fail-dot {
   position: absolute;

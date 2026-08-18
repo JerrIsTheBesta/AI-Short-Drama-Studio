@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useToastStore, useSettingsStore, useAssetsStore } from '@/stores'
+import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
-import Tag from '@/components/common/Tag.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import type { Script, VisualStyle, AspectRatio } from '@/types'
 
@@ -13,7 +12,6 @@ const MAX_PRODUCT_IMAGES = 5
 const router = useRouter()
 const project = useProjectStore()
 const toast = useToastStore()
-const settings = useSettingsStore()
 const assets = useAssetsStore()
 
 const topic = ref('')
@@ -342,12 +340,6 @@ async function removeProductImage(id: string) {
           </div>
           <div class="kv">
             <span>预计总时长</span><b>{{ estimatedDuration }}s</b>
-          </div>
-          <div class="kv">
-            <span>AI 模式</span>
-            <Tag :type="settings.config.aiMode === 'real' ? 'success' : 'warning'" size="sm">
-              {{ settings.config.aiMode === 'real' ? '真实 API' : '演示' }}
-            </Tag>
           </div>
         </GlassCard>
       </aside>

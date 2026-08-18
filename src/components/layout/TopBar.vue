@@ -1,22 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
+import { useProjectStore, useToastStore } from '@/stores'
 import GradientButton from '@/components/common/GradientButton.vue'
 
 const router = useRouter()
 const route = useRoute()
 const project = useProjectStore()
-const settings = useSettingsStore()
 const toast = useToastStore()
 
 const editing = ref(false)
 const nameInput = ref('')
 
 const projectName = computed(() => project.current?.name ?? '未命名项目')
-const aiModeLabel = computed(() =>
-  settings.config.aiMode === 'real' ? '🔌 真实 API' : '🎭 演示模式'
-)
 
 function startEdit() {
   editing.value = true
@@ -78,9 +74,6 @@ function newProject() {
     </div>
 
     <div class="right">
-      <span class="ai-mode" :class="`mode-${settings.config.aiMode}`">
-        {{ aiModeLabel }}
-      </span>
       <button
         class="icon-btn"
         @click="router.push('/studio')"
@@ -210,22 +203,6 @@ function newProject() {
 .saved {
   font-size: 11px;
   color: var(--color-text-4);
-}
-
-.ai-mode {
-  font-size: 11px;
-  padding: 4px 10px;
-  border-radius: var(--radius-full);
-  font-weight: 600;
-  letter-spacing: 0.3px;
-}
-.mode-mock {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fcd34d;
-}
-.mode-real {
-  background: rgba(16, 185, 129, 0.15);
-  color: #6ee7b7;
 }
 
 .icon-btn {

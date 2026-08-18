@@ -3,7 +3,7 @@
  */
 
 import { useSettingsStore } from '@/stores'
-import { envDefaults, envRealMode } from './env'
+import { envDefaults } from './env'
 import type { AIMode } from '@/stores/settings'
 
 function pick() {
@@ -15,9 +15,7 @@ function pick() {
 }
 
 export function getAIMode(): AIMode {
-  const cfg = pick()
-  if (cfg?.aiMode === 'real' || cfg?.aiMode === 'mock') return cfg.aiMode
-  return envRealMode() ? 'real' : 'mock'
+  return 'real'
 }
 
 export function getLlmConfig() {

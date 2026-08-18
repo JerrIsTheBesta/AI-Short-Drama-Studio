@@ -201,19 +201,69 @@ function goClassic() {
 <template>
   <div class="studio">
     <header class="bar">
-      <button class="bar-btn" @click="router.push('/')">← 项目</button>
+      <button class="icon-btn" title="返回项目" @click="router.push('/')">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 5 8 12l7 7" />
+        </svg>
+      </button>
       <strong>{{ project.current?.name || '画布' }}</strong>
       <span class="dim">{{ project.current?.shots.length || 0 }} 个分镜</span>
       <span v-if="project.current?.folderPath" class="dim path" :title="project.current.folderPath">
         {{ project.current.folderPath }}
       </span>
       <div class="spacer" />
-      <button class="bar-btn" @click="agentOpen = !agentOpen">{{ agentOpen ? '收起对话' : '智能体' }}</button>
-      <button class="bar-btn" @click="relayout">重整布局</button>
-      <button v-if="isDesktop()" class="bar-btn" @click="openFolder">打开文件夹</button>
-      <button class="bar-btn" @click="goClassic">经典步骤</button>
-      <button class="bar-btn" @click="openSettings">设置</button>
-      <button class="bar-btn" @click="rightOpen = !rightOpen">{{ rightOpen ? '收起右侧' : '右侧' }}</button>
+      <button
+        class="icon-btn"
+        :class="{ on: agentOpen }"
+        :title="agentOpen ? '收起对话' : '打开智能体'"
+        @click="agentOpen = !agentOpen"
+      >
+        <svg v-if="agentOpen" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="5" width="7" height="14" rx="1.5" />
+          <path d="M14 8h6M14 12h6M14 16h4" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4 3.2V6.5Z" />
+        </svg>
+      </button>
+      <button class="icon-btn" title="重整布局" @click="relayout">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="4" width="7" height="7" rx="1.2" />
+          <rect x="13" y="4" width="7" height="7" rx="1.2" />
+          <rect x="4" y="13" width="7" height="7" rx="1.2" />
+          <path d="M16.5 13.5v6.5M13.5 17h6.5" />
+        </svg>
+      </button>
+      <button v-if="isDesktop()" class="icon-btn" title="打开文件夹" @click="openFolder">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H10l2 2h6.5A1.5 1.5 0 0 1 20 9.5v8A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-10Z" />
+        </svg>
+      </button>
+      <button class="icon-btn" title="经典步骤" @click="goClassic">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M8 7h12M8 12h12M8 17h12" />
+          <circle cx="4.5" cy="7" r="1.2" />
+          <circle cx="4.5" cy="12" r="1.2" />
+          <circle cx="4.5" cy="17" r="1.2" />
+        </svg>
+      </button>
+      <button class="icon-btn" title="设置" @click="openSettings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 4.5v2.2M12 17.3V19.5M19.5 12h-2.2M6.7 12H4.5M17.3 6.7l-1.6 1.6M8.3 15.7l-1.6 1.6M17.3 17.3l-1.6-1.6M8.3 8.3 6.7 6.7" />
+        </svg>
+      </button>
+      <button
+        class="icon-btn"
+        :class="{ on: rightOpen }"
+        :title="rightOpen ? '收起右侧' : '打开右侧'"
+        @click="rightOpen = !rightOpen"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="5" width="16" height="14" rx="1.5" />
+          <path d="M15 5v14" />
+        </svg>
+      </button>
     </header>
     <div class="body">
       <AgentChat v-if="agentOpen" />
@@ -277,21 +327,39 @@ function goClassic() {
 .spacer {
   flex: 1;
 }
-.bar-btn {
-  font-size: 12px;
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   color: var(--color-text-2);
-  padding: 4px 8px;
-  border-radius: 6px;
   flex-shrink: 0;
+  cursor: pointer;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
-.bar-btn:hover {
-  background: var(--color-bg-3);
+.icon-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.bar-btn.on {
+.icon-btn:hover {
   background: var(--color-bg-3);
   color: var(--color-text-1);
+}
+.icon-btn.on {
+  background: var(--color-bg-3);
+  color: var(--color-accent);
 }
 .dock {
   width: 300px;

@@ -17,6 +17,14 @@ export interface ServiceEndpoint {
   model: string
   /** 配好后可在下拉里选 */
   models: string[]
+  /** 设置页选中的接入方式 id，如 deepseek / apiyi / custom */
+  provider?: string
+}
+
+/** 一套已保存的 LLM 接入（地址 + Key + 模型列表） */
+export interface LlmProfile extends ServiceEndpoint {
+  id: string
+  name: string
 }
 
 export interface TtsEndpoint extends ServiceEndpoint {
@@ -36,6 +44,9 @@ export interface AppSettings {
   defaultAspectRatio: string
   autoSaveInterval: number
   llm: ServiceEndpoint
+  /** 已保存的多套 LLM，可随时切换 */
+  llms: LlmProfile[]
+  activeLlmId: string
   vision: ServiceEndpoint
   image: ServiceEndpoint
   tts: TtsEndpoint
@@ -66,6 +77,47 @@ function uniq(list: string[]): string[] {
   return [...new Set(list.map((s) => s.trim()).filter(Boolean))]
 }
 
+/** 每个接入下可切换的模型名，给智能体 / 写剧本下拉用 */
+export function llmModelGroups(llms: LlmProfile[]) {
+  return (llms ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    models: uniq([p.model, ...(p.models ?? [])])
+  }))
+}
+
+export function llmChoiceKey(profileId: string, model: string) {
+  return `${profileId}::${model}`
+}
+
+export function parseLlmChoiceKey(key: string): { profileId: string; model: string } | null {
+  const i = key.indexOf('::')
+  if (i <= 0) return null
+  return { profileId: key.slice(0, i), model: key.slice(i + 2) }
+}
+
+function newId() {
+  return `llm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+}
+
+function asEndpoint(ep: ServiceEndpoint): ServiceEndpoint {
+  return {
+    baseUrl: ep.baseUrl,
+    apiKey: ep.apiKey,
+    model: ep.model,
+    models: uniq(ep.models ?? []),
+    provider: ep.provider
+  }
+}
+
+function profileFromEndpoint(ep: ServiceEndpoint, name: string, id?: string): LlmProfile {
+  return {
+    id: id || newId(),
+    name,
+    ...asEndpoint(ep)
+  }
+}
+
 function endpoint(
   baseUrl: string,
   apiKey: string,
@@ -82,13 +134,17 @@ function endpoint(
 
 function buildDefaults(): AppSettings {
   const env = envDefaults()
+  const llm = endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS)
+  const first = profileFromEndpoint(llm, '默认 LLM')
   return {
     theme: 'dark',
-    aiMode: env.realMode ? 'real' : 'mock',
+    aiMode: 'real',
     debug: false,
     defaultAspectRatio: '16:9',
     autoSaveInterval: 0,
-    llm: endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS),
+    llm,
+    llms: [first],
+    activeLlmId: first.id,
     vision: endpoint(env.vision.baseUrl, env.vision.apiKey, env.vision.model, VISION_PRESETS),
     image: endpoint(env.image.baseUrl, env.image.apiKey, env.image.model, IMAGE_PRESETS),
     tts: {
@@ -131,10 +187,34 @@ function load(): AppSettings {
         (model) => !/^(qwen3\.7|qwen-vl-)/i.test(model)
       )
     }
+    const savedProfiles = Array.isArray(parsed.llms)
+      ? parsed.llms.filter((p): p is LlmProfile => Boolean(p && p.id && p.name))
+      : []
+    const llms = savedProfiles.length
+      ? savedProfiles.map((p) =>
+          profileFromEndpoint(
+            {
+              ...llm,
+              ...p,
+              models: uniq([...(p.models ?? []), ...(p.model ? [p.model] : [])])
+            },
+            p.name,
+            p.id
+          )
+        )
+      : [profileFromEndpoint(llm, '默认 LLM')]
+    const activeLlmId = llms.some((p) => p.id === parsed.activeLlmId)
+      ? (parsed.activeLlmId as string)
+      : llms[0].id
+    const active = llms.find((p) => p.id === activeLlmId) || llms[0]
+
     return {
       ...defaults,
       ...parsed,
-      llm,
+      aiMode: 'real',
+      llm: asEndpoint(active),
+      llms,
+      activeLlmId: active.id,
       vision,
       image: {
         ...defaults.image,
@@ -173,8 +253,76 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, ...patch }
   }
 
-  function patchLlm(patch: Partial<ServiceEndpoint>) {
-    config.value = { ...config.value, llm: { ...config.value.llm, ...patch } }
+  function syncActive(next: LlmProfile, list?: LlmProfile[]) {
+    const llms = (list ?? config.value.llms).map((p) => (p.id === next.id ? next : p))
+    config.value = {
+      ...config.value,
+      llms,
+      activeLlmId: next.id,
+      llm: asEndpoint(next)
+    }
+  }
+
+  function patchLlm(patch: Partial<LlmProfile>) {
+    const id = config.value.activeLlmId
+    const cur =
+      config.value.llms.find((p) => p.id === id) || profileFromEndpoint(config.value.llm, '默认 LLM', id)
+    syncActive({
+      ...cur,
+      ...patch,
+      models: uniq(patch.models ?? cur.models)
+    })
+  }
+
+  function addLlm(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    model: string
+    models: string[]
+    provider?: string
+  }) {
+    const profile = profileFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        model: seed.model,
+        models: seed.models,
+        provider: seed.provider
+      },
+      seed.name
+    )
+    syncActive(profile, [...config.value.llms, profile])
+  }
+
+  function selectLlm(id: string) {
+    const profile = config.value.llms.find((p) => p.id === id)
+    if (profile) syncActive(profile)
+  }
+
+  /** 切到某套接入，并指定其中的模型名 */
+  function selectLlmModel(profileId: string, model: string) {
+    const profile = config.value.llms.find((p) => p.id === profileId)
+    const name = model.trim()
+    if (!profile || !name) return
+    syncActive({
+      ...profile,
+      model: name,
+      models: uniq([...(profile.models ?? []), name, profile.model])
+    })
+  }
+
+  function removeLlm(id: string) {
+    if (config.value.llms.length <= 1) return
+    const llms = config.value.llms.filter((p) => p.id !== id)
+    const next = llms.find((p) => p.id === config.value.activeLlmId) || llms[0]
+    syncActive(next, llms)
+  }
+
+  function renameLlm(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchLlm({ name: n })
   }
 
   function patchVision(patch: Partial<ServiceEndpoint>) {
@@ -193,9 +341,17 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, video: { ...config.value.video, ...patch } }
   }
 
+  function patchMusic(patch: Partial<ServiceEndpoint>) {
+    config.value = { ...config.value, music: { ...config.value.music, ...patch } }
+  }
+
   function addModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
     const n = name.trim()
     if (!n) return
+    if (kind === 'llm') {
+      patchLlm({ models: uniq([...config.value.llm.models, n]), model: n })
+      return
+    }
     const cur = config.value[kind]
     const models = uniq([...cur.models, n])
     config.value = {
@@ -205,6 +361,15 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function removeModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
+    if (kind === 'llm') {
+      const models = config.value.llm.models.filter((m) => m !== name)
+      if (!models.length) return
+      patchLlm({
+        models,
+        model: config.value.llm.model === name ? models[0] : config.value.llm.model
+      })
+      return
+    }
     const cur = config.value[kind]
     const models = cur.models.filter((m) => m !== name)
     if (!models.length) return
@@ -212,5 +377,21 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, [kind]: { ...cur, models, model } }
   }
 
-  return { config, update, patchLlm, patchVision, patchImage, patchTts, patchVideo, addModel, removeModel }
+  return {
+    config,
+    update,
+    patchLlm,
+    addLlm,
+    selectLlm,
+    selectLlmModel,
+    removeLlm,
+    renameLlm,
+    patchVision,
+    patchImage,
+    patchTts,
+    patchVideo,
+    patchMusic,
+    addModel,
+    removeModel
+  }
 })
