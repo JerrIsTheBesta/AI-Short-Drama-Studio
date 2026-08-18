@@ -1,20 +1,30 @@
 import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
+import { needsExternalTts } from '@/utils/shot'
 
 export interface PipelineStep {
-  id: 'storyboard' | 'review' | 'cast' | 'images' | 'videos' | 'audio'
+  id: 'play' | 'board' | 'review' | 'cast' | 'images' | 'videos' | 'audio'
   label: string
   tools: { tool: string }[]
   focusNodeId?: string
 }
 
 export function nextPipelineStep(p: Project | null | undefined): PipelineStep | null {
-  if (!p) return { id: 'storyboard', label: '拆剧本', tools: [{ tool: 'generate_storyboard' }], focusNodeId: 'script' }
+  if (!p) return { id: 'play', label: '写剧本', tools: [{ tool: 'generate_play' }], focusNodeId: 'script' }
+  const playReady = Boolean(p.script?.playReady && p.script.content?.trim())
+  if (!playReady) {
+    return {
+      id: 'play',
+      label: '写剧本',
+      tools: [{ tool: 'generate_play' }],
+      focusNodeId: 'script'
+    }
+  }
   if (!p.shots.length) {
     return {
-      id: 'storyboard',
-      label: '拆剧本',
-      tools: [{ tool: 'generate_storyboard' }],
+      id: 'board',
+      label: '提炼节点',
+      tools: [{ tool: 'extract_cast' }],
       focusNodeId: 'script'
     }
   }
@@ -55,7 +65,7 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-shots'
     }
   }
-  if (p.shots.some((s) => s.voiceover && !s.audioAssetId)) {
+  if (p.shots.some((s) => needsExternalTts(s) && !s.audioAssetId)) {
     return {
       id: 'audio',
       label: '口播',
@@ -78,9 +88,51 @@ export function isContinueRequest(text: string) {
   )
 }
 
+/** 打招呼 / 闲聊，不应当成「需求含糊」去套澄清模板 */
+export function isGreetingOrChitchat(text: string) {
+  const t = text.trim()
+  if (!t) return false
+  if (
+    /^(你好|您好|嗨|哈喽|哈囉|在吗|在嘛|在不在|早上好|中午好|下午好|晚上好|你好啊|你好呀|hey|hi|hello|yo)([！!。.～~吗？? ]*)$/i.test(
+      t
+    )
+  ) {
+    return true
+  }
+  if (/^(你好|您好|嗨|哈喽|hey|hi|hello)[，,！!。. ]*(在吗|请问|帮个忙)?$/i.test(t) && t.length <= 12) {
+    return true
+  }
+  return false
+}
+
+export function greetingReply(p: Project | null | undefined): string {
+  const next = nextPipelineStep(p)
+  if (!p?.script?.content?.trim()) {
+    return [
+      '你好，我是画布里的制作助手。',
+      '把主题或口播文案发我，我先写成完整剧本，再提炼人物/场景/分镜节点，然后配图出视频。',
+      '也可以直接说「全流程」。'
+    ].join('\n')
+  }
+  if (!p.script?.playReady) {
+    return '你好。草稿已经有了，回「写剧本」或「继续」我先写成完整剧本。'
+  }
+  if (!p.shots.length) {
+    return '你好。完整剧本在左侧，回「提炼节点」或「继续」我再拆出人物、场景、分镜。'
+  }
+  if (needsPlayReview(p)) {
+    return '你好。分镜节点已铺上画布，看完回「确认通过」或「继续」，我再往下做人设和场景。'
+  }
+  if (next) {
+    return `你好。当前下一步是「${next.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
+  }
+  return '你好。素材基本齐了，可以点「合成成片」出结果；要改某一镜直接点节点重新生成就行。'
+}
+
 export function isVagueRequest(text: string, p: Project | null | undefined) {
   const t = text.trim()
   if (!t) return true
+  if (isGreetingOrChitchat(t)) return false
   if (
     /拆分镜|拆镜|故事板|出分镜|生成分镜|剧本|人设|角色图|场景图|底板|配图|出图|视频|口播|第.+镜|全流程|全部做完|确认通过|验收|继续|下一步/.test(
       t
@@ -104,17 +156,20 @@ export function clarifyMessage(p: Project | null | undefined): string {
     lines.push('3. 只要剧本，还是人设配图一起做？全自动可以说「全流程」。')
     return lines.join('\n')
   }
+  if (!p.script?.playReady) {
+    return '草稿已经有了。回「写剧本」或「继续」，我先写成完整剧本（还不拆节点）。'
+  }
   if (!p.shots.length) {
-    return '文案已经有了。按这份拆剧本吗？回「拆剧本」或「继续」我就写到画布上。'
+    return '完整剧本已经在左侧。回「提炼节点」或「继续」，我再拆出人物、场景、分镜节点。'
   }
   if (needsPlayReview(p)) {
-    return '剧本已在画布左侧。看完回「确认通过」或「继续」，我再做人设和场景。'
+    return '分镜节点已经铺上画布。看完回「确认通过」或「继续」，我再做人设和场景。'
   }
   const n = nextPipelineStep(p)
   if (n) {
     return `下一步是「${n.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
   }
-  return '人设、配图、视频目前都齐了。要改某一镜可以说「重新生成第1镜配图」。'
+  return '人设、配图、视频目前都齐了。可以点「合成成片」出结果；要改某一镜可以说「重新生成第1镜配图」。'
 }
 
 export function continueQuestion(next: PipelineStep | null, justDid: string) {
@@ -123,9 +178,11 @@ export function continueQuestion(next: PipelineStep | null, justDid: string) {
 }
 
 export const TOOL_LABEL: Record<string, string> = {
-  generate_storyboard: '拆解剧本，写到画布',
-  extract_cast: '拆解剧本，写到画布',
+  generate_play: '写完整剧本',
+  generate_storyboard: '写完整剧本',
+  extract_cast: '从剧本提炼人物/场景/分镜',
   approve_play: '记下剧本已验收',
+  revise_shot: '局部修改分镜',
   generate_sheet: '生成人设图',
   generate_all_sheets: '补齐人设图',
   generate_scene: '生成场景图',

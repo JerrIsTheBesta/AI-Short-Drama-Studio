@@ -8,6 +8,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import { isDesktop, desktop } from '@/services/desktop'
 import { projectCoverUrl } from '@/services/storage'
+import { runVideoRemake } from '@/services/canvas/runner'
 import type { AspectRatio } from '@/types'
 
 const router = useRouter()
@@ -21,6 +22,14 @@ const newName = ref('')
 const newTopic = ref('')
 const newStyle = ref<'cinematic' | 'anime' | 'photorealistic' | '3d-render'>('cinematic')
 const newAspectRatio = ref<AspectRatio>('16:9')
+const pipelineMode = ref<'standard' | 'remake'>('standard')
+const remakeVideo = ref<File | null>(null)
+const remakeVideoUrl = ref('')
+const remakeProducts = ref<File[]>([])
+const remakeProductUrls = ref<string[]>([])
+const creating = ref(false)
+const createProgress = ref('')
+const MAX_REMAKE_PRODUCTS = 8
 
 /** 比例预设（带尺寸） */
 const aspectPresets: { value: AspectRatio; label: string; desc: string; w: number; h: number }[] = [
@@ -82,32 +91,120 @@ function openProject(id: string) {
   })
 }
 
+function revokeRemakePreviews() {
+  if (remakeVideoUrl.value) URL.revokeObjectURL(remakeVideoUrl.value)
+  remakeVideoUrl.value = ''
+  for (const u of remakeProductUrls.value) URL.revokeObjectURL(u)
+  remakeProductUrls.value = []
+}
+
+function resetCreateForm() {
+  newName.value = ''
+  newTopic.value = ''
+  pipelineMode.value = 'standard'
+  remakeVideo.value = null
+  remakeProducts.value = []
+  revokeRemakePreviews()
+  creating.value = false
+  createProgress.value = ''
+}
+
+function closeCreateModal() {
+  if (creating.value) return
+  showCreateModal.value = false
+  resetCreateForm()
+}
+
+function onPickRemakeVideo(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  if (!file.type.startsWith('video/')) {
+    toast.warn('请上传视频文件')
+    return
+  }
+  if (remakeVideoUrl.value) URL.revokeObjectURL(remakeVideoUrl.value)
+  remakeVideo.value = file
+  remakeVideoUrl.value = URL.createObjectURL(file)
+}
+
+function onPickRemakeProducts(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith('image/'))
+  input.value = ''
+  const room = MAX_REMAKE_PRODUCTS - remakeProducts.value.length
+  const take = files.slice(0, Math.max(0, room))
+  if (!take.length) return
+  remakeProducts.value = [...remakeProducts.value, ...take]
+  remakeProductUrls.value = [...remakeProductUrls.value, ...take.map((f) => URL.createObjectURL(f))]
+}
+
+function removeRemakeProduct(index: number) {
+  URL.revokeObjectURL(remakeProductUrls.value[index])
+  remakeProducts.value = remakeProducts.value.filter((_, i) => i !== index)
+  remakeProductUrls.value = remakeProductUrls.value.filter((_, i) => i !== index)
+}
+
 async function createProject() {
+  if (creating.value) return
   if (!newName.value.trim()) {
     toast.warn('请输入项目名')
     return
   }
-  const p = await project.createNamed(newName.value.trim())
-  const preset = aspectPresets.find((a) => a.value === newAspectRatio.value)!
-  p.script = {
-    id: 's_' + Date.now().toString(36),
-    topic: newTopic.value.trim() || newName.value.trim(),
-    content: '',
-    keywords: [],
-    style: newStyle.value,
-    aspectRatio: newAspectRatio.value,
-    shotDuration: 5,
-    createdAt: Date.now()
+  if (pipelineMode.value === 'remake') {
+    if (!remakeVideo.value) {
+      toast.warn('视频复刻需要上传一条参考视频')
+      return
+    }
+    if (!remakeProducts.value.length) {
+      toast.warn('视频复刻必须上传至少一张产品图')
+      return
+    }
   }
-  p.settings.aspectRatio = newAspectRatio.value
-  p.settings.width = preset.w
-  p.settings.height = preset.h
-  project.setScript(p.script)
-  project.setSettings(p.settings)
-  showCreateModal.value = false
-  newName.value = ''
-  newTopic.value = ''
-  router.push('/studio')
+  creating.value = true
+  createProgress.value = '创建项目…'
+  let createdId = ''
+  try {
+    const p = await project.createNamed(newName.value.trim())
+    createdId = p.id
+    const preset = aspectPresets.find((a) => a.value === newAspectRatio.value)!
+    p.pipelineMode = pipelineMode.value
+    p.script = {
+      id: 's_' + Date.now().toString(36),
+      topic: newTopic.value.trim() || newName.value.trim(),
+      content: '',
+      keywords: [],
+      style: newStyle.value,
+      aspectRatio: newAspectRatio.value,
+      shotDuration: 5,
+      createdAt: Date.now()
+    }
+    p.settings.aspectRatio = newAspectRatio.value
+    p.settings.width = preset.w
+    p.settings.height = preset.h
+    project.setScript(p.script)
+    project.setSettings(p.settings)
+    await project.save()
+
+    if (pipelineMode.value === 'remake' && remakeVideo.value) {
+      await runVideoRemake({
+        videoFile: remakeVideo.value,
+        productFiles: remakeProducts.value,
+        onProgress: (msg) => {
+          createProgress.value = msg
+        }
+      })
+      toast.success('已按参考视频生成脚本，配音将后期合成')
+    }
+
+    showCreateModal.value = false
+    resetCreateForm()
+    router.push('/studio')
+  } catch (e: any) {
+    toast.error(e?.message || '创建失败，素材已保存，可进画布重试')
+    showCreateModal.value = false
+    resetCreateForm()
+    if (createdId && project.current?.id === createdId) router.push('/studio')
+  }
 }
 
 function deleteProject(id: string) {
@@ -233,6 +330,7 @@ function fmtDuration(sec: number) {
               <div class="proj-thumb-icon">🎬</div>
             </div>
             <div class="proj-meta-top">
+              <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
                 🎬 {{ p.shots.length }} 个分镜
               </Tag>
@@ -276,61 +374,147 @@ function fmtDuration(sec: number) {
 
     <!-- 创建项目弹窗 -->
     <transition name="fade">
-      <div v-if="showCreateModal" class="modal-mask" @click.self="showCreateModal = false">
-        <GlassCard padding="lg" class="modal">
-          <h3>创建新项目</h3>
-          <p class="modal-desc">起个好名字，下一步可以填具体文案</p>
+      <div v-if="showCreateModal" class="modal-mask" @click.self="closeCreateModal">
+        <GlassCard padding="lg" class="modal" :class="{ remake: pipelineMode === 'remake' }">
+          <h3>{{ creating ? '正在准备项目' : '创建新项目' }}</h3>
+          <p class="modal-desc">
+            {{
+              creating
+                ? createProgress
+                : pipelineMode === 'remake'
+                  ? '上传参考成片和产品图，AI 会按镜头复刻脚本；配音后期合成，成片视频不出口播。'
+                  : '起个好名字，下一步可以填具体文案'
+            }}
+          </p>
 
-          <label class="field">
-            <span>项目名</span>
-            <input v-model="newName" placeholder="例如：夏日旅行 vlog" class="input" />
-          </label>
+          <div v-if="creating" class="creating-box">
+            <div class="creating-spin" />
+            <div class="creating-text">{{ createProgress || '处理中…' }}</div>
+          </div>
 
-          <label class="field">
-            <span>主题（可选）</span>
-            <input v-model="newTopic" placeholder="一句话描述视频主题" class="input" />
-          </label>
+          <template v-else>
+            <label class="field">
+              <span>创作方式</span>
+              <div class="mode-grid">
+                <button
+                  class="mode-pick"
+                  :class="{ active: pipelineMode === 'standard' }"
+                  @click="pipelineMode = 'standard'"
+                >
+                  <div class="mode-title">普通创作</div>
+                  <div class="mode-desc">从主题/文案写剧本</div>
+                </button>
+                <button
+                  class="mode-pick"
+                  :class="{ active: pipelineMode === 'remake' }"
+                  @click="pipelineMode = 'remake'"
+                >
+                  <div class="mode-title">视频复刻</div>
+                  <div class="mode-desc">按参考视频镜头换上你的产品</div>
+                </button>
+              </div>
+            </label>
 
-          <label class="field">
-            <span>画面风格</span>
-            <div class="style-grid">
-              <button
-                v-for="s in ['cinematic', 'anime', 'photorealistic', '3d-render'] as const"
-                :key="s"
-                class="style-pick"
-                :class="{ active: newStyle === s }"
-                @click="newStyle = s"
-              >
-                {{ { cinematic: '电影', anime: '动漫', photorealistic: '写实', '3d-render': '3D 渲染' }[s] }}
-              </button>
-            </div>
-          </label>
+            <label class="field">
+              <span>项目名</span>
+              <input v-model="newName" placeholder="例如：夏日旅行 vlog" class="input" />
+            </label>
 
-          <label class="field">
-            <span>视频比例（生成图片和视频都会用这个比例）</span>
-            <div class="aspect-grid">
-              <button
-                v-for="a in aspectPresets"
-                :key="a.value"
-                class="aspect-pick"
-                :class="{ active: newAspectRatio === a.value }"
-                @click="newAspectRatio = a.value"
-              >
-                <div class="aspect-visual" :data-ar="a.value">
-                  <div class="aspect-box" />
+            <label class="field">
+              <span>主题（可选）</span>
+              <input v-model="newTopic" placeholder="一句话描述视频主题" class="input" />
+            </label>
+
+            <template v-if="pipelineMode === 'remake'">
+              <div class="field">
+                <span>参考视频（必传 1 条）</span>
+                <div v-if="remakeVideo" class="video-preview">
+                  <video :src="remakeVideoUrl" controls muted playsinline />
+                  <div class="file-name">{{ remakeVideo.name }}</div>
+                  <label class="replace-video">
+                    更换视频
+                    <input class="file-hidden" type="file" accept="video/*" @change="onPickRemakeVideo" />
+                  </label>
                 </div>
-                <div class="aspect-info">
-                  <div class="aspect-label">{{ a.label }}</div>
-                  <div class="aspect-desc">{{ a.desc }}</div>
-                  <div class="aspect-size">{{ a.w }}×{{ a.h }}</div>
+                <label v-else class="video-add">
+                  ＋ 上传参考成片
+                  <input class="file-hidden" type="file" accept="video/*" @change="onPickRemakeVideo" />
+                </label>
+                <p class="upload-hint">支持 mp4 / mov 等常见成片，会抽帧理解镜头语言。</p>
+              </div>
+
+              <div class="field">
+                <span>产品图（必传，可多张，最多 {{ MAX_REMAKE_PRODUCTS }} 张）</span>
+                <p class="field-hint">复刻镜头里的商品都会换成这些图。作图走 APIYI GPT。</p>
+                <div class="product-row">
+                  <div
+                    v-for="(url, i) in remakeProductUrls"
+                    :key="url"
+                    class="product-thumb"
+                  >
+                    <img :src="url" alt="产品图" />
+                    <button class="product-del" type="button" @click="removeRemakeProduct(i)">×</button>
+                  </div>
+                  <label
+                    v-if="remakeProducts.length < MAX_REMAKE_PRODUCTS"
+                    class="product-add"
+                  >
+                    ＋ 上传产品图
+                    <input
+                      class="file-hidden"
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      @change="onPickRemakeProducts"
+                    />
+                  </label>
                 </div>
-              </button>
-            </div>
-          </label>
+              </div>
+            </template>
+
+            <label class="field">
+              <span>画面风格</span>
+              <div class="style-grid">
+                <button
+                  v-for="s in ['cinematic', 'anime', 'photorealistic', '3d-render'] as const"
+                  :key="s"
+                  class="style-pick"
+                  :class="{ active: newStyle === s }"
+                  @click="newStyle = s"
+                >
+                  {{ { cinematic: '电影', anime: '动漫', photorealistic: '写实', '3d-render': '3D 渲染' }[s] }}
+                </button>
+              </div>
+            </label>
+
+            <label class="field">
+              <span>视频比例（生成图片和视频都会用这个比例，复刻请尽量和参考视频一致）</span>
+              <div class="aspect-grid">
+                <button
+                  v-for="a in aspectPresets"
+                  :key="a.value"
+                  class="aspect-pick"
+                  :class="{ active: newAspectRatio === a.value }"
+                  @click="newAspectRatio = a.value"
+                >
+                  <div class="aspect-visual" :data-ar="a.value">
+                    <div class="aspect-box" />
+                  </div>
+                  <div class="aspect-info">
+                    <div class="aspect-label">{{ a.label }}</div>
+                    <div class="aspect-desc">{{ a.desc }}</div>
+                    <div class="aspect-size">{{ a.w }}×{{ a.h }}</div>
+                  </div>
+                </button>
+              </div>
+            </label>
+          </template>
 
           <div class="modal-actions">
-            <GradientButton type="ghost" @click="showCreateModal = false">取消</GradientButton>
-            <GradientButton icon="✨" @click="createProject">创建并开始</GradientButton>
+            <GradientButton type="ghost" :disabled="creating" @click="closeCreateModal">取消</GradientButton>
+            <GradientButton icon="✨" :loading="creating" :disabled="creating" @click="createProject">
+              {{ pipelineMode === 'remake' ? '创建并分析视频' : '创建并开始' }}
+            </GradientButton>
           </div>
         </GlassCard>
       </div>
@@ -601,6 +785,11 @@ function fmtDuration(sec: number) {
 .modal {
   width: 90%;
   max-width: 460px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+.modal.remake {
+  max-width: 560px;
 }
 .modal h3 {
   margin: 0 0 var(--space-1);
@@ -733,5 +922,163 @@ function fmtDuration(sec: number) {
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-6);
+}
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.mode-pick {
+  text-align: left;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-2);
+  transition: all var(--duration-fast);
+}
+.mode-pick:hover {
+  border-color: var(--color-border-strong);
+}
+.mode-pick.active {
+  background: var(--grad-primary-soft);
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+}
+.mode-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.mode-desc {
+  font-size: 11px;
+  color: var(--color-text-3);
+  line-height: 1.4;
+}
+.file-hidden {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.field {
+  position: relative;
+}
+.field-hint,
+.upload-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  line-height: 1.5;
+}
+.video-preview video {
+  width: 100%;
+  max-height: 180px;
+  border-radius: var(--radius-sm);
+  background: #000;
+  object-fit: contain;
+}
+.video-add,
+.replace-video {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 6px;
+  padding: 18px 12px;
+  font-size: 13px;
+  color: var(--color-text-3);
+  background: var(--color-bg-2);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.replace-video {
+  padding: 8px;
+  font-size: 12px;
+}
+.video-add:hover,
+.replace-video:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+}
+.file-name {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  word-break: break-all;
+}
+.product-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.product-thumb {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--color-bg-2);
+}
+.product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.product-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+}
+.product-add {
+  width: 72px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-text-3);
+  background: var(--color-bg-2);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.product-add:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+}
+.creating-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 28px 8px 12px;
+}
+.creating-spin {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(124, 58, 237, 0.25);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.creating-text {
+  font-size: 13px;
+  color: var(--color-text-2);
+  text-align: center;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>

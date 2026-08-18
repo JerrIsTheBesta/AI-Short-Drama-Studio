@@ -33,6 +33,8 @@ export interface ExportInput {
   voiceoverVolume?: number
   /** 是否保留各段视频自带的环境音效（默认 true） */
   keepAmbientAudio?: boolean
+  /** 分镜级原声音轨决策；H3 自带对白/口播可强制保留，不受全局环境音开关影响 */
+  sourceAudioMap?: Map<string, boolean>
   format?: 'mp4' | 'webm'
   onProgress?: (msg: string) => void
 }
@@ -104,7 +106,9 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
       const duration = Math.max(0.1, clip.duration)
       const sourceIn = Math.max(0, clip.sourceIn || 0)
       const speed = clip.speed && clip.speed > 0 ? clip.speed : 1
-      const keepAmbient = input.keepAmbientAudio !== false && media.kind === 'video'
+      const keepAmbient =
+        (input.sourceAudioMap?.get(clip.shotId) ?? input.keepAmbientAudio !== false) &&
+        media.kind === 'video'
       const ambientVol = keepAmbient
         ? Math.max(0, Math.min(2, clip.volume ?? input.originalVolume ?? 0.55))
         : 0

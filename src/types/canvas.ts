@@ -8,6 +8,7 @@ export type CanvasNodeType =
   | 'shotVideo'
   | 'audio'
   | 'export'
+  | 'final'
   | 'groupFrame'
 
 export interface CanvasNode {

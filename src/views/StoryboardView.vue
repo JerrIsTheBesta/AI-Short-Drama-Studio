@@ -179,6 +179,7 @@ function addShot() {
     visualPrompt: '',
     audioDescription: '',
     voiceover: '',
+    audioMode: 'h3-dialogue',
     duration: project.current.script?.shotDuration ?? 5,
     cameraMovement: 'static',
     status: 'draft'

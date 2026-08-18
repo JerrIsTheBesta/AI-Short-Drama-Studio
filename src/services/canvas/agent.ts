@@ -2,24 +2,17 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
-import {
-  runCanvasNode,
-  runStoryboard,
-  generateMissingSheets,
-  generateMissingPlates,
-  generateMissingImages,
-  generateMissingVideos,
-  generateMissingAudio
-} from './runner'
 import { rebuildCanvasGraph } from './layout'
-import { inferVisualStyleFromText } from '@/utils/visualStyle'
-import { mapPool } from './jobs'
-import { revealCanvas } from './canvasBridge'
+import { projectContextPrompt } from './contextBuilder'
+import { runAgentLoop } from './agentLoop'
+import { getAgentState } from './taskStore'
 import {
   continueQuestion,
   clarifyMessage,
   isContinueRequest,
   isVagueRequest,
+  isGreetingOrChitchat,
+  greetingReply,
   nextPipelineStep,
   TOOL_LABEL,
   type PipelineStep
@@ -58,37 +51,9 @@ export interface AgentTurnResult {
   results: AgentToolResult[]
   chips: { label: string; text: string }[]
 }
-
-function projectDigest() {
-  const p = useProjectStore().current
-  if (!p) return '（无项目）'
-  return JSON.stringify(
-    {
-      name: p.name,
-      topic: p.script?.topic,
-      content: (p.script?.content ?? '').slice(0, 800),
-      subjects: (p.subjects ?? []).map((s) => ({
-        id: s.id,
-        name: s.name,
-        hasSheet: Boolean(s.designSheetAssetId)
-      })),
-      scenes: (p.scenes ?? []).map((s) => ({
-        id: s.id,
-        name: s.name,
-        hasPlate: Boolean(s.plateAssetId)
-      })),
-      shots: p.shots.map((s) => ({
-        id: s.id,
-        index: s.index,
-        title: s.title,
-        hasImage: Boolean(s.imageAssetId),
-        hasVideo: Boolean(s.videoAssetId),
-        hasAudio: Boolean(s.audioAssetId)
-      }))
-    },
-    null,
-    2
-  )
+export interface AgentRunOptions {
+  signal?: AbortSignal
+  autonomy?: 'assist' | 'gated' | 'autopilot'
 }
 
 const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活一边告诉用户画布上发生了什么。
@@ -96,16 +61,19 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 硬性规则：
 1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
-3. 拆完剧本必须停，告诉用户「画布左侧已经出现完整剧本」。问要不要继续做人设。同一轮不要既拆剧本又出图，除非用户说了「全流程」。
+3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本（不创建人物/场景/分镜节点）；用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 4. 每做完一步，say 里问要不要继续下一步。用户说「继续」才走下一步。
 5. 没说「全流程 / 全部做完」禁止一次把人设+配图+视频全做完。
-6. 剧本未验收时禁止配图/视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
+6. 分镜节点未验收时禁止配图/视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
 7. 一次最多 8 个 actions。
 
 可用工具：
 { "tool": "seed_script", "text": "用户原文" }
+{ "tool": "generate_play" }
+{ "tool": "extract_cast" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
+{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "配图静帧词，可选", "imagePrompt": "可选", "videoPrompt": "视频内容表现：谁做什么、说什么、镜头怎么走，可选", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
 { "tool": "generate_shot_image", "shotId": "shot_xxx" }
@@ -200,7 +168,8 @@ function wantAll(text: string) {
 export async function runAgentTurn(
   history: AgentMessage[],
   userText: string,
-  onEvent: AgentProgress
+  onEvent: AgentProgress,
+  options: AgentRunOptions = {}
 ): Promise<AgentTurnResult> {
   const project = useProjectStore()
   if (!project.current) {
@@ -208,6 +177,21 @@ export async function runAgentTurn(
   }
 
   const p0 = project.current
+  if (isGreetingOrChitchat(userText)) {
+    const n = nextPipelineStep(p0)
+    return {
+      reply: greetingReply(p0),
+      results: [],
+      chips: n
+        ? nextChips(n)
+        : p0.script?.content?.trim()
+          ? clarifyChips(p0)
+          : [
+              { label: '发主题拆剧本', text: '帮我拆剧本' },
+              { label: '全流程', text: '全流程跑完' }
+            ]
+    }
+  }
   if (/^(先看看|先看|等一下|先不|不用了)([，,。!！ ]*)$/.test(userText.trim())) {
     const n = nextPipelineStep(p0)
     return {
@@ -239,13 +223,15 @@ export async function runAgentTurn(
         { role: 'system', content: `${TOOLS_HINT}\n\n${skillPack.prompt}` },
         {
           role: 'user',
-          content: `当前项目快照：\n${projectDigest()}\n\n上面是状态。下面对话里最后一句才是本轮任务。需求含糊就提问，不要瞎做。做完一步要问是否继续。`
+          content: `当前项目完整上下文：\n${projectContextPrompt(userText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。需求含糊就提问，不要瞎做。只修改用户点名的范围。`
         },
         ...chat
       ],
       temperature: 0.2,
       jsonMode: true,
-      maxTokens: 2000
+      maxTokens: 2000,
+      signal: options.signal,
+      timeoutMs: 120_000
     })
     plan = parseAgentJson(resp.content)
     plan.actions = applyPlayGate(
@@ -262,7 +248,9 @@ export async function runAgentTurn(
     needsPlayReview(project.current) &&
     !isApprovePlayRequest(userText) &&
     !isContinueRequest(userText) &&
-    !plan.actions.some((a) => a.tool === 'generate_storyboard' || a.tool === 'seed_script')
+    !plan.actions.some(
+      (a) => a.tool === 'generate_storyboard' || a.tool === 'generate_play' || a.tool === 'seed_script'
+    )
   if (gated && !plan.actions.length) {
     plan.say = PLAY_GATE_MSG
   }
@@ -274,11 +262,57 @@ export async function runAgentTurn(
   }
 
   onEvent({ kind: 'log', label: '开始在画布上干活' })
-  const results = await execActionList(plan.actions.slice(0, 8), onEvent)
+  const autonomy = options.autonomy ?? getAgentState().autonomy
+  const loop = await runAgentLoop(plan.actions.slice(0, 8), {
+    request: userText,
+    autonomy,
+    signal: options.signal,
+    onEvent,
+    replan: getAIMode() === 'real'
+      ? async ({ error, completed, remaining, attempt }) => {
+          const response = await callLLM({
+            messages: [
+              {
+                role: 'system',
+                content: `${TOOLS_HINT}\n\n你正在做失败恢复。只输出 JSON。不要重复已经成功的工具；不要用相同参数盲目重试鉴权或输入错误。最多给 4 个替代 actions。`
+              },
+              {
+                role: 'user',
+                content: `原任务：${userText}\n第 ${attempt} 次恢复。\n失败工具：${error.tool}\n错误：${error.message}\n已完成：${JSON.stringify(completed)}\n剩余：${JSON.stringify(remaining)}\n最新项目：${projectContextPrompt(userText)}`
+              }
+            ],
+            temperature: 0.1,
+            jsonMode: true,
+            maxTokens: 1200,
+            signal: options.signal,
+            timeoutMs: 90_000
+          })
+          const repaired = parseAgentJson(response.content)
+          return applyPlayGate(
+            dedupeActions(sanitizeActions(repaired.actions, userText)),
+            userText
+          ).slice(0, 4)
+        }
+      : undefined
+  })
+  const results = loop.results
 
   if (project.current) {
     project.setCanvas(rebuildCanvasGraph(project.current, true))
     await project.save()
+  }
+
+  if (loop.stopped) {
+    const ok = results.filter((result) => result.ok).length
+    const failed = [...results].reverse().find((result) => !result.ok)
+    return {
+      reply: `已暂停，没有继续污染下游。${ok ? `前面 ${ok} 步已保留。` : ''}\n失败位置：${TOOL_LABEL[failed?.tool || ''] || failed?.tool}\n原因：${failed?.detail || loop.error?.message}`,
+      results,
+      chips: [
+        { label: '重试失败步骤', text: `重试${TOOL_LABEL[failed?.tool || ''] || '失败步骤'}` },
+        { label: '检查配置', text: '帮我检查当前失败原因' }
+      ]
+    }
   }
 
   const wrap = wrapUpReply(results, userText, plan.say)
@@ -354,7 +388,10 @@ function wrapUpReply(
     ? `\n失败 ${fail.length} 项：${fail.map((f) => TOOL_LABEL[f.tool] || f.tool).join('；')}`
     : ''
   const all = wantAll(userText)
-  const didBoard = results.some((r) => r.ok && (r.tool === 'generate_storyboard' || r.tool === 'extract_cast'))
+  const didPlay = results.some(
+    (r) => r.ok && (r.tool === 'generate_play' || r.tool === 'generate_storyboard')
+  )
+  const didBoard = results.some((r) => r.ok && r.tool === 'extract_cast')
   const didApprove = results.some((r) => r.ok && r.tool === 'approve_play')
   const didCast = results.some(
     (r) => r.ok && /sheet|scene/.test(r.tool)
@@ -370,10 +407,20 @@ function wrapUpReply(
       chips: nextChips(next)
     }
   }
+  if (didPlay && !(p?.shots.length)) {
+    return {
+      reply: `完整剧本已经写到画布左侧了（还没拆节点）。\n看完可改字，再回「继续」提炼人物、场景、分镜；说「全流程」会自动跑完。${failLine}`,
+      chips: [
+        { label: '提炼节点', text: '继续' },
+        { label: '先看看', text: '先看看' },
+        { label: '全流程', text: '全流程跑完' }
+      ]
+    }
+  }
   if (didBoard) {
     const n = p?.shots.length ?? 0
     return {
-      reply: `剧本已经写到画布左侧了，一共 ${n} 个分镜。请先看一遍。\n看完回「继续」做人设和场景；说「全流程」会自动跑完。${failLine}`,
+      reply: `已从剧本提炼出节点：${n} 个分镜。请先看一遍。\n看完回「继续」做人设和场景；说「全流程」会自动跑完。${failLine}`,
       chips: reviewChips()
     }
   }
@@ -406,7 +453,7 @@ function wrapUpReply(
     }
   }
   if (didAud) {
-    return { reply: `口播好了。可以去成片节点导出。${failLine}`, chips: [] }
+    return { reply: `口播好了。可以点「合成成片」节点出成片，结果会显示在成片结果节点里。${failLine}`, chips: [] }
   }
   const next = nextPipelineStep(p)
   return {
@@ -419,7 +466,7 @@ function wrapUpReply(
 function sanitizeActions(actions: any[], userText: string): any[] {
   const all = wantAll(userText)
   const t = userText
-  const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜/.test(t)
+  const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本/.test(t)
   const askedSheet = /人设|角色图/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
   const askedImage = /配图|出图|关键帧|画面/.test(t)
@@ -437,7 +484,9 @@ function sanitizeActions(actions: any[], userText: string): any[] {
     if (tool === 'generate_all_images') return askedImage || all
     if (tool === 'generate_all_videos') return askedVideo || all
     if (tool === 'generate_all_audio') return askedAudio || all
-    if (tool === 'generate_storyboard' || tool === 'extract_cast') return askedBoard || all
+    if (tool === 'generate_storyboard' || tool === 'extract_cast' || tool === 'generate_play') {
+      return askedBoard || all
+    }
     if (tool === 'generate_sheet') return askedSheet || all
     if (tool === 'generate_scene') return askedScene || all
     if (tool === 'generate_shot_image') return askedImage || shotHit || all
@@ -478,17 +527,30 @@ function applyPlayGate(actions: any[], userText: string): any[] {
     return [{ tool: 'approve_play' }]
   }
   const hasBoard = actions.some(
-    (a) => a.tool === 'generate_storyboard' || a.tool === 'extract_cast' || a.tool === 'seed_script'
+    (a) =>
+      a.tool === 'generate_storyboard' ||
+      a.tool === 'generate_play' ||
+      a.tool === 'extract_cast' ||
+      a.tool === 'seed_script'
   )
   if (hasBoard) {
-    return actions.filter(
+    const kept = actions.filter(
       (a) =>
         a.tool === 'generate_storyboard' ||
+        a.tool === 'generate_play' ||
         a.tool === 'extract_cast' ||
         a.tool === 'seed_script' ||
         a.tool === 'sync_canvas' ||
         a.tool === 'focus_node'
     )
+    const writingPlay = kept.some(
+      (a) => a.tool === 'generate_play' || a.tool === 'generate_storyboard'
+    )
+    // 非全流程：写剧本和提炼拆开，同一轮只写剧本
+    if (writingPlay) {
+      return kept.filter((a) => a.tool !== 'extract_cast')
+    }
+    return kept
   }
   if (p && needsPlayReview(p)) {
     return actions.filter((a) => !DOWNSTREAM_TOOLS.has(String(a.tool)))
@@ -505,6 +567,8 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   const namedSubs = (p.subjects ?? []).filter((s) => s.name && t.includes(s.name))
   const namedScns = (p.scenes ?? []).filter((s) => s.name && t.includes(s.name))
 
+  const askedExtract = /提炼节点|提炼人物|提炼场景|拆节点|出节点/.test(t)
+  const askedPlay = /写剧本|完整剧本|重新写剧本/.test(t)
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|拆剧本/.test(t)
   const askedSheet = /人设|角色图/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
@@ -512,13 +576,22 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   const askedVideo = /图生视频|生成视频|出视频/.test(t) || /第.+镜.*视频/.test(t)
   const askedAudio = /口播|配音|语音/.test(t)
   const looksLikeBrief =
-    t.length >= 16 && !askedSheet && !askedImage && !askedVideo && !askedScene && !p.shots.length
+    t.length >= 16 &&
+    !askedSheet &&
+    !askedImage &&
+    !askedVideo &&
+    !askedScene &&
+    !p.shots.length &&
+    !p.script?.playReady
+  const playReady = Boolean(p.script?.playReady && p.script.content?.trim())
 
-  if (!p.script?.content?.trim() && (askedBoard || looksLikeBrief || all)) {
+  if (!p.script?.content?.trim() && (askedBoard || askedPlay || looksLikeBrief || all)) {
     actions.push({ tool: 'seed_script', text: t })
   }
-  if (askedBoard || looksLikeBrief || (all && !p.shots.length)) {
-    actions.push({ tool: 'generate_storyboard' })
+  if (askedExtract || (askedBoard && playReady && !p.shots.length)) {
+    actions.push({ tool: 'extract_cast' })
+  } else if (askedPlay || askedBoard || looksLikeBrief) {
+    actions.push({ tool: 'generate_play' })
   }
 
   if (namedSubs.length && askedSheet) {
@@ -553,8 +626,11 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   }
 
   if (all) {
-    if (!p.shots.length && !actions.some((a) => a.tool === 'generate_storyboard')) {
-      actions.push({ tool: 'generate_storyboard' })
+    if (!playReady && !actions.some((a) => a.tool === 'generate_play')) {
+      actions.push({ tool: 'generate_play' })
+    }
+    if (!p.shots.length && !actions.some((a) => a.tool === 'extract_cast')) {
+      actions.push({ tool: 'extract_cast' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_sheets')) {
       actions.push({ tool: 'generate_all_sheets' })
@@ -578,219 +654,15 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
       }
     }
     return {
-      say: '你想让我做哪一步？可以说：拆分镜、确认通过、出人设、第1镜配图。说「全流程」才会整条跑。',
+      say: '你想让我做哪一步？可以说：写剧本、提炼节点、确认通过、出人设、第1镜配图。说「全流程」才会整条跑。',
       actions: []
     }
   }
-  if (askedBoard && !all) {
-    return { say: '先拆剧本。拆完请看左侧完整剧本，点确认通过后再往下。', actions }
+  if (askedExtract && !all) {
+    return { say: '按完整剧本提炼人物、场景、分镜节点。', actions }
+  }
+  if ((askedPlay || askedBoard || looksLikeBrief) && !all) {
+    return { say: '先写完整剧本，还不拆节点。写完看左侧，回「继续」再提炼。', actions }
   }
   return { say: '按你这句做，不加别的步骤。', actions }
-}
-
-const PHASE: Record<string, number> = {
-  seed_script: 0,
-  generate_storyboard: 0,
-  extract_cast: 0,
-  approve_play: 0,
-  generate_sheet: 1,
-  generate_all_sheets: 1,
-  generate_scene: 1,
-  generate_all_scenes: 1,
-  generate_shot_image: 2,
-  generate_all_images: 2,
-  generate_video: 3,
-  generate_all_videos: 3,
-  generate_audio: 4,
-  generate_all_audio: 4,
-  run_node: 2,
-  sync_canvas: 5,
-  focus_node: 5
-}
-
-async function execActionList(
-  actions: any[],
-  onEvent: AgentProgress
-): Promise<AgentToolResult[]> {
-  const results: AgentToolResult[] = []
-  const list = actions.filter((a) => a?.tool)
-  const groups = new Map<number, any[]>()
-  for (const a of list) {
-    const phase = PHASE[String(a.tool)] ?? 2
-    const arr = groups.get(phase) ?? []
-    arr.push(a)
-    groups.set(phase, arr)
-  }
-  const phases = [...groups.keys()].sort((a, b) => a - b)
-  for (const phase of phases) {
-    const batch = groups.get(phase) ?? []
-    const parallel = phase >= 1 && phase <= 4
-    if (!parallel) {
-      for (const action of batch) {
-        const tool = String(action.tool || '')
-        const label = TOOL_LABEL[tool] || tool
-        onEvent({ kind: 'step', step: tool, label, status: 'running' })
-        try {
-          const detail = await execTool(tool, action, onEvent)
-          results.push({ tool, ok: true, detail })
-          onEvent({ kind: 'step', step: tool, label, status: 'done' })
-        } catch (e: any) {
-          results.push({ tool, ok: false, detail: e?.message ?? String(e) })
-          onEvent({ kind: 'step', step: tool, label, status: 'fail' })
-        }
-      }
-      continue
-    }
-    onEvent({
-      kind: 'log',
-      label: `同时进行：${batch.map((a) => TOOL_LABEL[a.tool] || a.tool).join('、')}`
-    })
-    const chunk: AgentToolResult[] = []
-    await mapPool(batch, 3, async (action) => {
-      const tool = String(action.tool || '')
-      const label = TOOL_LABEL[tool] || tool
-      onEvent({ kind: 'step', step: `${tool}:${action.shotId || action.subjectId || action.sceneId || ''}`, label, status: 'running' })
-      try {
-        const detail = await execTool(tool, action, onEvent)
-        chunk.push({ tool, ok: true, detail })
-        onEvent({ kind: 'step', step: `${tool}:${action.shotId || action.subjectId || action.sceneId || ''}`, label, status: 'done' })
-      } catch (e: any) {
-        chunk.push({ tool, ok: false, detail: e?.message ?? String(e) })
-        onEvent({ kind: 'step', step: `${tool}:${action.shotId || action.subjectId || action.sceneId || ''}`, label, status: 'fail' })
-      }
-    })
-    results.push(...chunk)
-  }
-  return results
-}
-
-async function execTool(
-  tool: string,
-  action: any,
-  onEvent: AgentProgress
-): Promise<string> {
-  const project = useProjectStore()
-  const p = project.current!
-  const progress = (_id: string, msg: string) => onEvent({ kind: 'log', label: msg })
-
-  if (tool === 'seed_script') {
-    const text = String(action.text || '').trim()
-    const cur = project.current
-    if (!cur) throw new Error('请先创建项目')
-    const topic = text.replace(/\s+/g, ' ').slice(0, 48) || cur.name
-    const inferred = inferVisualStyleFromText(text)
-    const style = inferred || cur.script?.style || 'cinematic'
-    if (!cur.script) {
-      project.setScript({
-        id: 's_' + Date.now().toString(36),
-        topic,
-        content: text,
-        keywords: [],
-        style,
-        aspectRatio: cur.settings.aspectRatio,
-        shotDuration: cur.settings.defaultShotDuration || 5,
-        createdAt: Date.now()
-      })
-    } else if (!(cur.script.content || '').trim() && text) {
-      project.setScript({
-        ...cur.script,
-        topic: cur.script.topic || topic,
-        content: text,
-        style
-      })
-    } else if (inferred && inferred !== cur.script.style) {
-      project.setScript({ ...cur.script, style: inferred })
-    }
-    onEvent({ kind: 'log', label: '文案已写入，接着拆剧本' })
-    return '文案已准备好'
-  }
-  if (tool === 'generate_storyboard' || tool === 'extract_cast') {
-    await runStoryboard((m) => onEvent({ kind: 'log', label: m }))
-    revealCanvas('script')
-    onEvent({ kind: 'focus', nodeId: 'script', label: '剧本已出现在画布左侧' })
-    return `已生成 ${project.current?.shots.length ?? 0} 个分镜，请先看画布上的剧本`
-  }
-  if (tool === 'approve_play') {
-    project.setPlayApproved(true)
-    await project.save()
-    revealCanvas('script')
-    return '剧本已确认，可以往下做人设和配图'
-  }
-  if (tool === 'sync_canvas') {
-    project.syncCanvasFromProject()
-    revealCanvas()
-    return '画布已同步'
-  }
-  if (tool === 'focus_node') {
-    revealCanvas(action.nodeId || 'script')
-    return '已定位到画布节点'
-  }
-  if (tool === 'generate_sheet') {
-    const sub = (p.subjects ?? []).find((s) => s.id === action.subjectId) || (p.subjects ?? [])[0]
-    if (!sub) return '没有主体'
-    await runCanvasNode(`subject:${sub.id}`, progress)
-    revealCanvas(`subject:${sub.id}`)
-    return `人设 ${sub.name} 完成`
-  }
-  if (tool === 'generate_all_sheets') {
-    await generateMissingSheets((m) => onEvent({ kind: 'log', label: m }))
-    revealCanvas('group-subjects')
-    return '人设已按缺的补齐'
-  }
-  if (tool === 'generate_scene') {
-    const scn = (p.scenes ?? []).find((s) => s.id === action.sceneId) || (p.scenes ?? [])[0]
-    if (!scn) return '没有场景'
-    await runCanvasNode(`scene:${scn.id}`, progress)
-    revealCanvas(`scene:${scn.id}`)
-    return `场景 ${scn.name} 完成`
-  }
-  if (tool === 'generate_all_scenes') {
-    await generateMissingPlates((m) => onEvent({ kind: 'log', label: m }))
-    revealCanvas('group-scenes')
-    return '场景底板已按缺的补齐'
-  }
-  if (tool === 'generate_shot_image') {
-    const shot = p.shots.find((s) => s.id === action.shotId)
-    if (!shot) return '找不到分镜'
-    await runCanvasNode(`shotImage:${shot.id}`, progress)
-    revealCanvas(`shotImage:${shot.id}`)
-    return `分镜 ${shot.index + 1} 配图完成`
-  }
-  if (tool === 'generate_all_images') {
-    await generateMissingImages((m) => onEvent({ kind: 'log', label: m }))
-    revealCanvas('group-shots')
-    return '缺的配图已补'
-  }
-  if (tool === 'generate_video') {
-    const shot = p.shots.find((s) => s.id === action.shotId)
-    if (!shot) return '找不到分镜'
-    await runCanvasNode(`shotVideo:${shot.id}`, progress)
-    revealCanvas(`shotVideo:${shot.id}`)
-    return `分镜 ${shot.index + 1} 视频完成`
-  }
-  if (tool === 'generate_all_videos') {
-    await generateMissingVideos((m) => onEvent({ kind: 'log', label: m }))
-    revealCanvas('group-shots')
-    return '缺的视频已补'
-  }
-  if (tool === 'generate_audio') {
-    const shot = p.shots.find((s) => s.id === action.shotId)
-    if (!shot) return '找不到分镜'
-    const nodeId = `audio:${shot.id}`
-    await runCanvasNode(nodeId, progress)
-    return `分镜 ${shot.index + 1} 口播完成`
-  }
-  if (tool === 'generate_all_audio') {
-    await generateMissingAudio((m) => onEvent({ kind: 'log', label: m }))
-    return '缺的口播已补'
-  }
-  if (tool === 'connect' || tool === 'group') {
-    return '画布已按人物 / 场景 / 分镜分组'
-  }
-  if (tool === 'run_node' && action.nodeId) {
-    await runCanvasNode(action.nodeId, progress)
-    revealCanvas(action.nodeId)
-    return `节点 ${action.nodeId} 完成`
-  }
-  return `未知工具 ${tool}`
 }

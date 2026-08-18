@@ -8,10 +8,18 @@ export interface ShotRefBundle {
   hasScene: boolean
 }
 
+function uniqueIds(ids: ID[]): ID[] {
+  const out: ID[] = []
+  for (const id of ids) {
+    if (id && !out.includes(id)) out.push(id)
+  }
+  return out
+}
+
 /**
- * 配图工作流固定 3 槽：
- * 1-2 角色多角度设计图（只有 1 个角色时重复填第 2 槽）
- * 3   场景底板
+ * 配图参考：
+ * - 普通项目固定 3 槽：1-2 角色设计图 + 场景底板
+ * - 视频复刻必须带上用户产品图（GPT 编辑最多 4 张）
  */
 export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
   const subjects = project.subjects ?? []
@@ -28,7 +36,7 @@ export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
     })
     if (chars.length >= 2) break
   }
-  if (chars.length === 1) {
+  if (project.pipelineMode !== 'remake' && chars.length === 1) {
     chars.push({
       ...chars[0],
       label: `${chars[0].label}, second copy for identity lock`
@@ -44,8 +52,43 @@ export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
       }
     : null
 
+  if (project.pipelineMode === 'remake') {
+    const products = uniqueIds([
+      ...(shot.referenceAssetIds ?? []),
+      ...(project.script?.referenceAssetIds ?? [])
+    ])
+    const productEntries = products.map((id, i) => ({
+      id,
+      label: `user product photo ${i + 1}; replace every on-screen product with this exact item, packaging, logo and color`
+    }))
+    const charOne = chars[0] ? [chars[0]] : []
+    const sceneOne = sceneEntry ? [sceneEntry] : []
+    const reserved = charOne.length + sceneOne.length
+    const productSlots = Math.max(productEntries.length ? 1 : 0, 4 - reserved)
+    const ordered: { id: ID; label: string }[] = [
+      ...productEntries.slice(0, productSlots),
+      ...charOne,
+      ...sceneOne
+    ]
+    for (const p of productEntries) {
+      if (ordered.length >= 4) break
+      if (!ordered.some((o) => o.id === p.id)) ordered.push(p)
+    }
+    return {
+      ids: ordered.map((o) => o.id),
+      labels: ordered.map((o) => o.label),
+      characterCount: charOne.length,
+      hasScene: Boolean(sceneEntry)
+    }
+  }
+
   if (chars.length > 0 || sceneEntry) {
     const ordered = [...chars.slice(0, 2), ...(sceneEntry ? [sceneEntry] : [])]
+    for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
+      if (ordered.length >= 6) break
+      if (ordered.some((o) => o.id === id)) continue
+      ordered.push({ id, label: 'user extra reference' })
+    }
     return {
       ids: ordered.map((o) => o.id),
       labels: ordered.map((o) => o.label),
@@ -54,17 +97,13 @@ export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
     }
   }
 
-  const fallback = [
+  const fallback = uniqueIds([
     ...(shot.referenceAssetIds ?? []),
     ...(project.script?.referenceAssetIds ?? [])
-  ]
-  const unique: ID[] = []
-  for (const id of fallback) {
-    if (!unique.includes(id)) unique.push(id)
-  }
+  ])
   return {
-    ids: unique.slice(0, 3),
-    labels: unique.slice(0, 3).map((_, i) => `style/product reference ${i + 1}`),
+    ids: fallback.slice(0, 3),
+    labels: fallback.slice(0, 3).map((_, i) => `style/product reference ${i + 1}`),
     characterCount: 0,
     hasScene: false
   }
@@ -84,6 +123,76 @@ export function sceneForShot(shot: Shot, project: Project): Scene | undefined {
   const all = project.scenes ?? []
   if (shot.sceneId) return all.find((s) => s.id === shot.sceneId)
   return all[0]
+}
+
+export type ShotRefSlot = {
+  id: ID
+  label: string
+  locked: boolean
+}
+
+export function refSlotLabel(id: ID, project: Project): string {
+  const sub = (project.subjects ?? []).find((s) => s.designSheetAssetId === id)
+  if (sub) return `人设·${sub.name}`
+  const scn = (project.scenes ?? []).find((s) => s.plateAssetId === id)
+  if (scn) return `空镜·${scn.name}`
+  if ((project.script?.referenceAssetIds ?? []).includes(id)) return '产品'
+  return '参考'
+}
+
+/** 配图节点上展示：人设/空镜/产品锁定，额外参考可删 */
+export function imageRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
+  const seen = new Set<ID>()
+  const slots: ShotRefSlot[] = []
+  const push = (id: ID | undefined, label: string, locked: boolean) => {
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    slots.push({ id, label, locked })
+  }
+  for (const sub of subjectsForShot(shot, project)) {
+    push(sub.designSheetAssetId, `人设·${sub.name}`, true)
+  }
+  const scene = sceneForShot(shot, project)
+  push(scene?.plateAssetId, scene ? `空镜·${scene.name}` : '空镜', true)
+  if (project.pipelineMode === 'remake') {
+    for (const id of project.script?.referenceAssetIds ?? []) {
+      push(id, '产品', true)
+    }
+  }
+  for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
+    push(id, refSlotLabel(id, project), false)
+  }
+  return slots
+}
+
+/** 视频节点上展示：本镜配图锁定，额外参考可删可加 */
+export function videoRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
+  const seen = new Set<ID>()
+  const slots: ShotRefSlot[] = []
+  if (shot.imageAssetId) {
+    seen.add(shot.imageAssetId)
+    slots.push({ id: shot.imageAssetId, label: '本镜配图', locked: true })
+  }
+  for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    slots.push({ id, label: refSlotLabel(id, project), locked: false })
+  }
+  return slots
+}
+
+export function videoExtraRefIds(shot: Shot): ID[] {
+  return uniqueIds(shot.referenceAssetIds ?? []).filter((id) => id !== shot.imageAssetId)
+}
+
+export function videoExtraRefLead(shot: Shot, project: Project): string {
+  const extras = videoExtraRefIds(shot).slice(0, 2)
+  if (!extras.length) return ''
+  const parts = ['图一是本镜画面，从这一帧接着演。']
+  extras.forEach((id, i) => {
+    parts.push(`图${i + 2}是${refSlotLabel(id, project)}，用来锁人物或道具，不要当成新出场的人。`)
+  })
+  return parts.join('')
 }
 
 export function missingCastAssets(project: Project): {
@@ -113,7 +222,12 @@ export function composeShotImagePrompt(
   }
   if (scene) {
     parts.push(
-      `地点必须与场景底板「${scene.name}」一致：${scene.description}。禁止另造场景。`
+      `地点必须与空镜底板「${scene.name}」一致：${scene.description}。场景底板里没有人；把上述人物按人设放进这个空场景，禁止另造场景，也禁止再添路人。`
+    )
+  }
+  if (project.pipelineMode === 'remake') {
+    parts.push(
+      '画面中出现的商品必须换成用户上传的产品参考图：外观、包装、logo、配色完全一致，禁止沿用参考视频里的原品牌商品。'
     )
   }
   if (aesthetic) parts.push(aesthetic)

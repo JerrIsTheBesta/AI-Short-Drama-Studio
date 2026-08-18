@@ -71,6 +71,22 @@ export const useAssetsStore = defineStore('assets', () => {
     if (kind === 'image') {
       asset = { ...base, kind: 'image', width: info.width, height: info.height }
     } else if (kind === 'video') {
+      // 防止把预览图误存成视频资产（下载后变成 png/jpg）
+      const head = new Uint8Array(await typed.slice(0, 16).arrayBuffer())
+      const isJpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff
+      const isPng =
+        head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47
+      const isGif = head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46
+      if (isJpeg || isPng || isGif || typed.type.startsWith('image/')) {
+        throw new Error(
+          '生成结果是图片而不是视频（常见于工作流只输出了预览帧）。请检查图生视频节点是否输出 mp4。'
+        )
+      }
+      if (info.duration != null && Number.isFinite(info.duration) && info.duration < 0.2) {
+        throw new Error(
+          `视频时长异常（${info.duration.toFixed(2)}s），可能只是一张静态帧被标成了视频`
+        )
+      }
       thumbBlob = await extractVideoThumbnail(typed).catch(() => undefined)
       asset = {
         ...base,

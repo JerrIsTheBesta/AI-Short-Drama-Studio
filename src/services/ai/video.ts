@@ -20,7 +20,9 @@
 import { getAIMode } from './client'
 import { getVideoConfig } from './runtime'
 import { generateMockVideo } from './mock'
+import { composeH3VideoPrompt } from './h3Prompt'
 import type { Shot, AspectRatio } from '@/types'
+import { abortableDelay, throwIfAborted } from './abort'
 
 export interface VideoGenInput {
   /** 主输入图（分镜自己的图） */
@@ -38,9 +40,18 @@ export interface VideoGenInput {
   aesthetic?: string
   /**
    * 音效描述（中文短句，比如"雨声、灯火燃烧声"）
-   * 当前 ComfyUI prompt 字段不直接吃，但保留在 shot 上以备字幕/后期用
+   * 写入 H3 overall_soundscape
    */
   audioDescription?: string
+  /**
+   * 口播/台词原文。按 MiniMax H3 规范原样写入 <d>[Language] ...</d>
+   * 默认按 H3 出镜对白
+   */
+  voiceover?: string
+  /** dialogue=H3 对口型；voiceover=H3 画外口播；none=不让 H3 生成人声 */
+  voiceMode?: 'dialogue' | 'voiceover' | 'none'
+  /** 说话人音色/身份提示（不含台词） */
+  speakerHint?: string
   duration: number
   width: number
   height: number
@@ -49,6 +60,7 @@ export interface VideoGenInput {
   cameraMovement?: Shot['cameraMovement']
   /** 0-1，154:strength_model */
   strength?: number
+  signal?: AbortSignal
 }
 
 export interface VideoGenOutput {
@@ -60,6 +72,126 @@ export interface VideoGenOutput {
 
 const log = (msg: string) =>
   console.log('%c[video]', 'color:#ec4899;font-weight:600', msg)
+
+const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|avi|mkv)(?:$|[?#])/i
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|[?#])/i
+
+function resultUrl(r: any): string {
+  return String(r?.url ?? r?.video_url ?? r?.videoUrl ?? r?.filename ?? '').trim()
+}
+
+/** 从 workflow results 里挑真正的视频，绝不回落到预览图 */
+function pickWorkflowVideoResult(
+  results: any[]
+): { url: string; type?: string } | null {
+  const scored = results
+    .map((r) => {
+      const url = resultUrl(r)
+      if (!url) return null
+      const type = String(r?.type ?? r?.raw?.type ?? '').toLowerCase()
+      const blobText = JSON.stringify(r).toLowerCase()
+      let score = 0
+      if (VIDEO_EXT_RE.test(url)) score += 100
+      if (IMAGE_EXT_RE.test(url)) score -= 100
+      if (/video/.test(type)) score += 40
+      if (type === 'image' && !VIDEO_EXT_RE.test(url)) score -= 30
+      if (/mp4|webm|mov|video/.test(blobText) && VIDEO_EXT_RE.test(url)) score += 10
+      return { url, type, score }
+    })
+    .filter(Boolean) as { url: string; type?: string; score: number }[]
+
+  scored.sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  if (!best || best.score < 50) return null
+  return { url: best.url, type: best.type }
+}
+
+function guessVideoMimeFromUrl(url: string): string | undefined {
+  if (/\.webm(?:$|[?#])/i.test(url)) return 'video/webm'
+  if (/\.mov(?:$|[?#])/i.test(url)) return 'video/quicktime'
+  if (/\.(mp4|m4v)(?:$|[?#])/i.test(url)) return 'video/mp4'
+  return undefined
+}
+
+function isImageMagic(bytes: Uint8Array): boolean {
+  if (bytes.length < 4) return false
+  // JPEG
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true
+  // PNG
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  )
+    return true
+  // GIF
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return true
+  // WEBP (RIFF....WEBP)
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  )
+    return true
+  return false
+}
+
+function isVideoMagic(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) return false
+  const ascii = (n: number, m: number) =>
+    String.fromCharCode(...bytes.subarray(n, m))
+  // ISO BMFF / MP4 / MOV
+  if (ascii(4, 8) === 'ftyp') return true
+  // WebM / Matroska
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3)
+    return true
+  // RIFF AVI
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'AVI ') return true
+  return false
+}
+
+/** 确认下载内容是视频容器，避免把预览 PNG/JPEG 存成「视频」 */
+async function assertVideoBlob(blob: Blob, mimeHint?: string): Promise<Blob> {
+  if (blob.size < 1024) {
+    throw new Error(`[video] 下载文件过小（${blob.size} 字节），不像有效视频`)
+  }
+  const head = new Uint8Array(await blob.slice(0, 32).arrayBuffer())
+  if (isImageMagic(head)) {
+    throw new Error(
+      '[video] 下载到的是图片（PNG/JPEG/WebP），不是视频。请检查 ComfyUI 工作流是否输出了 mp4。'
+    )
+  }
+  const hint = (mimeHint || blob.type || '').toLowerCase()
+  if (hint.startsWith('image/')) {
+    throw new Error(`[video] 服务端 Content-Type 是图片（${hint}），不是视频`)
+  }
+  let mime = hint && hint.startsWith('video/') ? hint : ''
+  if (isVideoMagic(head)) {
+    if (!mime) {
+      mime =
+        head[0] === 0x1a ? 'video/webm' : asciiHintMp4(head) ? 'video/mp4' : 'video/mp4'
+    }
+    return blob.type === mime ? blob : blob.slice(0, blob.size, mime)
+  }
+  // 魔数不明时，若 hint 是 video/* 仍放行（少数代理剥掉头）
+  if (mime.startsWith('video/')) {
+    return blob.type === mime ? blob : blob.slice(0, blob.size, mime)
+  }
+  throw new Error(
+    `[video] 无法识别为视频文件（type=${blob.type || mimeHint || 'unknown'}，size=${blob.size}）。可能拿到了预览帧。`
+  )
+}
+
+function asciiHintMp4(bytes: Uint8Array): boolean {
+  return String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp'
+}
 
 /** Blob → data:base64 字符串 */
 export function blobToDataUrl(blob: Blob): Promise<string> {
@@ -77,9 +209,10 @@ async function realWorkflowVideo(
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
   const { baseUrl, apiKey, workflowId } = getVideoConfig()
+  throwIfAborted(input.signal)
 
   if (!baseUrl) {
-    throw new Error('[video] 没配图生视频地址，打开右侧「模型」面板填 ComfyUI 地址')
+    throw new Error('[video] 没配图生视频地址，请到设置页填写 ComfyUI 地址')
   }
 
   // 1) 收集图：imageBlob + referenceImages，最多 3 张
@@ -91,13 +224,13 @@ async function realWorkflowVideo(
     throw new Error('[video] 没有可用图片')
   }
 
-  onProgress?.(`准备 ${allBlobs.length} 张参考图...`)
+  onProgress?.(`准备参考图...`)
   // 2) 转 data:base64（最稳，不用管公网 URL）
   const dataUrls: string[] = []
   for (const blob of allBlobs) {
     dataUrls.push(await blobToDataUrl(blob))
   }
-  // 3 张图填充：图生视频以本镜成图为主；缺槽复用同一张，避免混入人设棚拍图拉亮光照
+  // 3 张槽：只应是本镜配图。缺槽时复用同一张分镜图，不要填人设/空镜。
   const [img1, img2, img3] = [
     dataUrls[0],
     dataUrls[1] ?? dataUrls[0],
@@ -153,7 +286,8 @@ async function realWorkflowVideo(
         '147:value': targetDuration,
         '154:strength_model': input.strength ?? 0.75
       }
-    })
+    }),
+    signal: input.signal
   })
 
   if (!submitResp.ok) {
@@ -177,20 +311,22 @@ async function realWorkflowVideo(
   let attempt = 0
   while (Date.now() < deadline) {
     attempt++
-    await new Promise((r) => setTimeout(r, 5000))
+    await abortableDelay(5000, input.signal)
+    throwIfAborted(input.signal)
     const elapsed = Math.round((Date.now() - start) / 1000)
     onProgress?.(`生成中... ${elapsed}s (第 ${attempt} 次查询)`)
 
     // 优先用新接口
     const pollUrl = `${baseUrl}/api/workflow/result?prompt_id=${promptId}`
-    let pollResp = await fetch(pollUrl)
+    let pollResp = await fetch(pollUrl, { signal: input.signal })
     let pollData: any = null
     if (pollResp.ok) {
       pollData = await pollResp.json()
     } else {
       // fallback 旧接口
       const fallback = await fetch(
-        `${baseUrl}/api/comfy/proxy/history?prompt_id=${promptId}`
+        `${baseUrl}/api/comfy/proxy/history?prompt_id=${promptId}`,
+        { signal: input.signal }
       )
       if (fallback.ok) pollData = await fallback.json()
     }
@@ -231,42 +367,39 @@ async function realWorkflowVideo(
       Array.isArray(pollData.results) &&
       pollData.results.length > 0
     ) {
-      // 找视频/图片结果（type 可能是 'image' 或其他，但 url 后缀是关键）
-      const result =
-        pollData.results.find(
-          (r: any) =>
-            r.url && /\.(mp4|webm|mov|m4v|avi)$/i.test(String(r.url))
-        ) || pollData.results[0]
-
-      let videoUrl: string =
-        result.url ?? result.video_url ?? result.videoUrl ?? ''
-      if (!videoUrl) {
+      const picked = pickWorkflowVideoResult(pollData.results)
+      if (!picked) {
+        const sample = JSON.stringify(pollData.results).slice(0, 500)
         throw new Error(
-          `[video] 任务完成但 results[0] 没有 url 字段\n原始：${JSON.stringify(pollData).slice(0, 400)}`
+          `[video] 任务完成但结果里没有视频文件（可能只返回了预览图）\n${sample}`
         )
       }
 
+      let videoUrl: string = picked.url
       // url 是相对路径（/output/xxx.mp4），拼成完整 URL
       if (videoUrl.startsWith('/')) {
         videoUrl = `${baseUrl}${videoUrl}`
-      }
-      // 如果没有协议前缀，视为相对路径
-      else if (!/^https?:\/\//i.test(videoUrl)) {
+      } else if (!/^https?:\/\//i.test(videoUrl)) {
         videoUrl = `${baseUrl}/${videoUrl}`
       }
 
-      log(`→ 下载视频: ${videoUrl}`)
+      log(`→ 下载视频: ${videoUrl}（候选 type=${picked.type || '?'}）`)
       onProgress?.('下载视频...')
-      const vResp = await fetch(videoUrl)
+      const vResp = await fetch(videoUrl, { signal: input.signal })
       if (!vResp.ok) {
         throw new Error(`下载视频失败 ${vResp.status} ${videoUrl}`)
       }
-      const blob = await vResp.blob()
+      const rawBlob = await vResp.blob()
+      const mimeHint =
+        vResp.headers.get('content-type') ||
+        guessVideoMimeFromUrl(videoUrl) ||
+        rawBlob.type
+      const blob = await assertVideoBlob(rawBlob, mimeHint)
       log(`✓ 视频下载完成 (${(blob.size / 1024 / 1024).toFixed(2)} MB, ${blob.type})`)
       return {
         blob,
         mimeType: blob.type || 'video/mp4',
-        prompt: input.prompt,
+        prompt: buildPrompt(input),
         duration: input.duration
       }
     }
@@ -296,13 +429,18 @@ async function realWorkflowVideo(
         )
       }
       onProgress?.('下载视频...')
-      const vResp = await fetch(videoUrl)
+      const vResp = await fetch(videoUrl, { signal: input.signal })
       if (!vResp.ok) throw new Error(`下载视频失败 ${vResp.status}`)
-      const blob = await vResp.blob()
+      const rawBlob = await vResp.blob()
+      const mimeHint =
+        vResp.headers.get('content-type') ||
+        guessVideoMimeFromUrl(String(videoUrl)) ||
+        rawBlob.type
+      const blob = await assertVideoBlob(rawBlob, mimeHint)
       return {
         blob,
         mimeType: blob.type || 'video/mp4',
-        prompt: input.prompt,
+        prompt: buildPrompt(input),
         duration: input.duration
       }
     }
@@ -324,74 +462,44 @@ async function realWorkflowVideo(
   throw new Error(`[video] 生成超时（15 分钟未完成），prompt_id=${promptId}`)
 }
 
-/** 拼最终喂给模型的视频提示词（页面预览 / 实际生成共用）
+/** 拼最终喂给 ComfyUI / MiniMax H3 的视频提示词（页面预览 / 实际生成共用）
  *
- * 拼接顺序：
- *  1. aesthetic（项目级整体氛围）
- *  2. visualPrompt（分镜详细场景描述）
- *  3. 运镜提示
- *  4. 比例标签 [W:H] 放最后
+ * 项目生产模板：Aesthetic → [SHOT 1] → Duration → Camera Motion →
+ * Visual Prompt → overall_soundscape（英文环境音）→ non_diegetic_music。
+ * 对白只写在 Visual Prompt 下的 <d> 里，不与环境音混在一行。
  */
 export function composeVideoPrompt(input: VideoGenInput): string {
   return buildPrompt(input)
 }
 
 function buildPrompt(input: VideoGenInput): string {
-  const parts: string[] = []
-
-  // 1) Aesthetic（项目级画风锚，优先用户主题提炼结果）
-  if (input.aesthetic?.trim()) {
-    parts.push(`Aesthetic\n${input.aesthetic.trim()}`)
-  }
-
-  // 2) 分镜详细视觉描述
-  if (input.prompt?.trim()) {
-    parts.push(`Visual Prompt\n${input.prompt.trim()}`)
-  }
-
-  // 3) 运镜提示
-  const cameraHints: Record<string, string> = {
-    push: 'Subtle handheld push-in',
-    pull: 'Very slow handheld pull-back',
-    pan: 'Gentle handheld pan',
-    tilt: 'Gentle tilt',
-    static: 'Static handheld medium shot, subtle natural frame tremor',
-    orbit: 'Slow orbit around subject'
-  }
-  if (input.cameraMovement) {
-    parts.push(`Camera Motion\n${cameraHints[input.cameraMovement] || input.cameraMovement}`)
-  }
-
-  // 4) 环境音效（写入提示，尽量让成片视频自带这些声音）
-  if (input.audioDescription?.trim()) {
-    parts.push(
-      `Audio / Sound Effects\n${input.audioDescription.trim()}\nGenerate synchronized diegetic ambient sound matching the scene (no music bed, no voiceover).`
-    )
-  }
-
-  // 5) 光照锁定：防止 I2V 模型随运动把夜晚漂成白天
-  parts.push(
-    'Keep the exact same time of day, weather and lighting as the first frame. If the first frame is night, stay night throughout; never brighten into day or shift color temperature.'
-  )
-
-  // 6) 比例标签
-  if (input.aspectRatio) {
-    parts.push(`[${input.aspectRatio}]`)
-  }
-
-  return parts.filter(Boolean).join('\n\n')
+  return composeH3VideoPrompt({
+    prompt: input.prompt,
+    aesthetic: input.aesthetic,
+    audioDescription: input.audioDescription,
+    voiceover: input.voiceover,
+    voiceMode: input.voiceMode,
+    speakerHint: input.speakerHint,
+    duration: input.duration,
+    width: input.width,
+    height: input.height,
+    aspectRatio: input.aspectRatio,
+    cameraMovement: input.cameraMovement,
+    mode: input.imageBlob || input.referenceImages?.length ? 'I2VA' : 'T2VA'
+  })
 }
 
 export async function generateVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  if (getAIMode() === 'real' && input.imageBlob) {
-    try {
-      return await realWorkflowVideo(input, onProgress)
-    } catch (e) {
-      console.warn('[video] real 模式失败，回退 mock:', e)
+  const mode = getAIMode()
+  if (mode === 'real') {
+    if (!input.imageBlob) {
+      throw new Error('[video] 真实模式需要分镜配图作为输入')
     }
+    // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成片
+    return await realWorkflowVideo(input, onProgress)
   }
 
   // mock：只需要一张图（多张也只用第一张）
@@ -414,5 +522,5 @@ export async function generateVideo(
     input.height,
     input.cameraMovement
   )
-  return { blob, mimeType: 'video/webm', prompt: input.prompt, duration: input.duration }
+  return { blob, mimeType: 'video/webm', prompt: buildPrompt(input), duration: input.duration }
 }

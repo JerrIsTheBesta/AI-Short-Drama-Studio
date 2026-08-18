@@ -2,15 +2,15 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { generateVideo, composeVideoPrompt } from '@/services/ai'
-import { effectiveVideoPrompt } from '@/utils/shot'
+import { generateVideo, composeVideoPrompt, h3IdentityLockFromFrame, enrichVideoPerformance } from '@/services/ai'
+import { effectiveShotAudioMode, effectiveVideoPrompt, h3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
-import { openLightbox } from '@/composables/useLightbox'
+import { sceneForShot, subjectsForShot, videoExtraRefIds, videoExtraRefLead } from '@/utils/consistency'
 import type { Shot, ID } from '@/types'
 
 const router = useRouter()
@@ -41,7 +41,7 @@ const shots = computed(() => project.current?.shots ?? [])
 const aspectRatio = computed(() => project.current?.settings.aspectRatio ?? '16:9')
 const width = computed(() => project.current?.settings.width ?? 1280)
 const height = computed(() => project.current?.settings.height ?? 720)
-const aesthetic = computed(() => project.current?.script?.aesthetic ?? '')
+const aesthetic = computed(() => project.current?.script?.h3Aesthetic || project.current?.script?.aesthetic || '')
 
 const shotsWithoutImage = computed(() =>
   shots.value.filter((s) => !s.imageAssetId)
@@ -50,17 +50,11 @@ const shotsWithoutVideo = computed(() =>
   shots.value.filter((s) => s.imageAssetId && !s.videoAssetId)
 )
 
-async function collectAllReferenceBlobs(shot: Shot): Promise<{
-  main: Blob | undefined
-  references: Blob[]
-}> {
-  // 图生视频只喂本镜成图。
-  // 人设三视图是「浅色棚拍 + 均匀打光」，若作为第 2/3 张参考，
-  // MiniMax/Light2V 会把整段光线往白天拉，出现「开头夜晚 → 结尾白天」。
-  const main = shot.imageAssetId
-    ? await assets.getBlob(shot.imageAssetId)
-    : undefined
-  return { main, references: [] }
+async function collectShotFrame(shot: Shot): Promise<Blob> {
+  if (!shot.imageAssetId) throw new Error('请先生成该镜头的配图')
+  const main = await assets.getBlob(shot.imageAssetId)
+  if (!main) throw new Error('图片读取失败')
+  return main
 }
 
 async function loadVideos() {
@@ -101,8 +95,15 @@ function updateVideoPrompt(shot: Shot, value: string) {
 }
 
 function resetVideoPrompt(shot: Shot) {
-  project.updateShot(shot.id, { videoPrompt: shot.visualPrompt })
-  toast.info('已恢复为分镜画面描述')
+  project.updateShot(shot.id, { videoPrompt: synthesizeVideoPerformance(shot) })
+  toast.info('已按分镜动作重写视频内容表现')
+}
+
+function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
+  if (effectiveShotAudioMode(shot) === mode) return
+  const hadVideo = Boolean(shot.videoAssetId)
+  project.setShotAudioMode(shot.id, mode)
+  if (hadVideo) toast.info('人声方案已改变，旧视频已放入历史；请重新生成本镜以避免声音或口型不匹配。', 6000)
 }
 
 function composedPrompt(shot: Shot) {
@@ -110,6 +111,9 @@ function composedPrompt(shot: Shot) {
     prompt: promptOf(shot),
     aesthetic: aesthetic.value,
     audioDescription: shot.audioDescription,
+    voiceover: shot.voiceover,
+    voiceMode: h3VoiceMode(shot),
+    speakerHint: shot.speakerHint,
     duration: shot.duration,
     width: width.value,
     height: height.value,
@@ -133,19 +137,43 @@ async function generateOne(shot: Shot) {
   generating.value.add(shot.id)
   try {
     progress.value[shot.id] = '读取图片...'
-    const { main, references } = await collectAllReferenceBlobs(shot)
-    if (!main) throw new Error('图片读取失败')
+    const main = await collectShotFrame(shot)
 
-    const prompt = promptOf(shot) || shot.title
-    const totalRefs = references.length + 1
-    progress.value[shot.id] = `生成视频中（${totalRefs} 张图）...`
+    progress.value[shot.id] = '识别画面人物...'
+    const identityLock = await h3IdentityLockFromFrame({
+      imageBlob: main,
+      subjects: project.current ? subjectsForShot(shot, project.current) : []
+    })
+    progress.value[shot.id] = '写细视频内容表现...'
+    const performance = await enrichVideoPerformance({
+      shot,
+      subjects: project.current ? subjectsForShot(shot, project.current) : [],
+      scene: project.current ? sceneForShot(shot, project.current) : undefined
+    })
+    if (performance && performance !== shot.videoPrompt) {
+      project.updateShot(shot.id, { videoPrompt: performance })
+    }
+    const extraIds = videoExtraRefIds(shot).slice(0, 2)
+    const extras: Blob[] = []
+    for (const id of extraIds) {
+      const b = await assets.getBlob(id)
+      if (b) extras.push(b)
+    }
+    const lead = project.current && extras.length ? videoExtraRefLead(shot, project.current) : ''
+    const prompt = [lead, identityLock, performance].filter(Boolean).join('\n\n')
+    progress.value[shot.id] = extras.length
+      ? `生成视频中（本镜配图 + ${extras.length} 张参考）...`
+      : '生成视频中（仅本镜配图）...'
     const result = await generateVideo(
       {
         imageBlob: main,
-        referenceImages: references,
+        referenceImages: extras.length ? extras : undefined,
         prompt,
         aesthetic: aesthetic.value,
         audioDescription: shot.audioDescription,
+        voiceover: shot.voiceover,
+        voiceMode: h3VoiceMode(shot),
+        speakerHint: shot.speakerHint,
         duration: shot.duration,
         width: width.value,
         height: height.value,
@@ -161,7 +189,19 @@ async function generateOne(shot: Shot) {
     progress.value[shot.id] = '保存到资源库...'
     const asset = await assets.add(result.blob, 'video', 'ai-generated', {
       filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
-      prompt,
+      prompt: composeVideoPrompt({
+        prompt,
+        aesthetic: aesthetic.value,
+        audioDescription: shot.audioDescription,
+        voiceover: shot.voiceover,
+        voiceMode: h3VoiceMode(shot),
+        speakerHint: shot.speakerHint,
+        duration: shot.duration,
+        width: width.value,
+        height: height.value,
+        aspectRatio: aspectRatio.value,
+        cameraMovement: shot.cameraMovement
+      }),
       projectId: project.current?.id,
       shotId: shot.id
     })
@@ -344,13 +384,26 @@ function next() {
               <option value="static">固定</option>
             </select>
           </label>
+          <label class="info-row">
+            <span>🎙 人声 / 口型</span>
+            <select
+              class="cam-select"
+              :value="effectiveShotAudioMode(shot)"
+              @change="changeAudioMode(shot, ($event.target as HTMLSelectElement).value as NonNullable<Shot['audioMode']>)"
+            >
+              <option value="h3-dialogue">H3 出镜对白 + 对口型</option>
+              <option value="h3-voiceover">H3 画外口播 + 人物闭嘴</option>
+              <option value="tts">后期 TTS + H3 不说话</option>
+              <option value="none">无口播，仅环境声</option>
+            </select>
+          </label>
         </div>
 
         <div class="shot-prompt">
           <div class="prompt-bar">
-            <div class="prompt-label">视频生成脚本 / 提示词</div>
+            <div class="prompt-label">视频内容表现</div>
             <div class="prompt-tools">
-              <button class="reset-btn" @click="resetVideoPrompt(shot)">恢复分镜原文</button>
+              <button class="reset-btn" @click="resetVideoPrompt(shot)">按分镜动作重写</button>
               <button class="reset-btn" @click="toggleExpanded(shot.id)">
                 {{ expanded.has(shot.id) ? '收起完整提示词' : '看完整提示词' }}
               </button>
@@ -359,8 +412,8 @@ function next() {
           <textarea
             class="prompt-edit"
             rows="5"
-            :value="shot.videoPrompt ?? shot.visualPrompt"
-            placeholder="这一镜要生成的动态画面描述..."
+            :value="effectiveVideoPrompt(shot)"
+            placeholder="每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。"
             @input="updateVideoPrompt(shot, ($event.target as HTMLTextAreaElement).value)"
           />
           <pre v-if="expanded.has(shot.id)" class="composed">{{ composedPrompt(shot) }}</pre>

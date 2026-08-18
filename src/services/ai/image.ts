@@ -15,6 +15,7 @@ import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
 import type { VisualStyle, AspectRatio } from '@/types'
 import { professionalQualityLock, styleLockSuffix } from '@/utils/visualStyle'
+import { abortableDelay } from './abort'
 
 export interface ImageGenInput {
   prompt: string
@@ -28,6 +29,9 @@ export interface ImageGenInput {
   referenceImages?: Blob[]
   /** 每张参考图的语义（会写进 prompt，告诉模型第几张是什么） */
   referenceLabels?: string[]
+  /** 覆盖设置页作图模型，例如视频复刻用 gpt-image-2 */
+  model?: string
+  signal?: AbortSignal
 }
 
 export interface ImageGenOutput {
@@ -39,8 +43,12 @@ export interface ImageGenOutput {
 const log = (msg: string) =>
   console.log('%c[image]', 'color:#f59e0b;font-weight:600', msg)
 
-function imageConfig() {
-  return getImageConfig()
+function imageConfig(modelOverride?: string) {
+  const cfg = getImageConfig()
+  return {
+    ...cfg,
+    model: modelOverride?.trim() || cfg.model
+  }
 }
 
 function isSeedreamModel(model: string): boolean {
@@ -50,7 +58,8 @@ function isSeedreamModel(model: string): boolean {
 /** 把图片 API 响应统一转成 Blob（优先 b64_json） */
 async function imageResponseToBlob(
   data: any,
-  apiKey?: string
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<{ blob: Blob; mimeType: string }> {
   const item = data.data?.[0]
   if (!item) {
@@ -76,7 +85,8 @@ async function imageResponseToBlob(
   // 情况 2：url
   if (item.url) {
     const r = await fetch(item.url, {
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal
     })
     if (!r.ok) throw new Error(`下载图片失败：${r.status}`)
     const blob = await r.blob()
@@ -243,7 +253,7 @@ function buildPrompt(input: ImageGenInput, withRefs: boolean): string {
 
 /** Seedream：统一走 /images/generations，优先返回 b64_json */
 async function realSeedream(input: ImageGenInput): Promise<ImageGenOutput> {
-  const { baseUrl, apiKey, model } = imageConfig()
+  const { baseUrl, apiKey, model } = imageConfig(input.model)
   if (!baseUrl || !apiKey) {
     throw new Error('[image] 未配置 VITE_IMAGE_BASE_URL / VITE_IMAGE_API_KEY')
   }
@@ -279,7 +289,8 @@ async function realSeedream(input: ImageGenInput): Promise<ImageGenOutput> {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: input.signal
   })
 
   if (!resp.ok) {
@@ -287,14 +298,14 @@ async function realSeedream(input: ImageGenInput): Promise<ImageGenOutput> {
   }
 
   const data = await resp.json()
-  const { blob, mimeType } = await imageResponseToBlob(data, apiKey)
+  const { blob, mimeType } = await imageResponseToBlob(data, apiKey, input.signal)
   log(`✓ ${(blob.size / 1024).toFixed(1)} KB (${mimeType})`)
   return { blob, mimeType, prompt: input.prompt }
 }
 
 /** 旧 gpt-image 等：文生图 */
 async function realLegacyGenerate(input: ImageGenInput): Promise<ImageGenOutput> {
-  const { baseUrl, apiKey, model } = imageConfig()
+  const { baseUrl, apiKey, model } = imageConfig(input.model)
   if (!baseUrl || !apiKey) {
     throw new Error('[image] 未配置 VITE_IMAGE_BASE_URL / VITE_IMAGE_API_KEY')
   }
@@ -312,7 +323,8 @@ async function realLegacyGenerate(input: ImageGenInput): Promise<ImageGenOutput>
       n: input.n ?? 1,
       size: pickLegacySize(input.aspectRatio, input.width, input.height),
       response_format: 'b64_json'
-    })
+    }),
+    signal: input.signal
   })
 
   if (!resp.ok) {
@@ -320,13 +332,13 @@ async function realLegacyGenerate(input: ImageGenInput): Promise<ImageGenOutput>
   }
 
   const data = await resp.json()
-  const { blob, mimeType } = await imageResponseToBlob(data, apiKey)
+  const { blob, mimeType } = await imageResponseToBlob(data, apiKey, input.signal)
   return { blob, mimeType, prompt: input.prompt }
 }
 
 /** 旧 gpt-image：/images/edits multipart */
 async function realLegacyEdit(input: ImageGenInput): Promise<ImageGenOutput> {
-  const { baseUrl, apiKey, model } = imageConfig()
+  const { baseUrl, apiKey, model } = imageConfig(input.model)
   if (!baseUrl || !apiKey) {
     throw new Error('[image] 未配置 VITE_IMAGE_BASE_URL / VITE_IMAGE_API_KEY')
   }
@@ -355,7 +367,8 @@ async function realLegacyEdit(input: ImageGenInput): Promise<ImageGenOutput> {
   const resp = await fetch(`${baseUrl}/images/edits`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
-    body: form
+    body: form,
+    signal: input.signal
   })
 
   if (!resp.ok) {
@@ -363,7 +376,7 @@ async function realLegacyEdit(input: ImageGenInput): Promise<ImageGenOutput> {
   }
 
   const data = await resp.json()
-  const { blob, mimeType } = await imageResponseToBlob(data, apiKey)
+  const { blob, mimeType } = await imageResponseToBlob(data, apiKey, input.signal)
   return { blob, mimeType, prompt: input.prompt }
 }
 
@@ -372,38 +385,32 @@ export async function generateImage(
   onProgress?: (msg: string) => void
 ): Promise<ImageGenOutput> {
   onProgress?.('准备生成图片...')
-  const model = imageConfig().model
+  const model = imageConfig(input.model).model
 
   if (getAIMode() === 'real') {
-    try {
-      if (isSeedreamModel(model)) {
-        onProgress?.(
-          input.referenceImages?.length
-            ? `Seedream 多图融合（${input.referenceImages.length} 张参考）...`
-            : 'Seedream 文生图...'
-        )
-        return await realSeedream(input)
-      }
-
-      if (input.referenceImages && input.referenceImages.length > 0) {
-        onProgress?.(`图生图（${input.referenceImages.length} 张参考）...`)
-        return await realLegacyEdit(input)
-      }
-      onProgress?.('文生图...')
-      return await realLegacyGenerate(input)
-    } catch (e: any) {
-      console.warn('[image] real 模式失败，回退 mock:', e)
-      onProgress?.(`⚠ 出图失败：${String(e?.message || e).slice(0, 80)}，回退演示`)
+    if (isSeedreamModel(model)) {
+      onProgress?.(
+        input.referenceImages?.length
+          ? `Seedream 多图融合（${input.referenceImages.length} 张参考）...`
+          : 'Seedream 文生图...'
+      )
+      return await realSeedream(input)
     }
+    if (input.referenceImages && input.referenceImages.length > 0) {
+      onProgress?.(`图生图（${input.referenceImages.length} 张参考）...`)
+      return await realLegacyEdit(input)
+    }
+    onProgress?.('文生图...')
+    return await realLegacyGenerate(input)
   }
 
   if (input.referenceImages && input.referenceImages.length > 0) {
     onProgress?.('(演示) 混合参考图...')
-    await new Promise((r) => setTimeout(r, 600))
+    await abortableDelay(600, input.signal)
     return await generateMockWithReferences(input)
   }
 
-  await new Promise((r) => setTimeout(r, 600))
+  await abortableDelay(600, input.signal)
   const blob = await generateMockImage(
     input.prompt,
     input.width,

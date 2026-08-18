@@ -97,6 +97,16 @@ export function playableMediaBlob(
 function sniffContainerMime(bytes: Uint8Array, kind?: 'image' | 'video' | 'audio'): string | undefined {
   if (bytes.length < 12) return undefined
   const ascii = (n: number, m: number) => String.fromCharCode(...bytes.subarray(n, m))
+  // 图片优先识别，避免空 MIME 的 JPEG 被强制标成 video/mp4
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+    return 'image/png'
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif'
+  if (
+    ascii(0, 4) === 'RIFF' &&
+    ascii(8, 12) === 'WEBP'
+  )
+    return 'image/webp'
   if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav'
   if (ascii(0, 3) === 'ID3') return 'audio/mpeg'
   if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mpeg'
@@ -108,17 +118,23 @@ function sniffContainerMime(bytes: Uint8Array, kind?: 'image' | 'video' | 'audio
   return undefined
 }
 
-/** 按文件头校正 MIME，避免口播 wav 被标成 mp3 后无法试听 */
+/** 按文件头校正 MIME，避免口播 wav 被标成 mp3 后无法试听；也避免图片被误标成视频 */
 export async function ensurePlayableBlob(
   blob: Blob,
   kind?: 'image' | 'video' | 'audio',
   mimeType?: string
 ): Promise<Blob> {
-  const typed = playableMediaBlob(blob, kind, mimeType)
-  if (kind !== 'audio' && kind !== 'video') return typed
-  const head = new Uint8Array(await typed.slice(0, 16).arrayBuffer())
+  const head = new Uint8Array(await blob.slice(0, 16).arrayBuffer())
   const sniffed = sniffContainerMime(head, kind)
-  if (sniffed && sniffed !== typed.type) return typed.slice(0, typed.size, sniffed)
+  if (sniffed) {
+    if (kind === 'video' && sniffed.startsWith('image/')) {
+      // 留给上层抛错；这里先标回真实类型
+      return blob.slice(0, blob.size, sniffed)
+    }
+    if (sniffed !== blob.type) return blob.slice(0, blob.size, sniffed)
+    return blob
+  }
+  const typed = playableMediaBlob(blob, kind, mimeType)
   return typed
 }
 

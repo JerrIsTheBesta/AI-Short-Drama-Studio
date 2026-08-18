@@ -36,6 +36,7 @@ export interface AppSettings {
   defaultAspectRatio: string
   autoSaveInterval: number
   llm: ServiceEndpoint
+  vision: ServiceEndpoint
   image: ServiceEndpoint
   tts: TtsEndpoint
   video: VideoEndpoint
@@ -43,13 +44,12 @@ export interface AppSettings {
 }
 
 export const LLM_PRESETS = [
-  'qwen3.7-max',
-  'qwen3.7-plus',
-  'qwen-max',
-  'qwen-plus',
+  'deepseek-v4-flash',
   'deepseek-chat',
-  'gpt-4.1'
+  'deepseek-reasoner'
 ]
+
+export const VISION_PRESETS = ['qwen3-vl-plus', 'qwen3.8-max']
 
 export const IMAGE_PRESETS = [
   'seedream-4-5-251128',
@@ -89,6 +89,7 @@ function buildDefaults(): AppSettings {
     defaultAspectRatio: '16:9',
     autoSaveInterval: 0,
     llm: endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS),
+    vision: endpoint(env.vision.baseUrl, env.vision.apiKey, env.vision.model, VISION_PRESETS),
     image: endpoint(env.image.baseUrl, env.image.apiKey, env.image.model, IMAGE_PRESETS),
     tts: {
       ...endpoint(env.tts.baseUrl, env.tts.apiKey, env.tts.model, TTS_PRESETS),
@@ -109,10 +110,32 @@ function load(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return defaults
     const parsed = JSON.parse(raw) as Partial<AppSettings>
+    const savedLlm = parsed.llm
+    const legacyQwenPrimary = /^qwen/i.test(savedLlm?.model ?? '')
+    const llm = legacyQwenPrimary
+      ? defaults.llm
+      : {
+          ...defaults.llm,
+          ...savedLlm,
+          models: uniq([...(savedLlm?.models ?? []), ...defaults.llm.models]).filter(
+            (model) => !/^qwen/i.test(model)
+          )
+        }
+    const savedVision = parsed.vision
+    const legacyTextOnlyVision = /^(qwen3\.7|qwen-vl-)/i.test(savedVision?.model ?? '')
+    const vision = {
+      ...defaults.vision,
+      ...savedVision,
+      model: legacyTextOnlyVision ? defaults.vision.model : (savedVision?.model || defaults.vision.model),
+      models: uniq([...(savedVision?.models ?? []), ...defaults.vision.models]).filter(
+        (model) => !/^(qwen3\.7|qwen-vl-)/i.test(model)
+      )
+    }
     return {
       ...defaults,
       ...parsed,
-      llm: { ...defaults.llm, ...parsed.llm, models: uniq([...(parsed.llm?.models ?? []), ...defaults.llm.models]) },
+      llm,
+      vision,
       image: {
         ...defaults.image,
         ...parsed.image,
@@ -154,6 +177,10 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, llm: { ...config.value.llm, ...patch } }
   }
 
+  function patchVision(patch: Partial<ServiceEndpoint>) {
+    config.value = { ...config.value, vision: { ...config.value.vision, ...patch } }
+  }
+
   function patchImage(patch: Partial<ServiceEndpoint>) {
     config.value = { ...config.value, image: { ...config.value.image, ...patch } }
   }
@@ -166,7 +193,7 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, video: { ...config.value.video, ...patch } }
   }
 
-  function addModel(kind: 'llm' | 'image' | 'tts' | 'music', name: string) {
+  function addModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
     const n = name.trim()
     if (!n) return
     const cur = config.value[kind]
@@ -177,7 +204,7 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  function removeModel(kind: 'llm' | 'image' | 'tts' | 'music', name: string) {
+  function removeModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
     const cur = config.value[kind]
     const models = cur.models.filter((m) => m !== name)
     if (!models.length) return
@@ -185,5 +212,5 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, [kind]: { ...cur, models, model } }
   }
 
-  return { config, update, patchLlm, patchImage, patchTts, patchVideo, addModel, removeModel }
+  return { config, update, patchLlm, patchVision, patchImage, patchTts, patchVideo, addModel, removeModel }
 })

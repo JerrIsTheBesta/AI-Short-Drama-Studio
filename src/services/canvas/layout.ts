@@ -1,5 +1,6 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
 import { emptyCanvas } from '@/types/canvas'
+import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 
 export const NODE_W = 240
 const GAP = 14
@@ -8,8 +9,10 @@ const HEAD = 44
 const COL_GAP = 32
 const SCRIPT_W = 460
 const SCRIPT_H = 720
-/** 标题栏 + 按钮等，不含画面区 */
-const NODE_CHROME = 108
+/** 画面下方名称条高度 */
+const NODE_CHROME = 36
+/** 口播节点是独立卡片，不跟分镜画面同一套比例 */
+export const AUDIO_NODE_H = 128
 
 function aspectValue(ar?: string): number {
   const [a, b] = String(ar || '16:9').split(':').map(Number)
@@ -47,6 +50,17 @@ function cell(row: number, col: number, nodeH: number) {
   }
 }
 
+function persistStatus(
+  prevStatus: CanvasNode['status'] | undefined,
+  hasAsset: boolean
+): CanvasNode['status'] {
+  // 进程退出后磁盘上的 running 是脏状态，不能再当「生成中」
+  if (!prevStatus || prevStatus === 'running' || prevStatus === 'pending') {
+    return hasAsset ? 'success' : 'idle'
+  }
+  return prevStatus
+}
+
 function pos(
   prev: Map<string, CanvasNode>,
   id: string,
@@ -58,7 +72,8 @@ function pos(
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
   const prevList = project.canvas?.nodes ?? []
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
-  const prev = new Map((preservePositions && hadGroups ? prevList : []).map((n) => [n.id, n]))
+  const layoutReady = hadGroups && prevList.some((n) => n.id === 'group-audio')
+  const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
   const nodes: CanvasNode[] = []
   const edges: CanvasEdge[] = []
@@ -88,13 +103,14 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       height: scriptH,
       kind: 'scriptDoc'
     },
-    status: prevScript?.status ?? 'idle'
+    status: persistStatus(prevScript?.status, Boolean(project.script?.content))
   })
 
   const subBox = groupBox(subjects.length, 1, sheetH)
   const scnBox = groupBox(scenes.length, 1, shotH)
-  const shotBox = groupBox(shots.length, 3, shotH)
-  const expBox = groupBox(1, 1, sheetH)
+  const shotBox = groupBox(shots.length, 2, shotH)
+  const audBox = groupBox(shots.length, 1, AUDIO_NODE_H)
+  const expBox = groupBox(1, 2, shotH)
 
   let x = 24 + scriptW + COL_GAP
   const y = 24
@@ -119,6 +135,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   pushGroup('group-subjects', '人物角色', 'subject', subBox)
   pushGroup('group-scenes', '场景', 'scene', scnBox)
   pushGroup('group-shots', '分镜', 'shot', shotBox)
+  pushGroup('group-audio', '口播', 'audio', audBox)
   pushGroup('group-export', '成片', 'export', expBox)
 
   function attach(groupId: string, node: CanvasNode) {
@@ -135,7 +152,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       type: 'subject',
       position: cell(i, 0, sheetH),
       data: { subjectId: s.id, label: s.name },
-      status: prev.get(id)?.status ?? (s.designSheetAssetId ? 'success' : 'idle'),
+      status: persistStatus(prev.get(id)?.status, Boolean(s.designSheetAssetId)),
       parentGroupId: 'group-subjects'
     })
     edges.push({
@@ -154,7 +171,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       type: 'scene',
       position: cell(i, 0, shotH),
       data: { sceneId: s.id, label: s.name },
-      status: prev.get(id)?.status ?? (s.plateAssetId ? 'success' : 'idle'),
+      status: persistStatus(prev.get(id)?.status, Boolean(s.plateAssetId)),
       parentGroupId: 'group-scenes'
     })
     edges.push({
@@ -175,7 +192,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       type: 'shotImage',
       position: cell(i, 0, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
-      status: prev.get(imgId)?.status ?? (shot.imageAssetId ? 'success' : 'idle'),
+      status: persistStatus(prev.get(imgId)?.status, Boolean(shot.imageAssetId)),
       parentGroupId: 'group-shots'
     })
     attach('group-shots', {
@@ -183,16 +200,22 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       type: 'shotVideo',
       position: cell(i, 1, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
-      status: prev.get(vidId)?.status ?? (shot.videoAssetId ? 'success' : 'idle'),
+      status: persistStatus(prev.get(vidId)?.status, Boolean(shot.videoAssetId)),
       parentGroupId: 'group-shots'
     })
-    attach('group-shots', {
+    attach('group-audio', {
       id: audId,
       type: 'audio',
-      position: cell(i, 2, shotH),
-      data: { shotId: shot.id, label: '口播' },
-      status: prev.get(audId)?.status ?? (shot.audioAssetId ? 'success' : 'idle'),
-      parentGroupId: 'group-shots'
+      position: cell(i, 0, AUDIO_NODE_H),
+      data: {
+        shotId: shot.id,
+        label: needsExternalTts(shot) ? '后期 TTS' : effectiveShotAudioMode(shot).startsWith('h3-') ? 'H3 人声' : '无口播'
+      },
+      status: persistStatus(
+        prev.get(audId)?.status,
+        Boolean(shot.audioAssetId) || !needsExternalTts(shot)
+      ),
+      parentGroupId: 'group-audio'
     })
 
     const wanted = (shot.subjectIds?.length ? shot.subjectIds : subjects.map((s) => s.id)).slice(
@@ -243,13 +266,29 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     })
   })
 
+  const hasFinal = Boolean(project.finalVideoAssetId)
   attach('group-export', {
     id: 'export',
     type: 'export',
-    position: cell(0, 0, sheetH),
-    data: { label: '成片导出' },
-    status: prev.get('export')?.status ?? 'idle',
+    position: cell(0, 0, shotH),
+    data: { label: '合成成片' },
+    status: persistStatus(prev.get('export')?.status, hasFinal),
     parentGroupId: 'group-export'
+  })
+  attach('group-export', {
+    id: 'final',
+    type: 'final',
+    position: cell(0, 1, shotH),
+    data: { label: '成片结果' },
+    status: persistStatus(prev.get('final')?.status, hasFinal),
+    parentGroupId: 'group-export'
+  })
+  edges.push({
+    id: 'e-export-final',
+    source: 'export',
+    target: 'final',
+    sourceHandle: 'out',
+    targetHandle: 'in'
   })
 
   const viewport = project.canvas?.viewport ?? emptyCanvas().viewport

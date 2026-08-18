@@ -52,13 +52,15 @@ export function scenePlatePrompt(scene: Scene, style: VisualStyle, look?: Visual
   const anchor = scene.mainAnchor ? `场景主锚：${scene.mainAnchor}。` : ''
   const photo = isPhotographicLook(resolved)
   const lead = photo
-    ? `「${scene.name}」空镜场景底板。画风必须是「${medium}」。宽画幅环境，仅有场景。禁止人物、面孔、动物、角色、文字。`
-    : `「${scene.name}」空镜场景底板。绘制媒介必须是「${medium}」。无人、无动物、无文字。场景的材料与质感必须符合「${medium}」，禁止用实景照片或其他画风冒充。`
+    ? `「${scene.name}」空镜场景底板。画风必须是「${medium}」。宽画幅环境，只拍地点。`
+    : `「${scene.name}」空镜场景底板。绘制媒介必须是「${medium}」。场景的材料与质感必须符合「${medium}」，禁止用实景照片或其他画风冒充。`
 
   return `${lead}
 ${scene.description}
 ${anchor}${lighting}
 
-清晰呈现建筑、材质、时段与光线，便于后续镜头复用同一地点。
+这是空镜底板，人物会在后续用人设图单独叠进场景。画面里绝对不能有：人物、人脸、手脚、剪影、模特、假人、路人、人群、镜子或玻璃里的人影、人形雕像。
+只画建筑、家具、道具、地面、天空、时段与光线。一个活物都没有。
+清晰呈现材质与主锚，便于同一地点反复使用。
 ${mediumLockText(resolved)}`
 }

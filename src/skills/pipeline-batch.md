@@ -14,9 +14,9 @@ triggers: 全部做完,一口气,整条流水线,都生成,全做,全部生成,�
 
 ## 一步一停（默认）
 
-拆完剧本必须停，并告诉用户「画布左侧已经出现完整剧本」。问要不要继续。
+拆完剧本必须停，并告诉用户「画布左侧已经出现完整剧本，还没拆节点」。问要不要提炼节点。
 
-用户说「继续」= 验收（如还没验收）+ 只做下一步。
+用户说「继续」= 若还没节点则提炼人物/场景/分镜；节点齐了才验收 + 只做下一步。
 用户说「确认通过」= 只验收，再问要不要继续。
 用户说「全流程 / 全部做完」才一次做完。
 
@@ -24,15 +24,17 @@ triggers: 全部做完,一口气,整条流水线,都生成,全做,全部生成,�
 
 ## 只有用户说了全流程 / 全部做完时才走死顺序
 
-1. 没有分镜 → `generate_storyboard`
-2. `approve_play`（全流程才自动过闸）
-3. 人设/场景图缺 → `generate_all_sheets` / `generate_all_scenes`
-4. 镜头还没图 → `generate_all_images`
-5. 有图没视频 → `generate_all_videos`
+1. 没有完整剧本 → `generate_play`
+2. 没有分镜节点 → `extract_cast`
+3. `approve_play`（全流程才自动过闸）
+4. 人设/场景图缺 → `generate_all_sheets` / `generate_all_scenes`
+5. 镜头还没图 → `generate_all_images`
+6. 有图没视频 → `generate_all_videos`
 
 ## 用户只说了一截（平时默认）
 
-- 「拆分镜」：只 `generate_storyboard`，做完停。
+- 「写剧本 / 拆分镜」：只 `generate_play`，做完停。
+- 「提炼节点」：只 `extract_cast`。
 - 「出人设」：只人设，不要配图、不要视频。
 - 「出场景」：只场景底板。
 - 「把第三镜画出来」：只那一镜的配图。

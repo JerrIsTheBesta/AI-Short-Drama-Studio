@@ -10,7 +10,7 @@
 
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
 import { mockStoryboardFromPrompt } from './mock'
-import type { Scene, Script, Shot, Subject, VisualStyle } from '@/types'
+import type { Scene, Script, Shot, ShotAudioMode, Subject, VisualStyle } from '@/types'
 import { getSkillBody } from '@/skills'
 import { getLlmConfig } from './runtime'
 import {
@@ -22,6 +22,7 @@ import {
   styleLabel,
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
+import { synthesizeVideoPerformance, VIDEO_PERFORMANCE_SPEC, videoPerformanceIssue } from '@/utils/shotPrompt'
 
 export interface StoryboardInput {
   topic: string
@@ -33,6 +34,12 @@ export interface StoryboardInput {
   keywords?: string[]
   /** 产品/主题参考图（data URL 或公网 URL），最多 5 张，电商带货时以产品为准 */
   productImages?: string[]
+  /**
+   * extract：content 已是完整剧本，只提炼人物/场景/分镜节点
+   * full：兼容旧的一步到位（尽量少用）
+   */
+  mode?: 'extract' | 'full'
+  signal?: AbortSignal
 }
 
 export interface StoryboardShot {
@@ -43,10 +50,14 @@ export interface StoryboardShot {
    * 必须含：场景主锚与光线、角色站位朝向、动作、景别运镜、道具焦点、气氛
    */
   visualPrompt: string
+  /** 视频内容表现：谁做什么、说什么、镜头怎么走（中文，禁止复用 visualPrompt） */
+  videoPrompt?: string
   /** 音效描述（中文短句） */
   audioDescription: string
   /** 口播文案（中文） */
   voiceover: string
+  audioMode?: ShotAudioMode
+  speakerHint?: string
   /** 时长（秒，5-10） */
   duration: number
   /** 镜头运动 */
@@ -66,6 +77,7 @@ export interface StoryboardShot {
 export interface StoryboardResult {
   /** 项目级整体氛围（中文，1-2 段） */
   aesthetic?: string
+  h3Aesthetic?: string
   styleBrief?: string
   colorPalette?: string
   lightingNote?: string
@@ -174,8 +186,7 @@ ${fallback}`
 ${fallback}`
 }
 
-/** 鲁棒 JSON 解析 */
-function robustParseJson(content: string): any {
+function extractJsonText(content: string): string {
   let s = content
 
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -196,14 +207,77 @@ function robustParseJson(content: string): any {
       `LLM 响应中找不到 JSON 对象（{...}）\n原始内容（前 300 字符）：${content.slice(0, 300)}`
     )
   }
-  const jsonStr = s.slice(start, end + 1)
+  return s.slice(start, end + 1)
+}
+
+/** 修正常见模型 JSON 小错误；不修改字段内容。 */
+export function repairJsonLocally(json: string): string {
+  return json
+    // 数组里的相邻对象漏逗号：} {...
+    .replace(/}\s*(?={)/g, '},')
+    // 属性值结束后下一行直接出现新属性
+    .replace(/([}\]])\s*\n\s*(?="[^"]+"\s*:)/g, '$1,\n')
+    .replace(/("(?:[^"\\]|\\.)*"|\b(?:true|false|null|-?\d+(?:\.\d+)?)\b)\s*\n\s*(?="[^"]+"\s*:)/g, '$1,\n')
+    // 尾逗号
+    .replace(/,\s*([}\]])/g, '$1')
+}
+
+/** 鲁棒 JSON 解析：原文失败后先做不改变内容的本地语法修复。 */
+function robustParseJson(content: string): any {
+  const jsonStr = extractJsonText(content)
 
   try {
     return JSON.parse(jsonStr)
-  } catch (e) {
-    throw new Error(
-      `JSON.parse 失败：${(e as Error).message}\n尝试解析的内容（前 300 字符）：${jsonStr.slice(0, 300)}`
-    )
+  } catch (firstError) {
+    const locallyRepaired = repairJsonLocally(jsonStr)
+    try {
+      return JSON.parse(locallyRepaired)
+    } catch (secondError) {
+      throw new Error(
+        `JSON.parse 失败：${(firstError as Error).message}；本地修复后仍失败：${(secondError as Error).message}\n尝试解析的内容（前 300 字符）：${jsonStr.slice(0, 300)}`
+      )
+    }
+  }
+}
+
+/** 本地无法修复时，让主模型只修 JSON 语法，再进入业务质量验收。 */
+async function parseJsonWithModelRepair(
+  content: string,
+  input: Pick<StoryboardInput, 'signal'>,
+  label: string
+): Promise<any> {
+  try {
+    return robustParseJson(content)
+  } catch (parseError) {
+    log(`⚠ ${label} JSON 语法异常，调用结构修复：${(parseError as Error).message.split('\n')[0]}`)
+    const jsonCandidate = (() => {
+      try {
+        return extractJsonText(content)
+      } catch {
+        return content.trim()
+      }
+    })()
+    const repaired = await callLLM({
+      messages: [
+        {
+          role: 'system',
+          content: `你是 JSON 语法修复器。只修复逗号、引号、转义符、括号和被截断的容器结构；保留已有字段名、字段值、数组顺序和中文原文，不润色、不翻译、不总结、不新增事实。若末尾截断，只保留已经完整的数组元素并闭合 JSON。只输出一个合法 JSON 对象。`
+        },
+        { role: 'user', content: jsonCandidate }
+      ],
+      temperature: 0,
+      jsonMode: true,
+      maxTokens: 16384,
+      signal: input.signal,
+      timeoutMs: 180_000
+    })
+    try {
+      return robustParseJson(repaired.content)
+    } catch (repairError) {
+      throw new Error(
+        `${label} JSON 自动修复失败：${(repairError as Error).message}\n首次错误：${(parseError as Error).message}`
+      )
+    }
   }
 }
 
@@ -212,7 +286,7 @@ async function realStoryboard(input: StoryboardInput): Promise<{
   result: StoryboardResult
   model: string
 }> {
-  const productNote =
+  let productNote =
     input.productImages && input.productImages.length > 0
       ? `
 【参考图（已附带 ${input.productImages.length} 张）】
@@ -223,8 +297,36 @@ async function realStoryboard(input: StoryboardInput): Promise<{
 - 产品/主角每镜都要让人看清`
       : `
 【没有参考图】
-先从文案里列出会反复出现的人/动物（subjects）和地点（scenes）。
+先从文案里列出所有会在画面中出现的人/动物（subjects）和地点（scenes）。每个有名字、有台词或有动作的人都必须单独列一个 subject，不能把配角合并成一个“主角”。
 同一人全片同一套外貌：名字、年龄、发型、衣服、配饰不要变着写。`
+
+  if (input.productImages?.length) {
+    log(`→ 调用视觉工具分析 ${input.productImages.length} 张参考图`)
+    const visualContent: LLMContentPart[] = [
+      ...input.productImages.slice(0, 5).map((url) => ({
+        type: 'image_url' as const,
+        image_url: { url }
+      })),
+      {
+        type: 'text',
+        text: `你只负责看图，不负责写剧本。逐张识别并用简体中文给出：
+1. 人物/动物/吉祥物的数量、年龄段、脸型、发型、服装、配饰；
+2. 产品的品类、外观、颜色、可见文字（看不清就写“不可辨认”，严禁猜测）；
+3. 场景、构图与光线；
+4. 跨镜头必须保持不变的视觉锚点。
+只陈述画面里可见的事实，不补品牌、参数、价格、功效或人物关系。`
+      }
+    ]
+    const visual = await callLLM({
+      provider: 'vision',
+      messages: [{ role: 'user', content: visualContent }],
+      temperature: 0.1,
+      maxTokens: 2400,
+      signal: input.signal,
+      timeoutMs: 120_000
+    })
+    productNote += `\n\n【视觉工具识别结果（只作事实依据）】\n${visual.content.slice(0, 8_000)}`
+  }
 
   const stylePriority = buildStylePriorityBlock(input)
   const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
@@ -237,8 +339,28 @@ async function realStoryboard(input: StoryboardInput): Promise<{
   )
   const hasUserStyle = Boolean(mediumPhrase)
   const directorPlaybook = getSkillBody('storyboard-director')
+  const extractMode = input.mode === 'extract'
 
-  const userText = `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
+  const userText = extractMode
+    ? `下面是已经写好的完整剧本。请**忠实提炼**成画布节点 JSON（subjects / scenes / shots），不要重写故事、不要另起炉灶。
+
+完整剧本：
+"""
+${input.content?.trim() || '（空）'}
+"""
+
+主题：${input.topic || '（未填）'}
+${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
+视频比例：${input.aspectRatio}
+时长参考：大约每镜 ${input.shotDuration} 秒（跟剧本里的场次走，别强行统一）
+
+${stylePriority}
+${productNote}
+
+要求：人物/场景/分场与剧本一一对应；口播原文保留；visualPrompt 按剧本「画面」写成静帧可画描述；videoPrompt 必须写细：每个角色的表情神态、动作、环境反应、原词台词、运镜，禁止抄 visualPrompt。直接输出 JSON。`
+    : `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
+
+事实保真：不得新增原文没有的价格、参数、功效、人物关系、品牌承诺或剧情结论。原文含数字、专有名词时必须原样保留。信息不够就用画面承接，不要编事实填空。
 
 文案主题：
 """
@@ -257,7 +379,7 @@ ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
 ${stylePriority}
 ${productNote}
 
-顺序：先锁人物和地点，再拆镜头。每镜 visualPrompt 用镜头语言写画面里的实物、动态、光和人，不要写成画风说明书。
+顺序：先锁人物和地点，再拆镜头。每镜 visualPrompt 用镜头语言写静帧里能看见的东西；videoPrompt 写这一镜演什么，不要写成配图词。
 ${
   hasUserStyle
     ? `画风「${mediumPhrase}」在画面描述里点一次，写进桥、水、衣这些实物上。禁止第一句只写画风、结尾再抄一段技法套话。禁止只写「两人相对拱手」这种站位摘要。`
@@ -265,16 +387,9 @@ ${
 }
 直接输出 JSON，不要解释。`
 
-  const userContent: string | LLMContentPart[] =
-    input.productImages && input.productImages.length > 0
-      ? [
-          ...input.productImages.slice(0, 5).map((url) => ({
-            type: 'image_url' as const,
-            image_url: { url }
-          })),
-          { type: 'text' as const, text: userText }
-        ]
-      : userText
+  const extractSystemExtra = extractMode
+    ? `\n【本轮任务】输入已是完整剧本。只做提炼与落库字段补全，禁止改口播原意，禁止合并剧本里已分开的人物。`
+    : ''
 
   const messages: LLMMessage[] = [
     {
@@ -284,12 +399,15 @@ ${
 ${productNote}
 
 ${stylePriority}
+${extractSystemExtra}
 
-【字段全用简体中文】aesthetic、visualPrompt 也是中文白话，像跟摄像说戏。禁止 cinematic / aesthetic / film grain / premium 这类英文标签堆砌。
+【字段语言】h3Aesthetic 用英文。visualPrompt 用中文写静帧可画内容。videoPrompt 用中文写这一镜的视频内容表现。
+${VIDEO_PERFORMANCE_SPEC}
 
 【输出 JSON】
 {
   "aesthetic": "<一两句人话，说出全片味道，用用户主题里的词>",
+  "h3Aesthetic": "<English production aesthetic, concrete lighting/material/camera qualities>",
   "styleBrief": "<这片图啥、冲突在哪、凭什么不划走>",
   "colorPalette": "<几处能看见的颜色，别写色板编号>",
   "lightingNote": "<几点钟、灯从哪来>",
@@ -322,9 +440,12 @@ ${stylePriority}
       "eyeline": "<看谁/看哪件实物>",
       "continuity": "<开始什么样 → 这几秒环境或人变了啥（风、水、脚步）→ 结束定在哪>",
       "propFocus": "<这镜要看清的物件及它现在的状态，没有写无>",
-      "visualPrompt": "<镜头语言：近到远写清画面里所有实物；水/风/衣摆动或不动；光从哪来；人穿什么、踩哪、手拿什么、正在做什么。画风词点一次。禁止画风套话段，禁止只写站位>",
+      "visualPrompt": "<镜头语言：近到远写清画面里所有实物；水/风/衣摆动或不动；光从哪来；人穿什么、踩哪、手拿什么。这是静帧配图词。画风词点一次。禁止画风套话段，禁止只写站位>",
+      "videoPrompt": "<视频内容表现，中文，180-450字。先点名谁是谁。每个出场的人都要写表情神态（眉眼嘴角眼神）和手脚动作。环境要动（门、桌、光、风、衣摆、桌上的东西）。台词用原词并写说话神态。最后写镜头怎么走、怎么收。不要写成静帧配图词>",
       "audioDescription": "<现场能听到的，逗号分隔>",
       "voiceover": "<这一镜要念的；没有就空字符串>",
+      "audioMode": "h3-dialogue|h3-voiceover|tts|none",
+      "speakerHint": "<说话人声音特征 / 情绪 / 表达方式；没有口播则空字符串>",
       "duration": <5-10>,
       "cameraMovement": "push|pull|pan|tilt|static|orbit",
       "subjectIds": ["sub_1"],
@@ -335,26 +456,29 @@ ${stylePriority}
 
 画风：用户原词写进画面实物，不要单独成段。主题完全没提才用下拉「${styleCn}」。
 visualPrompt 若只有站位没有环境实物、或开头结尾是画风套话，视为不合格。
+videoPrompt 若短于 180 字、没写表情神态、没写每个人的动作、或没写环境变化，视为不合格。
 ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉风格。' : `${styleGuide.avoid}。`}
-口播大约每秒 4 个字；前后镜人的位置和手里的东西要接上。
+默认每镜使用 H3 出镜对白：把原文按镜头分配到 voiceover，并设置 audioMode=h3-dialogue。只有原文明说是旁白/画外音时才用 h3-voiceover，明确要求后期配音时才用 tts，明确无口播的空镜才用 none。口播大约每秒 4 个字。每个出场人物都必须在 subjects 中单独建档；每镜 title 必须是不同的 3-8 字内容标题，禁止统一写“镜头”。前后镜人的位置和手里的东西要接上。
 只输出合法 JSON。`
     },
     {
       role: 'user',
-      content: userContent
+      content: userText
     }
   ]
 
   const { baseUrl, model } = getLlmConfig()
   log(
-    `→ 调用 LLM: ${baseUrl}/chat/completions (model: ${model}, images: ${input.productImages?.length ?? 0})`
+    `→ 调用主 LLM: ${baseUrl}/chat/completions (model: ${model})`
   )
 
   const resp = await callLLM({
     messages,
-    temperature: 0.72,
-    jsonMode: !(input.productImages && input.productImages.length > 0),
-    maxTokens: 12288
+    temperature: 0.45,
+    jsonMode: true,
+    maxTokens: 12288,
+    signal: input.signal,
+    timeoutMs: 180_000
   })
 
   log(`← 收到响应 (${resp.content.length} 字符)`)
@@ -362,7 +486,7 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
     log('⚠ 响应包含思考标签，使用鲁棒解析剥除')
   }
 
-  const parsed = normalizeStoryboard(robustParseJson(resp.content), {
+  let parsed = normalizeStoryboard(await parseJsonWithModelRepair(resp.content, input, '脚本首稿'), {
     style: input.style,
     topic: input.topic,
     content: input.content,
@@ -373,6 +497,38 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
     throw new Error(
       `LLM 响应结构不对，没有 shots 数组：${JSON.stringify(parsed).slice(0, 200)}`
     )
+  }
+
+  const issues = storyboardQualityIssues(parsed, input)
+  if (issues.length) {
+    log(`⚠ 首稿质量问题：${issues.join('；')}`)
+    const repair = await callLLM({
+      messages: [
+        {
+          role: 'system',
+          content: `你是短视频总编审。修复给出的 JSON，不新增用户没说的产品、人物、数字或事实；但用户原文中已经出现的人物、台词和事件必须补全。\n每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按镜头分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。口播必须像真人说话，一句一个意思；每镜口播字数不超过 duration*4。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${VIDEO_PERFORMANCE_SPEC}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
+        },
+        {
+          role: 'user',
+          content: `用户原文：\n${input.content}\n\n质量问题：\n- ${issues.join('\n- ')}\n\n待修 JSON：\n${JSON.stringify(parsed)}`
+        }
+      ],
+      temperature: 0.2,
+      jsonMode: true,
+      maxTokens: 12288,
+      signal: input.signal,
+      timeoutMs: 180_000
+    })
+    parsed = normalizeStoryboard(await parseJsonWithModelRepair(repair.content, input, '质量修订稿'), {
+      style: input.style,
+      topic: input.topic,
+      content: input.content,
+      keywords: input.keywords
+    })
+    const remaining = storyboardQualityIssues(parsed, input)
+    if (remaining.some((issue) => issue.startsWith('严重'))) {
+      throw new Error(`脚本质量验收未通过：${remaining.join('；')}`)
+    }
   }
 
   log(
@@ -388,9 +544,90 @@ function asKind(v: unknown): Subject['kind'] {
   return v === 'animal' || v === 'other' || v === 'person' ? v : 'person'
 }
 
+export function storyboardQualityIssues(
+  result: StoryboardResult,
+  input: Pick<StoryboardInput, 'content' | 'topic'>
+): string[] {
+  const issues: string[] = []
+  if (!result.shots.length) issues.push('严重：没有生成任何分镜')
+  if (result.shots.length > 12) issues.push('分镜超过 12 个，短视频节奏失控')
+  if (
+    result.subjects?.length === 1 &&
+    result.subjects[0]?.name === '主角' &&
+    (input.content || '').trim()
+  ) {
+    issues.push('严重：没有从用户原文中提取完整人物，只生成了兜底“主角”')
+  }
+  const sourceText = `${input.topic || ''}\n${input.content || ''}`
+  const castText = (result.subjects ?? [])
+    .map((subject) => `${subject.name} ${subject.description} ${subject.role || ''}`)
+    .join('\n')
+  const visibleRoles = [
+    '大哥', '哥哥', '兄长', '弟弟', '妹妹', '父亲', '母亲', '爸爸', '妈妈',
+    '爷爷', '奶奶', '祖父', '祖母', '老人', '老者', '老师', '同学', '店员',
+    '顾客', '主持人', '女孩', '男孩', '女人', '男人'
+  ].filter((role) => sourceText.includes(role) && !castText.includes(role))
+  if (visibleRoles.length) {
+    issues.push(`严重：subjects 遗漏原文人物：${visibleRoles.join('、')}`)
+  }
+  const normalizedTitles = result.shots.map((shot) => shot.title.trim())
+  if (
+    normalizedTitles.some((title) => /^镜头\s*\d*$/.test(title)) ||
+    new Set(normalizedTitles).size !== normalizedTitles.length
+  ) {
+    issues.push('严重：分镜标题缺失或重复；每镜必须使用不同的内容标题，不能统一写“镜头”')
+  }
+  const targetMatch = `${input.topic}\n${input.content}`.match(/(?:约|大约|控制在)?\s*(\d{1,3})\s*秒/)
+  const targetDuration = targetMatch ? Number(targetMatch[1]) : 0
+  const totalDuration = result.shots.reduce((sum, shot) => sum + shot.duration, 0)
+  if (targetDuration >= 10 && Math.abs(totalDuration - targetDuration) > Math.max(5, targetDuration * 0.25)) {
+    issues.push(`总时长 ${totalDuration} 秒，与用户目标 ${targetDuration} 秒偏差过大`)
+  }
+  if (!result.h3Aesthetic || result.h3Aesthetic.length < 35) {
+    issues.push('缺少可直接传给 H3 的英文 Aesthetic')
+  }
+  result.shots.forEach((shot, index) => {
+    const label = `第 ${index + 1} 镜`
+    const spokenChars = (shot.voiceover || '').replace(/[\s，。！？、,.!?：:；;]/g, '').length
+    if (spokenChars > shot.duration * 4.5) {
+      issues.push(`${label} 口播 ${spokenChars} 字，${shot.duration} 秒念不完`)
+    }
+    if ((shot.visualPrompt || '').trim().length < 50) {
+      issues.push(`${label} 画面描述过短，无法稳定生成`)
+    }
+    const performance = (shot.videoPrompt || '').trim()
+    const still = (shot.visualPrompt || '').trim()
+    if (!performance || performance === still) {
+      issues.push(`${label} 缺少视频内容表现（谁做什么、说什么、镜头怎么走），不能复用配图描述`)
+    } else {
+      const perfIssue = videoPerformanceIssue(performance)
+      if (perfIssue) issues.push(`${label} ${perfIssue}`)
+    }
+    if (!shot.sceneId) issues.push(`${label} 没有关联场景`)
+    if (!shot.cameraMovement) issues.push(`${label} 缺少运镜方式`)
+  })
+  const source = (input.content || '').trim()
+  if (source.length > 0 && result.shots.every((shot) => !shot.voiceover.trim())) {
+    issues.push('严重：用户有完整文案，但所有镜头口播均为空')
+  }
+  return issues.slice(0, 16)
+}
+
 function optStr(v: unknown): string | undefined {
   const s = String(v ?? '').trim()
   return s || undefined
+}
+
+function shotTitle(raw: any, index: number): string {
+  const explicit = String(raw?.title ?? raw?.shotTitle ?? raw?.name ?? '').trim()
+  if (explicit && !/^镜头\s*\d*$/.test(explicit)) return explicit.slice(0, 12)
+
+  const source = String(raw?.purpose ?? raw?.visualPrompt ?? raw?.videoPrompt ?? '')
+    .replace(/^(特写|近景|中景|全景|远景|镜头|画面)[：:，,、\s-]*/i, '')
+    .replace(/[【】()[\]<>"'“”‘’]/g, '')
+    .trim()
+  const phrase = source.split(/[，。！？；,:.!?;\n]/)[0]?.replace(/\s+/g, '') || ''
+  return phrase ? `${phrase.slice(0, 6)}${index + 1}` : `分镜${index + 1}`
 }
 
 function resolveIds(
@@ -441,8 +678,18 @@ export function normalizeStoryboard(
     .slice(0, 2)
     .join('；')
     .slice(0, 160)
-  const shotsIn = Array.isArray(raw?.shots) ? raw.shots : []
-  const rawSubjects = Array.isArray(raw?.subjects) ? raw.subjects : []
+  const shotsIn = Array.isArray(raw?.shots)
+    ? raw.shots
+    : Array.isArray(raw?.storyboard)
+      ? raw.storyboard
+      : []
+  const rawSubjects = Array.isArray(raw?.subjects)
+    ? raw.subjects
+    : Array.isArray(raw?.characters)
+      ? raw.characters
+      : Array.isArray(raw?.cast)
+        ? raw.cast
+        : []
   const rawScenes = Array.isArray(raw?.scenes) ? raw.scenes : []
 
   const subjects: Subject[] = rawSubjects.slice(0, 8).map((s: any, i: number) => ({
@@ -529,7 +776,17 @@ export function normalizeStoryboard(
     const sceneIds = resolveIds(s?.sceneId ?? s?.sceneName ?? s?.location, scnMap, [
       defaultScn
     ])
-    const voiceover = String(s?.voiceover || '')
+    const voiceover = String(
+      s?.voiceover ?? s?.dialogue ?? s?.narration ?? s?.spokenText ?? s?.caption ?? ''
+    ).trim()
+    const requestedAudioMode = String(s?.audioMode || '')
+    const audioMode: ShotAudioMode = !voiceover.trim()
+      ? 'none'
+      : requestedAudioMode === 'h3-dialogue' ||
+          requestedAudioMode === 'h3-voiceover' ||
+          requestedAudioMode === 'tts'
+        ? requestedAudioMode
+        : 'h3-dialogue'
     const purpose = optStr(s?.purpose)
     const shotSize = optStr(s?.shotSize)
     const blocking = optStr(s?.blocking)
@@ -552,11 +809,32 @@ export function normalizeStoryboard(
       sceneAnchor: scenes.find((sc) => sc.id === (sceneIds[0] || defaultScn))?.mainAnchor
     })
 
-    return {
-      title: String(s?.title || '镜头'),
+    const draftShot = {
+      title: shotTitle(s, i),
       visualPrompt,
       audioDescription: String(s?.audioDescription || ''),
       voiceover,
+      speakerHint: optStr(s?.speakerHint),
+      duration: clampShotDuration(s?.duration, voiceover, i),
+      cameraMovement: (s?.cameraMovement || 'static') as Shot['cameraMovement'],
+      purpose,
+      blocking,
+      continuity: optStr(s?.continuity)
+    }
+    const ownVideo = optStr(s?.videoPrompt)
+    const videoPrompt =
+      ownVideo && ownVideo !== visualPrompt
+        ? ownVideo
+        : synthesizeVideoPerformance(draftShot as Shot)
+
+    return {
+      title: draftShot.title,
+      visualPrompt,
+      videoPrompt,
+      audioDescription: String(s?.audioDescription || ''),
+      voiceover,
+      audioMode,
+      speakerHint: optStr(s?.speakerHint),
       duration: clampShotDuration(s?.duration, voiceover, i),
       cameraMovement: s?.cameraMovement || 'static',
       subjectIds,
@@ -587,6 +865,7 @@ export function normalizeStoryboard(
 
   return {
     aesthetic,
+    h3Aesthetic: optStr(raw?.h3Aesthetic),
     styleBrief:
       optStr(raw?.styleBrief) ??
       (styleLockFromUser
@@ -663,11 +942,12 @@ function clampShotDuration(
 
 export async function generateStoryboard(
   input: StoryboardInput,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<StoryboardRunResult> {
   const mode = getAIMode()
   const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
-  const resolved: StoryboardInput = { ...input, style: look.style }
+  const resolved: StoryboardInput = { ...input, style: look.style, signal }
   if (look.matched && look.matched !== input.style) {
     log(`画风已从用户原话对上已知画种：${input.style} → ${look.matched}（${look.medium}）`)
   } else if (look.userNamed && !look.matched) {
@@ -676,28 +956,19 @@ export async function generateStoryboard(
   log(`当前 AI 模式：${mode}`)
 
   if (mode === 'real') {
-      onProgress?.(`正在按「${look.medium}」拆能拍的镜头...`)
+      onProgress?.(
+      input.mode === 'extract'
+        ? `正在从剧本提炼人物 / 场景 / 分镜…`
+        : `正在按「${look.medium}」拆能拍的镜头...`
+    )
     try {
       const { result, model } = await realStoryboard(resolved)
-      onProgress?.(`✓ 模型返回 ${result.shots.length} 个分镜`)
+      onProgress?.(`✓ 模型返回 ${result.shots.length} 个分镜并通过质量检查`)
       return { result, source: 'real', model }
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       log(`✗ 真实 LLM 调用失败：${msg}`)
-      console.warn('[storyboard] 回退到 mock：', e)
-      onProgress?.(`⚠ 大模型失败：${msg.slice(0, 100)}，回退演示`)
-      const result = normalizeStoryboard(
-        mockStoryboardFromPrompt(
-          `style: ${resolved.style} duration: ${resolved.shotDuration} """${resolved.content}"""`
-        ),
-        {
-          style: resolved.style,
-          topic: resolved.topic,
-          content: resolved.content,
-          keywords: resolved.keywords
-        }
-      )
-      return { result, source: 'mock-fallback', error: msg }
+      throw new Error(`脚本生成失败，已停止后续流水线：${msg}`)
     }
   }
 
@@ -726,8 +997,11 @@ export function storyboardToShots(
     index: i,
     title: s.title,
     visualPrompt: s.visualPrompt,
+    videoPrompt: s.videoPrompt,
     audioDescription: s.audioDescription ?? '',
     voiceover: s.voiceover,
+    audioMode: s.audioMode,
+    speakerHint: s.speakerHint,
     duration: s.duration,
     cameraMovement: s.cameraMovement,
     subjectIds: s.subjectIds,
@@ -744,11 +1018,198 @@ export function storyboardToShots(
 
 /** 把项目级导演字段应用到 Script */
 export function applyAestheticToScript(
-  script: Pick<Script, 'aesthetic' | 'styleBrief' | 'colorPalette' | 'lightingNote'>,
+  script: Pick<Script, 'aesthetic' | 'h3Aesthetic' | 'styleBrief' | 'colorPalette' | 'lightingNote'>,
   result: StoryboardResult
 ) {
   if (result.aesthetic) script.aesthetic = result.aesthetic
+  if (result.h3Aesthetic) script.h3Aesthetic = result.h3Aesthetic
   if (result.styleBrief) script.styleBrief = result.styleBrief
   if (result.colorPalette) script.colorPalette = result.colorPalette
   if (result.lightingNote) script.lightingNote = result.lightingNote
+}
+
+export interface PlayDraftResult {
+  topic: string
+  playMarkdown: string
+  aesthetic?: string
+  styleBrief?: string
+  colorPalette?: string
+  lightingNote?: string
+}
+
+export interface PlayRunResult {
+  result: PlayDraftResult
+  source: StoryboardSource
+  model?: string
+}
+
+function mockPlayFromBrief(input: StoryboardInput): PlayDraftResult {
+  const topic = input.topic?.trim() || '短视频剧本'
+  const brief = input.content?.trim() || topic
+  const playMarkdown = [
+    `# ${topic}`,
+    '',
+    '## 故事梗概',
+    '',
+    brief,
+    '',
+    '## 人物',
+    '',
+    '### 主角',
+    '',
+    '片中主要出镜人物，外貌与穿戴保持统一。',
+    '',
+    '## 场景',
+    '',
+    '### 主场景',
+    '',
+    '围绕文案发生的主要地点。',
+    '',
+    '## 分场',
+    '',
+    '### 第 1 场　开场',
+    '',
+    `**口播**　${brief.slice(0, 40)}`,
+    '',
+    '**画面**　从主场景切入，完成开场信息。',
+    '',
+    '### 第 2 场　收口',
+    '',
+    '**口播**　把结论说清楚。',
+    '',
+    '**画面**　收近主体或产品，结束本片。',
+    ''
+  ].join('\n')
+  return {
+    topic,
+    playMarkdown,
+    aesthetic: `围绕「${topic}」的短视频叙事`,
+    styleBrief: '演示模式生成的完整剧本草稿'
+  }
+}
+
+async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {
+  const directorPlaybook = getSkillBody('storyboard-director')
+  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
+  const styleCn = styleLabel(look.style)
+  const mediumPhrase = extractUserMediumPhrase(
+    input.topic,
+    input.content,
+    ...(input.keywords ?? [])
+  )
+
+  const messages: LLMMessage[] = [
+    {
+      role: 'system',
+      content: `${directorPlaybook}
+
+你这一步**只写完整剧本**，不要输出 subjects/scenes/shots JSON，也不要写英文 videoPrompt。
+目标：一份能直接给人读的 Markdown 剧本，方便用户改字；下一轮才会从剧本提炼画布节点。
+
+【输出 JSON】
+{
+  "topic": "<短标题>",
+  "playMarkdown": "<完整 Markdown 剧本，见下方结构>",
+  "aesthetic": "<一两句人话，全片味道>",
+  "styleBrief": "<这片图啥、凭什么不划走>",
+  "colorPalette": "<能看见的颜色>",
+  "lightingNote": "<时辰和光从哪来>"
+}
+
+playMarkdown 必须用简体中文，结构如下（可增减场次，一般 4–8 场）：
+# 标题
+## 故事梗概
+## 人物
+### 名字
+（外貌、穿戴、在片里干什么）
+## 场景
+### 地点名
+（人还没进来时的地方：地面、光、风、主锚物件）
+## 分场
+### 第 N 场　场记标题
+**口播**　这一场要念的（没有就写无）
+**画面**　这一场看见什么、谁在干什么（白话，别写提示词沙拉）
+**声音**　现场能听到什么
+**时长**　约 N 秒
+
+事实保真：不新增原文没有的价格、功效、人物关系。口播像微信语音。画风「${mediumPhrase || styleCn}」融进画面描述，不要单独堆技法套话。
+只输出合法 JSON。`
+    },
+    {
+      role: 'user',
+      content: `把下面的主题/草稿写成完整剧本（只要 Markdown 剧本，不要拆画布节点）。
+
+主题：
+"""
+${input.topic || '（未填）'}
+"""
+
+草稿：
+"""
+${input.content?.trim() || '（没写正文）'}
+"""
+${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
+比例：${input.aspectRatio}；单场节奏参考约 ${input.shotDuration} 秒。`
+    }
+  ]
+
+  const { model } = getLlmConfig()
+  const resp = await callLLM({
+    messages,
+    temperature: 0.45,
+    jsonMode: true,
+    maxTokens: 8192,
+    signal: input.signal,
+    timeoutMs: 120_000
+  })
+
+  const raw = await parseJsonWithModelRepair(resp.content, input, '剧本草稿')
+  const playMarkdown = String(raw?.playMarkdown || raw?.play || raw?.markdown || '').trim()
+  if (playMarkdown.length < 80) {
+    throw new Error('剧本过短或未返回 playMarkdown，请重试')
+  }
+  return {
+    result: {
+      topic: String(raw?.topic || input.topic || '短视频剧本').trim() || '短视频剧本',
+      playMarkdown,
+      aesthetic: raw?.aesthetic ? String(raw.aesthetic) : undefined,
+      styleBrief: raw?.styleBrief ? String(raw.styleBrief) : undefined,
+      colorPalette: raw?.colorPalette ? String(raw.colorPalette) : undefined,
+      lightingNote: raw?.lightingNote ? String(raw.lightingNote) : undefined
+    },
+    model: resp.model ?? model
+  }
+}
+
+/** 第一步：只生成完整剧本 Markdown，不拆节点 */
+export async function generatePlay(
+  input: StoryboardInput,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+): Promise<PlayRunResult> {
+  const mode = getAIMode()
+  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
+  const resolved: StoryboardInput = { ...input, style: look.style, signal }
+  log(`写剧本 · AI 模式：${mode}`)
+
+  if (mode === 'real') {
+    onProgress?.('正在写完整剧本…')
+    try {
+      const { result, model } = await realGeneratePlay(resolved)
+      onProgress?.('✓ 完整剧本已写好（尚未提炼节点）')
+      return { result, source: 'real', model }
+    } catch (e: any) {
+      const msg = e?.message ?? String(e)
+      log(`✗ 写剧本失败：${msg}`)
+      throw new Error(`写剧本失败：${msg}`)
+    }
+  }
+
+  onProgress?.('🎭 演示模式写剧本')
+  return { result: mockPlayFromBrief(resolved), source: 'mock' }
+}
+
+/** 是否已有可提炼的完整剧本 */
+export function isPlayReady(script: Script | null | undefined): boolean {
+  return Boolean(script?.playReady && script.content?.trim())
 }

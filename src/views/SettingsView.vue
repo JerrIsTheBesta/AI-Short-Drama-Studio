@@ -5,6 +5,7 @@ import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore } from
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
+import StudioSettings from '@/components/canvas/StudioSettings.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
 
@@ -181,76 +182,8 @@ const storagePct = computed(() => {
     <div class="grid">
       <GlassCard padding="lg">
         <h2>🤖 AI 能力配置</h2>
-        <p class="card-desc">不配置也能用——默认走演示模式，可以跑通完整流程</p>
-
-        <div class="ai-mode-row">
-          <span>当前模式</span>
-          <div class="mode-toggle">
-            <button
-              :class="{ active: settings.config.aiMode === 'mock' }"
-              @click="settings.update({ aiMode: 'mock' })"
-            >🎭 演示模式</button>
-            <button
-              :class="{ active: settings.config.aiMode === 'real' }"
-              @click="settings.update({ aiMode: 'real' })"
-            >🔌 真实 API</button>
-          </div>
-        </div>
-
-        <div v-if="settings.config.aiMode === 'real'" class="env-config">
-          <p class="env-hint">
-            画布右侧「模型」面板可以改 LLM / 生图 / 配音，改完立刻生效。也可以在下面用 <code>.env</code> 做默认值。
-          </p>
-          <pre class="env-block"># ===== LLM（分镜脚本 + 口播文案，APIYI）=====
-VITE_LLM_BASE_URL=https://api.apiyi.com/v1
-VITE_LLM_API_KEY=sk-...
-VITE_LLM_MODEL=qwen3.7-max
-
-# ===== 图像（APIYI Seedream 4.5）=====
-# 统一：POST /v1/images/generations（文生图 / 多图融合）
-# 响应优先 b64_json
-VITE_IMAGE_BASE_URL=https://api.apiyi.com/v1
-VITE_IMAGE_API_KEY=sk-...
-VITE_IMAGE_MODEL=seedream-4-5-251128
-
-# ===== 视频（ComfyUI workflow 协议）=====
-VITE_VIDEO_BASE_URL=https://uu459546-78656cd2bf79.westd.seetacloud.com:8443
-VITE_VIDEO_WORKFLOW_ID=minimax_h3_light2v-1
-VITE_VIDEO_API_KEY=
-
-# ===== 口播 TTS（百炼 SpeechSynthesizer / qwen-audio-3.0-tts-flash）=====
-VITE_TTS_BASE_URL=https://dashscope.aliyuncs.com/api/v1
-VITE_TTS_API_KEY=sk-...
-VITE_TTS_MODEL=qwen-audio-3.0-tts-flash
-VITE_TTS_VOICE=longanhuan_v3.6
-
-# ===== 整片 BGM（MiniMax Music 3.0 纯音乐）=====
-VITE_MUSIC_BASE_URL=https://api.minimaxi.com/v1
-VITE_MUSIC_API_KEY=sk-cp-...
-VITE_MUSIC_MODEL=music-3.0
-
-# 启用真实模式（必须）
-VITE_AI_REAL_MODE=true</pre>
-          <p class="env-hint">
-            💡 <b>当前 LLM</b>：APIYI <code>qwen3.7-max</code>（专业剧本编剧 + 镜头导演，写分镜与口播）。口播 TTS 百炼 <code>qwen-audio-3.0-tts-flash</code>（SpeechSynthesizer）。整片配乐 MiniMax <code>music-3.0</code>（纯音乐，导出时去掉各段原声）。图像走 APIYI Seedream <code>seedream-4-5-251128</code>，视频走 ComfyUI。<br />
-            📋 视频协议：<code>POST &#123;BASE&#125;/api/workflow/generate</code> 提交任务（3 张图 + prompt），
-            拿到 <code>prompt_id</code>，<code>GET &#123;BASE&#125;/api/workflow/result?prompt_id=...</code> 轮询拿视频 URL。<br />
-            参考字段：<code>137:image / 139:image / 141:image</code>（3 张图，data:base64）、
-            <code>146:prompt</code>、<code>147:value</code>（帧数）、<code>154:strength_model</code>。
-          </p>
-        </div>
-
-        <div v-else class="mock-mode">
-          <p class="env-hint">🎭 演示模式特点：</p>
-          <ul class="env-hint">
-            <li>✅ 完全离线，无需任何 API key</li>
-            <li>✅ 分镜：根据文案关键词智能拆解</li>
-            <li>✅ 图片：Canvas 程序化生成（每个 prompt 算出色调）</li>
-            <li>✅ 视频：Canvas + MediaRecorder 录屏生成短动画</li>
-            <li>⚠️ 视频/图片是抽象的演示效果，不是真实画面</li>
-            <li>💡 要看到真实效果，请切换到「真实 API」并配置 key</li>
-          </ul>
-        </div>
+        <p class="card-desc">主智能体使用 DeepSeek；Qwen 仅用于看图和多模态质量验收。配置改完立即生效。</p>
+        <StudioSettings />
       </GlassCard>
 
       <GlassCard padding="lg">

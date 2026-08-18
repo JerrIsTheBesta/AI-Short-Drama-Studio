@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useProjectStore, useToastStore } from '@/stores'
-import { runCanvasNode } from '@/services/canvas/runner'
+import { runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import {
   applyProjectPlayMarkdown,
@@ -10,6 +10,7 @@ import {
 } from '@/utils/scriptMarkdown'
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
+import { isPlayReady } from '@/services/ai'
 
 const props = defineProps<{
   id: string
@@ -31,10 +32,15 @@ const { getViewport } = useVueFlow()
 const nodeMeta = computed(() => project.current?.canvas?.nodes.find((n) => n.id === props.id))
 const width = computed(() => nodeMeta.value?.data.width || props.data.width || 460)
 const height = computed(() => nodeMeta.value?.data.height || props.data.height || 720)
-const generating = computed(() => isNodeRunning(props.id) || nodeMeta.value?.status === 'running')
+const generating = computed(() => isNodeRunning(props.id))
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
 const waitingReview = computed(() => needsPlayReview(project.current))
 const approved = computed(() => Boolean(project.current?.shots.length) && !waitingReview.value)
+const playReady = computed(() => isPlayReady(project.current?.script))
+const playLabel = computed(() => (playReady.value ? '重新写剧本' : '写剧本'))
+const extractLabel = computed(() =>
+  project.current?.shots.length ? '重新提炼节点' : '提炼节点'
+)
 
 const editing = ref(false)
 const draft = ref('')
@@ -74,7 +80,12 @@ async function saveEdit(ev?: Event) {
     const clone = JSON.parse(JSON.stringify(project.current)) as typeof project.current
     if (!clone) return
     applyProjectPlayMarkdown(clone, draft.value)
-    if (clone.script) project.setScript(clone.script)
+    if (clone.script) {
+      project.setScript({
+        ...clone.script,
+        playReady: Boolean(clone.script.content?.trim())
+      })
+    }
     if (clone.subjects) project.setSubjects(clone.subjects)
     if (clone.scenes) project.setScenes(clone.scenes)
     if (clone.shots) project.setShots(clone.shots)
@@ -169,15 +180,19 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', onResizeEnd)
 })
 
-async function generateThis(ev: Event) {
+async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
   ev.stopPropagation()
   if (generating.value) return
   if (editing.value) {
     toast.warn('请先保存或取消剧本编辑')
     return
   }
+  if (kind === 'extract' && !playReady.value && !(project.current?.script?.content || '').trim()) {
+    toast.warn('请先写完整剧本，再提炼节点')
+    return
+  }
   try {
-    await runCanvasNode(props.id)
+    await runScriptNode(kind)
   } catch {
     /* 节点上会显示失败 */
   }
@@ -200,8 +215,16 @@ async function generateThis(ev: Event) {
         </template>
         <template v-else>
           <button type="button" class="sdoc-btn" @click="startEdit" @mousedown.stop>✎ 编辑</button>
-          <button class="sdoc-gen" :disabled="generating" @click="generateThis" @mousedown.stop>
-            {{ generating ? '拆解中…' : project.current?.shots.length ? '重新拆分镜' : '拆分镜' }}
+          <button class="sdoc-gen" :disabled="generating" @click="generateThis($event, 'play')" @mousedown.stop>
+            {{ generating ? '生成中…' : playLabel }}
+          </button>
+          <button
+            class="sdoc-gen secondary"
+            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
+            @click="generateThis($event, 'extract')"
+            @mousedown.stop
+          >
+            {{ extractLabel }}
           </button>
         </template>
       </div>
@@ -217,7 +240,13 @@ async function generateThis(ev: Event) {
     />
     <div v-else class="sdoc-md nowheel nodrag" v-html="html" />
 
-    <div v-if="waitingReview && !editing" class="sdoc-gate nodrag">
+    <div v-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
+      <span>完整剧本已写好，还没拆成节点。可先改字，再点「提炼节点」生成人物、场景、分镜。</span>
+      <button type="button" :disabled="generating" @click="generateThis($event, 'extract')" @mousedown.stop>
+        提炼节点
+      </button>
+    </div>
+    <div v-else-if="waitingReview && !editing" class="sdoc-gate nodrag">
       <span>请先验收这份剧本。可点「编辑」修改后再确认。确认后才做人设、配图、视频。</span>
       <button type="button" @click="approvePlay" @mousedown.stop>确认通过</button>
     </div>
@@ -315,6 +344,10 @@ async function generateThis(ev: Event) {
 }
 .sdoc-gen:disabled {
   opacity: 0.6;
+}
+.sdoc-gen.secondary {
+  background: transparent;
+  border: 1px solid var(--color-border);
 }
 .sdoc-md,
 .sdoc-edit {

@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { runCanvasNode } from '@/services/canvas/runner'
+import { runCanvasNode, runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
-import { pushHistory } from '@/utils/shot'
+import { effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory, synthesizeVideoPerformance } from '@/utils/shot'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
+import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
-import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
-import type { CanvasNode } from '@/types'
+import { canBuildExport } from '@/utils/timeline'
+import type { CanvasNode, ShotAudioMode } from '@/types'
 
 const props = defineProps<{
   node: CanvasNode | null
@@ -19,10 +19,56 @@ const props = defineProps<{
 const project = useProjectStore()
 const assets = useAssetsStore()
 const toast = useToastStore()
-const router = useRouter()
 const preview = ref('')
 const historyUrls = ref<Record<string, string>>({})
 const running = computed(() => (props.node ? isNodeRunning(props.node.id) : false))
+const bgmPrompt = ref('')
+const bgmUrl = ref('')
+const generatingBgm = ref(false)
+const bgmError = ref('')
+
+const keepAmbientAudio = computed({
+  get: () => project.current?.settings.keepAmbientAudio !== false,
+  set: (v: boolean) => project.setSettings({ keepAmbientAudio: v })
+})
+const ambientVolume = computed({
+  get: () => project.current?.settings.originalVolume ?? 0.55,
+  set: (v: number) => project.setSettings({ originalVolume: v })
+})
+const bgmVolume = computed({
+  get: () => project.current?.settings.bgmVolume ?? 0.35,
+  set: (v: number) => project.setSettings({ bgmVolume: v })
+})
+const burnCaptions = computed({
+  get: () => project.current?.settings.burnCaptions !== false,
+  set: (v: boolean) => project.setSettings({ burnCaptions: v })
+})
+const bgmAssetId = computed({
+  get: () => project.current?.bgmAssetId || '',
+  set: (id: string) => {
+    project.setBgm(id || undefined, bgmPrompt.value)
+  }
+})
+const audioAssets = computed(() =>
+  assets.all.filter((a) => a.kind === 'audio' && !String(a.filename).startsWith('vo_'))
+)
+const totalDuration = computed(() => {
+  const p = project.current
+  if (!p) return 24
+  if (p.timeline?.length) {
+    return Math.max(
+      8,
+      p.timeline.filter((c) => c.enabled).reduce((s, c) => s + (c.duration || 0), 0)
+    )
+  }
+  return Math.max(
+    8,
+    p.shots.reduce((s, sh) => s + (sh.duration || 0), 0)
+  )
+})
+const isExportNode = computed(
+  () => props.node?.type === 'export' || props.node?.type === 'final'
+)
 
 const shot = computed(() => {
   const id = props.node?.data.shotId
@@ -39,6 +85,7 @@ const scene = computed(() => {
 
 const currentAssetId = computed(() => {
   const t = props.node?.type
+  if (t === 'final') return project.current?.finalVideoAssetId
   if (t === 'subject') return subject.value?.designSheetAssetId
   if (t === 'scene') return scene.value?.plateAssetId
   if (t === 'shotImage') return shot.value?.imageAssetId
@@ -51,27 +98,35 @@ const hasAsset = computed(() => Boolean(currentAssetId.value))
 const waitingReview = computed(() => needsPlayReview(project.current))
 const gateBlocked = computed(() => {
   const t = props.node?.type
-  return Boolean(t && t !== 'script' && t !== 'export' && waitingReview.value)
+  return Boolean(
+    t && t !== 'script' && t !== 'export' && t !== 'final' && waitingReview.value
+  )
 })
 
 const actionLabel = computed(() => {
   const t = props.node?.type
-  const again = hasAsset.value
-  if (t === 'script') return project.current?.shots.length ? '重新拆分镜' : '拆分镜'
+  const again = hasAsset.value || Boolean(project.current?.finalVideoAssetId)
+  if (t === 'script') {
+    return isPlayReady(project.current?.script) ? '重新写剧本' : '写剧本'
+  }
   if (t === 'subject') return again ? '重新生成人设图' : '生成人设图'
   if (t === 'scene') return again ? '重新生成场景图' : '生成场景图'
   if (t === 'shotImage') return again ? '重新生成配图' : '生成配图'
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
-  if (t === 'audio') return again ? '重新生成口播' : '生成口播'
-  if (t === 'export') return '打开导出页'
+  if (t === 'audio') {
+    if (!shot.value || !needsExternalTts(shot.value)) return '无需独立配音'
+    return again ? '重新生成口播' : '生成口播'
+  }
+  if (t === 'export' || t === 'final') return again ? '重新合成成片' : '合成成片'
   return again ? '重新生成' : '生成这个节点'
 })
 
 const canRun = computed(() => {
   if (running.value || gateBlocked.value) return false
-  if (props.node?.type === 'export') {
+  if (props.node?.type === 'export' || props.node?.type === 'final') {
     return canBuildExport(project.current)
   }
+  if (props.node?.type === 'audio' && shot.value && !needsExternalTts(shot.value)) return false
   return true
 })
 
@@ -91,7 +146,8 @@ const kindLabel = computed(() => {
     return d ? `分镜 · 视频 · ${d}s` : '分镜 · 视频'
   }
   if (t === 'audio') return '分镜 · 口播'
-  if (t === 'export') return '成片'
+  if (t === 'export') return '成片 · 合成'
+  if (t === 'final') return '成片 · 结果'
   return t || ''
 })
 
@@ -101,6 +157,8 @@ const title = computed(() => {
   if (subject.value) return subject.value.name
   if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
+  if (props.node.type === 'export') return '合成成片'
+  if (props.node.type === 'final') return '成片预览'
   return props.node.data.label || props.node.type
 })
 
@@ -114,7 +172,7 @@ const historyIds = computed(() => {
 })
 
 const imagePromptValue = computed(() => shot.value?.imagePrompt ?? shot.value?.visualPrompt ?? '')
-const videoPromptValue = computed(() => shot.value?.videoPrompt ?? shot.value?.visualPrompt ?? '')
+const videoPromptValue = computed(() => (shot.value ? effectiveVideoPrompt(shot.value) : ''))
 
 async function refreshPreview() {
   preview.value = ''
@@ -165,6 +223,83 @@ async function restoreHistory(assetId: string) {
   toast.success('已切回这个版本')
 }
 
+async function downloadFinal() {
+  const id = project.current?.finalVideoAssetId
+  if (!id) {
+    toast.warn('还没有成片，请先合成')
+    return
+  }
+  const blob = await assets.getBlob(id)
+  if (!blob) {
+    toast.error('成片文件读取失败')
+    return
+  }
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${project.current?.name ?? 'final'}.mp4`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function refreshBgmPreview() {
+  const id = project.current?.bgmAssetId
+  if (!id) {
+    bgmUrl.value = ''
+    return
+  }
+  bgmUrl.value = (await assets.getUrl(id)) || ''
+}
+
+async function ensureBgmPrompt() {
+  if (!project.current) return
+  if (!bgmPrompt.value.trim()) {
+    bgmPrompt.value =
+      project.current.bgmPrompt || buildMusicPrompt(project.current)
+  }
+}
+
+async function generateBgm() {
+  if (!project.current) return
+  generatingBgm.value = true
+  bgmError.value = ''
+  try {
+    await ensureBgmPrompt()
+    let prompt = bgmPrompt.value.trim()
+    if (!prompt) {
+      prompt = await refineMusicPrompt(project.current)
+      bgmPrompt.value = prompt
+    }
+    const result = await generateMusic({
+      prompt,
+      duration: totalDuration.value || 24
+    })
+    const typed = result.blob.type.startsWith('audio/')
+      ? result.blob
+      : new Blob([result.blob], { type: result.mimeType || 'audio/mpeg' })
+    const asset = await assets.add(typed, 'audio', 'ai-generated', {
+      filename: `bgm_${Date.now().toString(36)}`,
+      prompt,
+      projectId: project.current.id
+    })
+    project.setBgm(asset.id, prompt)
+    await project.save()
+    await refreshBgmPreview()
+    toast.success('整片配乐已生成，可先试听')
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    bgmError.value = msg
+    toast.error('配乐生成失败：' + msg, 10000)
+  } finally {
+    generatingBgm.value = false
+  }
+}
+
+function onBgmPromptBlur() {
+  if (!project.current) return
+  project.setBgm(project.current.bgmAssetId, bgmPrompt.value)
+}
+
 async function run() {
   if (!props.node) return
   if (gateBlocked.value) {
@@ -172,27 +307,26 @@ async function run() {
     return
   }
   try {
-    if (props.node.type === 'export') {
-      if (!project.current) return
-      if (!canBuildExport(project.current)) {
-        toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
-        return
-      }
-      const { built, clips } = ensureTimelineFromShots(project.current)
-      if (built) {
-        project.setTimeline(clips)
-        await project.save()
-        toast.info(`已按分镜排好时间线（${clips.length} 段）`)
-      }
-      router.push('/export')
-      return
+    if (props.node.type === 'script') {
+      await runScriptNode('play')
+    } else {
+      await runCanvasNode(props.node.id, () => {})
     }
-    await runCanvasNode(props.node.id, () => {})
     await refreshPreview()
     await loadHistory()
     toast.success(actionLabel.value + '完成')
   } catch (e: any) {
     toast.error(e.message || '生成失败')
+  }
+}
+
+async function runExtract() {
+  if (!props.node) return
+  try {
+    await runScriptNode('extract')
+    toast.success('节点已从剧本提炼出来')
+  } catch (e: any) {
+    toast.error(e.message || '提炼失败')
   }
 }
 
@@ -202,6 +336,17 @@ watch(
     refreshPreview()
     loadHistory()
   }
+)
+
+watch(
+  () => [props.node?.type, project.current?.bgmAssetId, project.current?.bgmPrompt] as const,
+  async ([type]) => {
+    if (type !== 'export' && type !== 'final') return
+    await assets.refresh()
+    await ensureBgmPrompt()
+    await refreshBgmPreview()
+  },
+  { immediate: true }
 )
 
 watch(running, (now, was) => {
@@ -223,7 +368,7 @@ function resetImagePrompt() {
 
 function resetVideoPrompt() {
   if (!shot.value) return
-  project.updateShot(shot.value.id, { videoPrompt: shot.value.visualPrompt })
+  project.updateShot(shot.value.id, { videoPrompt: synthesizeVideoPerformance(shot.value) })
 }
 </script>
 
@@ -237,19 +382,22 @@ function resetVideoPrompt() {
       <p v-else-if="hasAsset && node.type === 'audio'" class="hint">
         点播放可试听口播。改文案后重新生成，只动这一个节点。
       </p>
-      <p v-else-if="hasAsset && node.type !== 'script' && node.type !== 'export'" class="hint">
+      <p v-else-if="hasAsset && node.type !== 'script' && node.type !== 'export' && node.type !== 'final'" class="hint">
         改下面提示词后点重新生成，只动这一个节点。点缩略图可看大图。
       </p>
 
       <p v-else-if="node.type === 'script'" class="hint">
-        左侧完整剧本可点「编辑」直接改 Markdown（文案/人物/场景/分镜）。保存后若已确认过需再点一次确认通过。
+        分两步：先写完整剧本（还不拆节点），看完再点「提炼节点」生成人物、场景、分镜。
       </p>
       <p v-else-if="node.type === 'export'" class="hint">
-        将按分镜自动排时间线并打开导出页。若按钮灰掉，说明还没有生成视频或图片。
+        先调下方音频与字幕，再点合成。成片会出现在「成片结果」节点。
+      </p>
+      <p v-else-if="node.type === 'final'" class="hint">
+        可预览/下载成片。改音频设置后点重新合成即可。
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
 
-      <div v-if="preview && node.type === 'shotVideo'" class="prev prev-video">
+      <div v-if="preview && (node.type === 'shotVideo' || node.type === 'final')" class="prev prev-video">
         <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
           <video :src="preview" controls playsinline preload="auto" />
         </div>
@@ -270,6 +418,77 @@ function resetVideoPrompt() {
         </div>
         <span>查看大图</span>
       </button>
+
+      <template v-if="isExportNode && project.current">
+        <label>字幕</label>
+        <label class="check">
+          <input v-model="burnCaptions" type="checkbox" />
+          <span>烧录字幕到画面</span>
+        </label>
+
+        <label>分镜原声（环境音）</label>
+        <div class="seg">
+          <button
+            type="button"
+            class="seg-btn"
+            :class="{ on: keepAmbientAudio }"
+            @click="keepAmbientAudio = true"
+          >
+            保留
+          </button>
+          <button
+            type="button"
+            class="seg-btn"
+            :class="{ on: !keepAmbientAudio }"
+            @click="keepAmbientAudio = false"
+          >
+            去掉
+          </button>
+        </div>
+        <p class="hint">
+          {{
+            keepAmbientAudio
+              ? '保留普通镜头环境音；H3 自带对白 / 口播始终保留。'
+              : '静音 TTS / 无口播镜头原声；H3 自带人声不受影响。'
+          }}
+        </p>
+        <div v-if="keepAmbientAudio" class="vol-row">
+          <span class="hint">环境音</span>
+          <input v-model.number="ambientVolume" type="range" min="0.1" max="1" step="0.05" />
+          <span class="hint">{{ Math.round(ambientVolume * 100) }}%</span>
+        </div>
+
+        <label>背景音乐</label>
+        <textarea
+          v-model="bgmPrompt"
+          rows="3"
+          placeholder="配乐风格，例如：温暖弦乐铺底，不要人声…"
+          @blur="onBgmPromptBlur"
+        />
+        <div class="vol-row">
+          <span class="hint">BGM 音量</span>
+          <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" />
+          <span class="hint">{{ Math.round(bgmVolume * 100) }}%</span>
+        </div>
+        <div class="bgm-row">
+          <GradientButton
+            size="sm"
+            :loading="generatingBgm"
+            :disabled="generatingBgm || running"
+            @click="generateBgm"
+          >
+            {{ bgmAssetId ? '重新生成配乐' : '生成配乐' }}
+          </GradientButton>
+          <select v-model="bgmAssetId">
+            <option value="">不使用 BGM</option>
+            <option v-for="a in audioAssets" :key="a.id" :value="a.id">
+              {{ a.filename }}
+            </option>
+          </select>
+        </div>
+        <audio v-if="bgmUrl" class="bgm-player" :src="bgmUrl" controls />
+        <p v-if="bgmError" class="err">{{ bgmError }}</p>
+      </template>
 
       <template v-if="node.type === 'script' && project.current">
         <label>主题</label>
@@ -328,13 +547,13 @@ function resetVideoPrompt() {
 
       <template v-else-if="node.type === 'shotVideo' && shot">
         <div class="lab-row">
-          <label>本镜视频提示词</label>
-          <button class="link" type="button" @click="resetVideoPrompt">恢复分镜原文</button>
+          <label>本镜视频内容表现</label>
+          <button class="link" type="button" @click="resetVideoPrompt">按分镜动作重写</button>
         </div>
         <textarea
           rows="8"
           :value="videoPromptValue"
-          placeholder="运镜、动作、节奏。只影响视频，不改配图。"
+          placeholder="每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。"
           @input="project.updateShot(shot.id, { videoPrompt: ($event.target as HTMLTextAreaElement).value })"
         />
         <label>时长（秒）</label>
@@ -362,6 +581,16 @@ function resetVideoPrompt() {
       </template>
 
       <template v-else-if="node.type === 'audio' && shot">
+        <label>人声方案</label>
+        <select
+          :value="effectiveShotAudioMode(shot)"
+          @change="project.setShotAudioMode(shot.id, ($event.target as HTMLSelectElement).value as ShotAudioMode)"
+        >
+          <option value="h3-dialogue">H3 出镜对白 + 对口型</option>
+          <option value="h3-voiceover">H3 画外口播</option>
+          <option value="tts">后期 TTS</option>
+          <option value="none">无口播</option>
+        </select>
         <label>口播文案</label>
         <textarea
           rows="4"
@@ -388,8 +617,41 @@ function resetVideoPrompt() {
         </div>
       </div>
 
-      <GradientButton block :loading="running" :disabled="!canRun" @click="run">
+      <GradientButton
+        v-if="node.type === 'script'"
+        block
+        :loading="running"
+        :disabled="running"
+        @click="run"
+      >
+        {{ actionLabel }}
+      </GradientButton>
+      <GradientButton
+        v-if="node.type === 'script'"
+        block
+        type="secondary"
+        :loading="running"
+        :disabled="running || !((project.current?.script?.content || '').trim())"
+        @click="runExtract"
+      >
+        {{ project.current?.shots.length ? '重新提炼节点' : '提炼节点' }}
+      </GradientButton>
+      <GradientButton
+        v-else
+        block
+        :loading="running"
+        :disabled="!canRun"
+        @click="run"
+      >
         {{ gateBlocked ? '请先验收剧本' : actionLabel }}
+      </GradientButton>
+      <GradientButton
+        v-if="node.type === 'final' && hasAsset"
+        block
+        type="secondary"
+        @click="downloadFinal"
+      >
+        下载成片
       </GradientButton>
       <button class="ghost" type="button" @click="refreshPreview">刷新预览</button>
     </template>
@@ -557,5 +819,58 @@ textarea {
   font-size: 12px;
   color: var(--color-text-3);
   padding: 6px;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+.check input {
+  width: auto;
+}
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.seg-btn {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  border-radius: 8px;
+  padding: 8px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg-btn.on {
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-bg-2));
+}
+.vol-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.vol-row input[type='range'] {
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+.bgm-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.bgm-row select {
+  flex: 1;
+  min-width: 0;
+}
+.bgm-player {
+  width: 100%;
+  height: 32px;
 }
 </style>

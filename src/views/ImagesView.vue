@@ -3,10 +3,12 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { generateImage, characterSheetPrompt, scenePlatePrompt } from '@/services/ai'
+import { imageModelForProject } from '@/services/ai/runtime'
 import { effectiveImagePrompt } from '@/utils/shot'
 import {
   collectShotRefIds,
   composeShotImagePrompt,
+  imageRefSlots,
   missingCastAssets
 } from '@/utils/consistency'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -147,13 +149,14 @@ function kindLabel(k: string) {
 
 function shotLockPreview(shot: Shot): { url?: string; label: string }[] {
   if (!project.current) return []
-  const bundle = collectShotRefIds(shot, project.current)
-  return bundle.ids.map((id, i) => {
-    const sub = subjects.value.find((s) => s.designSheetAssetId === id)
-    const scn = scenes.value.find((s) => s.plateAssetId === id)
-    const url = (sub && sheetUrls.value[sub.id]) || (scn && plateUrls.value[scn.id])
-    return { url, label: bundle.labels[i] }
-  })
+  return imageRefSlots(shot, project.current)
+    .filter((s) => s.locked)
+    .map((s) => {
+      const sub = subjects.value.find((x) => x.designSheetAssetId === s.id)
+      const scn = scenes.value.find((x) => x.plateAssetId === s.id)
+      const url = (sub && sheetUrls.value[sub.id]) || (scn && plateUrls.value[scn.id])
+      return { url, label: s.label }
+    })
 }
 
 function promptOf(shot: Shot) {
@@ -188,7 +191,8 @@ async function generateSubjectSheet(sub: Subject) {
         referenceImages: useRefs ? refs : undefined,
         referenceLabels: useRefs
           ? refs.map(() => `photo of character "${sub.name}", copy identity exactly`)
-          : undefined
+          : undefined,
+        model: imageModelForProject(project.current.pipelineMode)
       },
       (msg) => {
         progress.value[sub.id] = msg
@@ -225,7 +229,8 @@ async function generateScenePlate(scn: Scene) {
         style: look.style,
         width: width.value,
         height: height.value,
-        aspectRatio: aspectRatio.value
+        aspectRatio: aspectRatio.value,
+        model: imageModelForProject(project.current.pipelineMode)
       },
       (msg) => {
         progress.value[scn.id] = msg
@@ -287,7 +292,8 @@ async function generateOne(shot: Shot) {
         height: height.value,
         aspectRatio: aspectRatio.value,
         referenceImages: refBlobs.length > 0 ? refBlobs : undefined,
-        referenceLabels: labels.length > 0 ? labels : undefined
+        referenceLabels: labels.length > 0 ? labels : undefined,
+        model: imageModelForProject(project.current.pipelineMode)
       },
       (msg) => {
         progress.value[shot.id] = msg

@@ -7,8 +7,9 @@ import { generateSpeech, TTS_VOICES } from '@/services/ai'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
-import type { CaptionStyle, Shot } from '@/types'
+import type { CaptionStyle, Shot, ShotAudioMode } from '@/types'
 import { ensureTimelineFromShots } from '@/utils/timeline'
+import { effectiveShotAudioMode } from '@/utils/shot'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -85,10 +86,14 @@ const lines = computed(() => {
 })
 
 const voicedCount = computed(
-  () => lines.value.filter((l) => l.audioAssetId && l.text.trim()).length
+  () => lines.value.filter((l) => {
+    if (!l.shot || !l.text.trim()) return false
+    const mode = effectiveShotAudioMode(l.shot)
+    return mode === 'h3-dialogue' || mode === 'h3-voiceover' || (mode === 'tts' && Boolean(l.audioAssetId))
+  }).length
 )
 const pendingVoice = computed(
-  () => lines.value.filter((l) => l.text.trim() && !l.audioAssetId).length
+  () => lines.value.filter((l) => l.shot && effectiveShotAudioMode(l.shot) === 'tts' && l.text.trim() && !l.audioAssetId).length
 )
 
 const cues = computed(() => {
@@ -136,6 +141,13 @@ function updateLineText(shotId: string, text: string) {
   rebuildSrtFromLines()
 }
 
+function changeAudioMode(shot: Shot, mode: ShotAudioMode) {
+  if (effectiveShotAudioMode(shot) === mode) return
+  const hadVideo = Boolean(shot.videoAssetId)
+  project.setShotAudioMode(shot.id, mode)
+  if (hadVideo) toast.info(`第 ${shot.index + 1} 镜人声方案已改变，请重新生成视频以匹配声音和口型。`, 6000)
+}
+
 function isStale(shot: Shot | undefined) {
   if (!shot?.audioAssetId) return false
   const meta = assets.getMeta(shot.audioAssetId)
@@ -164,6 +176,11 @@ async function generateLine(shotId: string) {
   if (!text) {
     toast.warn(`第 ${shot.index + 1} 段没有台词`)
     return
+  }
+  if (effectiveShotAudioMode(shot) !== 'tts') {
+    const hadVideo = Boolean(shot.videoAssetId)
+    project.setShotAudioMode(shot.id, 'tts')
+    if (hadVideo) toast.info(`第 ${shot.index + 1} 镜已改为后期 TTS；请重新生成视频，使 H3 保持闭嘴。`, 6000)
   }
   generating.value.add(shotId)
   try {
@@ -341,7 +358,7 @@ function next() {
           :disabled="generatingAll || lines.every((l) => !l.text.trim())"
           @click="generateAllVoices"
         >
-          {{ generatingAll ? '配音中...' : '一键生成全部口播' }}
+          {{ generatingAll ? '配音中...' : '全部改用 TTS 并生成' }}
         </GradientButton>
         <GradientButton icon="→" @click="next">下一步：导出</GradientButton>
       </div>
@@ -366,9 +383,12 @@ function next() {
                   <div class="line-title">{{ line.title }}</div>
                   <div class="line-time">{{ formatClock(line.start) }} · {{ line.duration }}s</div>
                 </div>
-                <Tag v-if="line.audioAssetId && !isStale(line.shot)" type="success" size="sm">已配音</Tag>
-                <Tag v-else-if="isStale(line.shot)" type="warning" size="sm">台词已改</Tag>
-                <Tag v-else-if="line.text.trim()" size="sm">待配音</Tag>
+                <Tag v-if="line.shot && effectiveShotAudioMode(line.shot) === 'h3-dialogue'" type="success" size="sm">H3 对白</Tag>
+                <Tag v-else-if="line.shot && effectiveShotAudioMode(line.shot) === 'h3-voiceover'" type="success" size="sm">H3 画外音</Tag>
+                <Tag v-else-if="line.shot && effectiveShotAudioMode(line.shot) === 'none'" size="sm">无口播</Tag>
+                <Tag v-else-if="line.audioAssetId && !isStale(line.shot)" type="success" size="sm">TTS 已配音</Tag>
+                <Tag v-else-if="isStale(line.shot)" type="warning" size="sm">TTS 台词已改</Tag>
+                <Tag v-else-if="line.text.trim()" size="sm">TTS 待配音</Tag>
                 <Tag v-else type="error" size="sm">无台词</Tag>
               </div>
               <textarea
@@ -378,6 +398,19 @@ function next() {
                 placeholder="这一段要念的台词 / 字幕..."
                 @input="updateLineText(line.shotId, ($event.target as HTMLTextAreaElement).value)"
               />
+              <label class="voice-pick">
+                <span>人声方案</span>
+                <select
+                  class="input"
+                  :value="line.shot ? effectiveShotAudioMode(line.shot) : 'none'"
+                  @change="line.shot && changeAudioMode(line.shot, ($event.target as HTMLSelectElement).value as ShotAudioMode)"
+                >
+                  <option value="h3-dialogue">H3 出镜对白 + 对口型</option>
+                  <option value="h3-voiceover">H3 画外口播</option>
+                  <option value="tts">后期 TTS</option>
+                  <option value="none">无口播</option>
+                </select>
+              </label>
               <audio v-if="audioUrls[line.shotId]" class="vo-player" :src="audioUrls[line.shotId]" controls />
               <div class="line-actions">
                 <GradientButton

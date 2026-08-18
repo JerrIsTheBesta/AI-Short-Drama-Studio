@@ -9,6 +9,7 @@ import qaRaw from './qa-verify.md?raw'
 import shotImageRaw from './shot-image.md?raw'
 import shotVideoRaw from './shot-video.md?raw'
 import storyboardRaw from './storyboard-director.md?raw'
+import h3PromptRaw from './h3-prompt-writing.md?raw'
 
 export interface Skill {
   id: string
@@ -77,6 +78,7 @@ export const ALL_SKILLS: Skill[] = [
   toSkill(characterRaw),
   toSkill(shotImageRaw),
   toSkill(shotVideoRaw),
+  toSkill(h3PromptRaw),
   toSkill(qaRaw)
 ]
 
@@ -122,8 +124,9 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
     add('shot-image')
     add('character-consistency')
   }
-  if (/视频|图生视频|运镜/.test(text)) {
+  if (/视频|图生视频|运镜|Comfy|H3|配音/.test(text)) {
     add('shot-video')
+    add('h3-prompt-writing')
   }
   if (/检查|验收|漏|齐了没|质检/.test(text)) {
     add('qa-verify')
@@ -134,6 +137,7 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
     add('character-consistency')
     add('shot-image')
     add('shot-video')
+    add('h3-prompt-writing')
     add('qa-verify')
   }
 

@@ -7,12 +7,17 @@ import { getAIMode } from '@/services/ai/client'
 const settings = useSettingsStore()
 const project = useProjectStore()
 const llmDraft = ref('')
+const visionDraft = ref('')
 const imageDraft = ref('')
 const ttsDraft = ref('')
 
 function addLlm() {
   settings.addModel('llm', llmDraft.value)
   llmDraft.value = ''
+}
+function addVision() {
+  settings.addModel('vision', visionDraft.value)
+  visionDraft.value = ''
 }
 function addImage() {
   settings.addModel('image', imageDraft.value)
@@ -30,7 +35,7 @@ function onVoice(v: string) {
 </script>
 
 <template>
-  <aside class="panel">
+  <div class="panel">
     <p class="lead">配好地址和密钥，模型就能在下拉里选。改完立刻生效，不用重启。</p>
 
     <section>
@@ -47,11 +52,11 @@ function onVoice(v: string) {
     </section>
 
     <section>
-      <h4>LLM · 分镜 / 智能体</h4>
+      <h4>主 LLM · DeepSeek（智能体 / 分镜 / 文案）</h4>
       <label>接口地址</label>
       <input
         :value="settings.config.llm.baseUrl"
-        placeholder="https://api.apiyi.com/v1"
+        placeholder="https://api.deepseek.com"
         @change="settings.patchLlm({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
       />
       <label>API Key</label>
@@ -72,6 +77,36 @@ function onVoice(v: string) {
       <div class="add-row">
         <input v-model="llmDraft" placeholder="添加模型名" @keydown.enter.prevent="addLlm" />
         <button class="mini" @click="addLlm">添加</button>
+      </div>
+    </section>
+
+    <section>
+      <h4>视觉理解 · Qwen（看图 / 多模态质检）</h4>
+      <p class="hint">仅在需要读取图片或验收画面时调用，不参与智能体规划。</p>
+      <label>接口地址</label>
+      <input
+        :value="settings.config.vision.baseUrl"
+        placeholder="https://api.apiyi.com/v1"
+        @change="settings.patchVision({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+      />
+      <label>API Key</label>
+      <input
+        type="password"
+        autocomplete="off"
+        :value="settings.config.vision.apiKey"
+        placeholder="sk-…"
+        @change="settings.patchVision({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
+      />
+      <label>当前模型</label>
+      <select
+        :value="settings.config.vision.model"
+        @change="settings.patchVision({ model: ($event.target as HTMLSelectElement).value })"
+      >
+        <option v-for="m in settings.config.vision.models" :key="m" :value="m">{{ m }}</option>
+      </select>
+      <div class="add-row">
+        <input v-model="visionDraft" placeholder="添加视觉模型名" @keydown.enter.prevent="addVision" />
+        <button class="mini" @click="addVision">添加</button>
       </div>
     </section>
 
@@ -158,18 +193,18 @@ function onVoice(v: string) {
         @change="settings.patchVideo({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
       />
     </section>
-  </aside>
+  </div>
 </template>
 
 <style scoped>
 .panel {
-  width: 300px;
-  flex-shrink: 0;
-  overflow-y: auto;
-  padding: 12px 14px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 18px;
+}
+.lead {
+  grid-column: 1 / -1;
 }
 .lead,
 .hint {

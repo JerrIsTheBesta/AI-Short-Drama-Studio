@@ -9,14 +9,14 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
-import { setCanvasReveal } from '@/services/canvas/canvasBridge'
+import { setCanvasReveal, setCanvasInspect } from '@/services/canvas/canvasBridge'
 import { isDesktop, desktop } from '@/services/desktop'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
+import AudioNode from '@/components/canvas/AudioNode.vue'
 import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
-import StudioSettings from '@/components/canvas/StudioSettings.vue'
 import type { CanvasNode } from '@/types'
 
 const project = useProjectStore()
@@ -24,8 +24,7 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 const router = useRouter()
 const agentOpen = ref(true)
-const rightOpen = ref(true)
-const rightTab = ref<'node' | 'ai'>('ai')
+const rightOpen = ref(false)
 
 const nodeTypes = {
   script: ScriptDocNode,
@@ -33,8 +32,9 @@ const nodeTypes = {
   scene: PipelineNode,
   shotImage: PipelineNode,
   shotVideo: PipelineNode,
-  audio: PipelineNode,
+  audio: AudioNode,
   export: PipelineNode,
+  final: PipelineNode,
   groupFrame: GroupFrame
 }
 
@@ -96,7 +96,9 @@ const flowEdges = computed<Edge[]>(() => {
     sourceHandle: e.sourceHandle,
     targetHandle: e.targetHandle,
     animated: false,
-    style: { stroke: '#7c3aed', strokeWidth: 1.4 }
+    interactionWidth: 28,
+    class: 'pipe-edge',
+    style: { stroke: 'rgba(167, 139, 250, 0.22)', strokeWidth: 1.1 }
   }))
 })
 
@@ -125,10 +127,17 @@ onMounted(async () => {
       else fitView({ padding: 0.2, duration: 400 })
     }, 120)
   })
+  setCanvasInspect((nodeId) => {
+    selectedId.value = nodeId
+    rightOpen.value = true
+  })
   setTimeout(() => fitView({ padding: 0.2 }), 80)
 })
 
-onUnmounted(() => setCanvasReveal(null))
+onUnmounted(() => {
+  setCanvasReveal(null)
+  setCanvasInspect(null)
+})
 
 onConnect((c: Connection) => {
   if (!project.current?.canvas) return
@@ -166,13 +175,11 @@ onMoveEnd((ev) => {
 function onNodeClick(ev: { node: Node }) {
   if (ev.node.type === 'groupFrame') return
   selectedId.value = ev.node.id
-  rightOpen.value = true
-  rightTab.value = 'node'
+  if (ev.node.type === 'export' || ev.node.type === 'final') rightOpen.value = true
 }
 
 function openSettings() {
-  rightOpen.value = true
-  rightTab.value = 'ai'
+  router.push('/settings')
 }
 
 async function relayout() {
@@ -205,7 +212,7 @@ function goClassic() {
       <button class="bar-btn" @click="relayout">重整布局</button>
       <button v-if="isDesktop()" class="bar-btn" @click="openFolder">打开文件夹</button>
       <button class="bar-btn" @click="goClassic">经典步骤</button>
-      <button class="bar-btn" :class="{ on: rightOpen && rightTab === 'ai' }" @click="openSettings">设置</button>
+      <button class="bar-btn" @click="openSettings">设置</button>
       <button class="bar-btn" @click="rightOpen = !rightOpen">{{ rightOpen ? '收起右侧' : '右侧' }}</button>
     </header>
     <div class="body">
@@ -226,12 +233,8 @@ function goClassic() {
         </VueFlow>
       </div>
       <aside v-if="rightOpen" class="dock">
-        <div class="dock-tabs">
-          <button :class="{ on: rightTab === 'ai' }" @click="rightTab = 'ai'">模型</button>
-          <button :class="{ on: rightTab === 'node' }" @click="rightTab = 'node'">节点</button>
-        </div>
-        <StudioSettings v-show="rightTab === 'ai'" />
-        <NodeInspector v-show="rightTab === 'node'" :node="selected" />
+        <div class="dock-title">节点</div>
+        <NodeInspector :node="selected" />
       </aside>
     </div>
   </div>
@@ -299,29 +302,17 @@ function goClassic() {
   flex-direction: column;
   min-height: 0;
 }
-.dock-tabs {
-  display: flex;
+.dock-title {
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
-}
-.dock-tabs button {
-  flex: 1;
   font-size: 12px;
   padding: 10px;
-  color: var(--color-text-3);
-}
-.dock-tabs button.on {
   color: var(--color-text-1);
-  box-shadow: inset 0 -2px 0 var(--color-accent);
+  font-weight: 600;
 }
 .dock :deep(.insp) {
   width: auto;
   border-left: none;
-  flex: 1;
-  min-height: 0;
-}
-.dock :deep(.panel) {
-  width: auto;
   flex: 1;
   min-height: 0;
 }
@@ -373,7 +364,14 @@ function goClassic() {
 .flow-wrap :deep(.vue-flow__controls-button:disabled) {
   opacity: 0.35;
 }
+.flow-wrap :deep(.vue-flow__node) {
+  overflow: visible !important;
+}
+.flow-wrap :deep(.vue-flow__node.selected) {
+  z-index: 12 !important;
+}
 .flow-wrap :deep(.vue-flow__node-groupFrame) {
+  overflow: visible !important;
   padding: 0;
   margin: 0;
   border: none;
@@ -393,12 +391,36 @@ function goClassic() {
 .flow-wrap :deep(.vue-flow__node-shotImage),
 .flow-wrap :deep(.vue-flow__node-shotVideo),
 .flow-wrap :deep(.vue-flow__node-audio),
-.flow-wrap :deep(.vue-flow__node-export) {
+.flow-wrap :deep(.vue-flow__node-export),
+.flow-wrap :deep(.vue-flow__node-final) {
   padding: 0;
   background: transparent;
   border: none;
   box-shadow: none;
   width: auto;
   height: auto;
+}
+.flow-wrap :deep(.vue-flow__edge-path) {
+  stroke: rgba(167, 139, 250, 0.2) !important;
+  stroke-width: 1.1 !important;
+  transition: stroke 0.16s ease, stroke-width 0.16s ease, filter 0.16s ease;
+}
+.flow-wrap :deep(.vue-flow__edge.pipe-edge:hover),
+.flow-wrap :deep(.vue-flow__edge:hover) {
+  z-index: 20;
+}
+.flow-wrap :deep(.vue-flow__edge:hover .vue-flow__edge-path) {
+  stroke: #c4b5fd !important;
+  stroke-width: 2.4 !important;
+  filter: drop-shadow(0 0 7px rgba(167, 139, 250, 0.55));
+}
+.flow-wrap :deep(.vue-flow__edge .vue-flow__edgeupdater),
+.flow-wrap :deep(.vue-flow__edge-interaction) {
+  stroke-width: 28px;
+  stroke: transparent;
+}
+.flow-wrap :deep(.vue-flow__connection-line) {
+  stroke: rgba(196, 181, 253, 0.55) !important;
+  stroke-width: 1.4 !important;
 }
 </style>

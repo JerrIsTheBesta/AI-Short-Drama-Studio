@@ -13,6 +13,37 @@ import type { CanvasGraph } from './canvas'
 
 export type ID = string
 
+export type AgentAutonomy = 'assist' | 'gated' | 'autopilot'
+
+export interface AgentChatMessage {
+  id: ID
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  createdAt: number
+}
+
+export interface AgentTaskRecord {
+  id: ID
+  request: string
+  status: 'planned' | 'running' | 'success' | 'failed' | 'cancelled'
+  currentStep?: string
+  completedTools: string[]
+  failedTool?: string
+  error?: string
+  estimatedCalls?: number
+  estimatedSeconds?: number
+  startedAt: number
+  finishedAt?: number
+}
+
+export interface AgentWorkspaceState {
+  autonomy: AgentAutonomy
+  messages: AgentChatMessage[]
+  tasks: AgentTaskRecord[]
+  /** 单次自动任务最多允许的外部生成调用数，0 表示不额外限制 */
+  callBudget: number
+}
+
 /** 画面风格 */
 export type VisualStyle =
   | 'cinematic'
@@ -45,6 +76,10 @@ export interface Shot {
   audioDescription: string
   /** 口播文案 / 字幕文本（中文） */
   voiceover: string
+  /** H3 内生对白/画外音、后期 TTS，或完全无口播 */
+  audioMode?: ShotAudioMode
+  /** H3 说话人音色与表达方式，例如“年轻女声 / 温柔自然” */
+  speakerHint?: string
   /** 时长（秒，5-10 之间） */
   duration: number
   /** 镜头运动：推/拉/摇/移/固定/环绕 */
@@ -78,8 +113,8 @@ export interface Shot {
    */
   imagePrompt?: string
   /**
-   * 视频生成专用提示词。为空时回退 visualPrompt。
-   * 在「AI 视频」页可独立修改。
+   * 视频内容表现：这一镜里谁做什么、说什么、镜头怎么走。
+   * 不能复用 visualPrompt（那是静帧配图词）。为空时按场记动作/台词重写。
    */
   videoPrompt?: string
   /** 分镜级参考图（图生图/图像编辑用，0-N 张素材 ID） */
@@ -95,6 +130,8 @@ export interface Shot {
   /** 备注 */
   notes?: string
 }
+
+export type ShotAudioMode = 'h3-dialogue' | 'h3-voiceover' | 'tts' | 'none'
 
 /** 项目文案 */
 export interface Script {
@@ -114,9 +151,11 @@ export interface Script {
   /**
    * 项目级整体氛围（中文，1-2 段）
    * 例如：「武侠电影感，典雅东方气质，暖黄灯笼光切开冷雨薄雾……」
-   * 生成视频时会和每个分镜的 visualPrompt 拼接
+   * 生成视频时和每个分镜的 videoPrompt（内容表现）一起组装
    */
   aesthetic?: string
+  /** H3 专用英文美学行，直接写入 Aesthetic 段 */
+  h3Aesthetic?: string
   /** 风格简报（题材、冲突感、爽点等） */
   styleBrief?: string
   /** 色彩锚点 */
@@ -125,6 +164,11 @@ export interface Script {
   lightingNote?: string
   /** 项目级参考图（主题页产品图 / 全局风格参考，所有分镜都会用到，最多建议 5 张） */
   referenceAssetIds?: ID[]
+  /**
+   * 是否已写成「完整剧本」（相对用户一句话 brief）。
+   * false/缺省：content 还是草稿；true：可再提炼人物/场景/分镜节点。
+   */
+  playReady?: boolean
   /** 创建时间 */
   createdAt: number
 }
@@ -133,7 +177,7 @@ export interface Script {
 export interface CaptionStyle {
   /** 字体 */
   fontFamily: string
-  /** 字号（视频高度的比例，如 0.05 = 5%） */
+  /** 字号（视频高度的比例，如 0.03 = 3%） */
   fontSizeRatio: number
   /** 颜色 */
   color: string
@@ -163,7 +207,7 @@ export interface ProjectSettings {
   bgmVolume: number
   /** 原声音量（分镜环境音） */
   originalVolume: number
-  /** 导出时是否保留各分镜视频自带声音（环境音效）；false=去掉每镜原声 */
+  /** 是否保留 TTS/无口播镜头的环境音；H3 自带对白或口播始终保留 */
   keepAmbientAudio?: boolean
   /** 是否给字幕加底色 */
   captionBg: boolean
@@ -257,6 +301,8 @@ export interface Project {
   bgmAssetId?: ID
   /** 生成 BGM 用的提示词 */
   bgmPrompt?: string
+  /** 画布/导出合成的最终成片视频 */
+  finalVideoAssetId?: ID
   /** 桌面端项目文件夹绝对路径 */
   folderPath?: string
   /** 无限画布图（节点 / 连线 / 分组） */
@@ -266,6 +312,15 @@ export interface Project {
    * 用户明确要求全流程时会自动视为通过。
    */
   playApproved?: boolean
+  /** 智能体会话、运行记录与用户自主度偏好，随项目持久化 */
+  agentState?: AgentWorkspaceState
+  /**
+   * standard：主题/文案创作
+   * remake：上传参考视频复刻镜头，产品必须换成用户图
+   */
+  pipelineMode?: 'standard' | 'remake'
+  /** 视频复刻的参考成片 */
+  sourceVideoAssetId?: ID
   createdAt: number
   updatedAt: number
 }

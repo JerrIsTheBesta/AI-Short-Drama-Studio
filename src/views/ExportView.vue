@@ -9,6 +9,7 @@ import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
+import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -213,11 +214,20 @@ async function doExport() {
     }
 
     const voiceoverAudioMap = new Map<string, Blob>()
+    const sourceAudioMap = new Map<string, boolean>()
     let missingVo = 0
     for (const clip of timeline.value) {
       if (!clip.enabled || voiceoverAudioMap.has(clip.shotId)) continue
       const shot = shots.value.find((s) => s.id === clip.shotId)
-      if (!shot?.voiceover.trim()) continue
+      if (!shot) continue
+      const audioMode = effectiveShotAudioMode(shot)
+      sourceAudioMap.set(
+        clip.shotId,
+        audioMode === 'h3-dialogue' || audioMode === 'h3-voiceover'
+          ? true
+          : keepAmbientAudio.value
+      )
+      if (!needsExternalTts(shot)) continue
       if (!shot.audioAssetId) {
         missingVo++
         continue
@@ -244,6 +254,7 @@ async function doExport() {
       bgmVolume: project.current.settings.bgmVolume,
       originalVolume: ambientVolume.value,
       keepAmbientAudio: keepAmbientAudio.value,
+      sourceAudioMap,
       voiceoverAudioMap,
       format: format.value,
       onProgress: (msg) => {
@@ -305,7 +316,7 @@ const segmentSummary = computed(() => {
     <header class="page-head">
       <div>
         <h1>🚀 导出成片</h1>
-        <p>可选保留或去掉每镜原声，再叠配乐、口播和字幕后导出</p>
+        <p>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠配乐和字幕</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/caption')">← 上一步</GradientButton>
@@ -362,7 +373,7 @@ const segmentSummary = computed(() => {
           </div>
 
           <div class="field">
-            <span>分镜原声（环境音效）</span>
+            <span>其他分镜原声（环境音效）</span>
             <div class="format-grid">
               <button
                 class="format"
@@ -370,7 +381,7 @@ const segmentSummary = computed(() => {
                 @click="keepAmbientAudio = true"
               >
                 <div class="format-name">保留每镜声音</div>
-                <div class="format-desc">留下雨声、牛喝水等环境音，再叠口播/BGM</div>
+                <div class="format-desc">为 TTS / 无口播镜头留下环境音，再叠口播/BGM</div>
               </button>
               <button
                 class="format"
@@ -378,7 +389,7 @@ const segmentSummary = computed(() => {
                 @click="keepAmbientAudio = false"
               >
                 <div class="format-name">去掉每镜声音</div>
-                <div class="format-desc">各段静音，成片只保留口播和整片配乐</div>
+                <div class="format-desc">TTS / 无口播镜头静音；H3 自带人声仍会保留</div>
               </button>
             </div>
             <div v-if="keepAmbientAudio" class="ambient-vol">
@@ -395,8 +406,8 @@ const segmentSummary = computed(() => {
             <p class="hint" style="margin-top: 6px;">
               {{
                 keepAmbientAudio
-                  ? '口播与 BGM 会叠在环境音之上。若某段视频本身无音轨，该段环境仍为静音。'
-                  : '将去掉每个镜头视频自带的声音，避免段间配乐打架；只保留口播与整片 BGM。'
+                  ? 'H3 对白/画外口播始终保留；其他镜头保留环境音。后期 TTS 只叠到选择了 TTS 的镜头。'
+                  : 'H3 对白/画外口播始终保留；仅静音 TTS / 无口播镜头的原声，避免重复人声。'
               }}
             </p>
           </div>

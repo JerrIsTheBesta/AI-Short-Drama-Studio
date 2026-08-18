@@ -48,6 +48,10 @@ defineProps<{
   background: rgba(236, 72, 153, 0.06);
   border-color: rgba(244, 114, 182, 0.28);
 }
+.tint-audio {
+  background: rgba(16, 185, 129, 0.06);
+  border-color: rgba(52, 211, 153, 0.28);
+}
 .tint-export {
   background: rgba(16, 185, 129, 0.06);
   border-color: rgba(52, 211, 153, 0.28);

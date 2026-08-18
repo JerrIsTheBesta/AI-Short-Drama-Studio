@@ -19,7 +19,7 @@ export function needsPlayReview(p: Project | null | undefined): boolean {
 }
 
 export function isFullPipelineRequest(text: string) {
-  return /全部做完|全部生成|都生成|全做|一口气|整条流水线|从头到尾|缺的都补|全流程/.test(text)
+  return /全部做完|全部生成|都生成|全做|一口气|整条流水线|从头到尾|缺的都补|全流程|完整流程|全套/.test(text)
 }
 
 export function isApprovePlayRequest(text: string) {

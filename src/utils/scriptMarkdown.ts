@@ -44,7 +44,7 @@ export function composeProjectPlayMarkdown(p: Project): string {
   } else {
     parts.push('## 文案')
     parts.push('')
-    parts.push('*还没有正文。在右侧填写，或点下方拆分镜。*')
+    parts.push('*还没有正文。在右侧填写，或点下方「写剧本」。*')
     parts.push('')
   }
 

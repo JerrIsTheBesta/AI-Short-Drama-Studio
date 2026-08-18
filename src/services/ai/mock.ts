@@ -150,6 +150,7 @@ export function mockStoryboardFromPrompt(userMsg: string) {
         index: i,
         title: s.slice(0, 8),
         visualPrompt: `【${styleGuide}】画面呈现${visual}。内容：${s}。环境材质与空间纵深清晰，主体姿态表情明确，动作连贯。景别为${sizes[i % sizes.length]}，运镜服务叙事。色彩与光影服务整体氛围。${styleGuide}，高清细节，商业级完成度。`,
+        videoPrompt: `画面中的人把这一镜演完：${s}。有人说「${s}」。镜头跟着动作走。`,
         audioDescription: '环境音、轻微氛围音乐',
         voiceover: s,
         duration: Math.min(
@@ -179,6 +180,7 @@ export function mockStoryboardFromPrompt(userMsg: string) {
         index: i - 1,
         title: `镜头 ${i}`,
         visualPrompt: `抽象的${style}风格场景，暖色光影与电影氛围。本片第 ${i} 个镜头。`,
+        videoPrompt: `画面中的人把第 ${i} 镜演完，把该说的话说完，镜头跟着走。`,
         audioDescription: '环境音、氛围音乐',
         voiceover: `这是第 ${i} 个分镜`,
         duration: Math.min(10, Math.max(5, duration + ((i - 1) % 3))),

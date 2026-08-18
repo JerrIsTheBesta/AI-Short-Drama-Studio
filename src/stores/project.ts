@@ -26,11 +26,13 @@ import type {
   Shot,
   TimelineClip,
   ProjectSettings,
+  AgentWorkspaceState,
   AspectRatio,
   ID,
   Subject,
   Scene,
-  CanvasGraph
+  CanvasGraph,
+  ShotAudioMode
 } from '@/types'
 
 const STORAGE_KEY_LAST = 'ai-cut:last-project-id'
@@ -44,7 +46,7 @@ function defaultSettings(): ProjectSettings {
     defaultShotDuration: 3,
     captionStyle: {
       fontFamily: 'Noto Sans CJK SC',
-      fontSizeRatio: 0.055,
+      fontSizeRatio: 0.03,
       color: '#ffffff',
       strokeColor: '#000000',
       strokeWidth: 3,
@@ -90,6 +92,12 @@ function newProject(): Project {
     timeline: [],
     settings: defaultSettings(),
     canvas: emptyCanvas(),
+    agentState: {
+      autonomy: 'gated',
+      messages: [],
+      tasks: [],
+      callBudget: 24
+    },
     createdAt: now,
     updatedAt: now
   }
@@ -163,6 +171,24 @@ export const useProjectStore = defineStore('project', () => {
       p.scenes = p.scenes ?? []
       p.timeline = p.timeline ?? []
       p.canvas = p.canvas ?? emptyCanvas()
+      if (p.canvas.nodes?.length) {
+        p.canvas = {
+          ...p.canvas,
+          nodes: p.canvas.nodes.map((n) =>
+            n.status === 'running' || n.status === 'pending'
+              ? { ...n, status: 'idle', error: undefined }
+              : n
+          )
+        }
+      }
+      p.agentState = {
+        autonomy: p.agentState?.autonomy ?? 'gated',
+        messages: p.agentState?.messages ?? [],
+        tasks: (p.agentState?.tasks ?? []).map((t) =>
+          t.status === 'running' ? { ...t, status: 'cancelled' as const, finishedAt: Date.now() } : t
+        ),
+        callBudget: p.agentState?.callBudget ?? 24
+      }
       if (p.folderPath) setActiveProjectDir(p.folderPath)
       p.settings = {
         ...defaultSettings(),
@@ -353,6 +379,73 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  function setFinalVideo(assetId: string | undefined) {
+    if (!current.value) return
+    current.value.finalVideoAssetId = assetId
+    touch()
+  }
+
+  /** 人声方案属于视频生成条件；切换时保留旧视频到历史并要求局部重做。 */
+  function setShotAudioMode(id: ID, audioMode: ShotAudioMode) {
+    if (!current.value) return
+    const idx = current.value.shots.findIndex((s) => s.id === id)
+    if (idx < 0) return
+    const shot = current.value.shots[idx]
+    if (shot.audioMode === audioMode) return
+    const keepTts = audioMode === 'tts'
+    current.value.shots[idx] = {
+      ...shot,
+      audioMode,
+      videoHistoryIds: pushHistory(shot.videoAssetId, '', shot.videoHistoryIds).filter(Boolean),
+      videoAssetId: undefined,
+      audioHistoryIds: keepTts
+        ? shot.audioHistoryIds
+        : pushHistory(shot.audioAssetId, '', shot.audioHistoryIds).filter(Boolean),
+      audioAssetId: keepTts ? shot.audioAssetId : undefined,
+      status: shot.imageAssetId ? 'image-generated' : 'draft'
+    }
+    touch()
+  }
+
+  /** 局部修改时只失效受影响的下游产物；旧素材仍留在历史和资源库中。 */
+  function invalidateShotAssets(shotId: ID, from: 'image' | 'video' | 'audio') {
+    if (!current.value) return
+    const idx = current.value.shots.findIndex((s) => s.id === shotId)
+    if (idx < 0) return
+    const shot = current.value.shots[idx]
+    const patch: Partial<Shot> = {}
+    if (from === 'image') {
+      patch.imageAssetId = undefined
+      patch.videoAssetId = undefined
+      patch.status = 'draft'
+    } else if (from === 'video') {
+      patch.videoAssetId = undefined
+      patch.status = shot.imageAssetId ? 'image-generated' : 'draft'
+    } else {
+      patch.audioAssetId = undefined
+    }
+    current.value.shots[idx] = { ...shot, ...patch }
+    touch()
+  }
+
+  function setAgentState(state: AgentWorkspaceState) {
+    if (!current.value) return
+    current.value.agentState = state
+    touch()
+  }
+
+  function patchAgentState(patch: Partial<AgentWorkspaceState>) {
+    if (!current.value) return
+    const currentState: AgentWorkspaceState = current.value.agentState ?? {
+      autonomy: 'gated',
+      messages: [],
+      tasks: [],
+      callBudget: 24
+    }
+    current.value.agentState = { ...currentState, ...patch }
+    touch()
+  }
+
   function setCanvas(canvas: CanvasGraph) {
     if (!current.value) return
     current.value.canvas = canvas
@@ -462,9 +555,11 @@ export const useProjectStore = defineStore('project', () => {
     setScenes,
     updateScene,
     updateShot,
+    setShotAudioMode,
     assignShotImage,
     assignShotVideo,
     assignShotAudio,
+    invalidateShotAssets,
     setTimeline,
     updateClip,
     addClip,
@@ -472,6 +567,9 @@ export const useProjectStore = defineStore('project', () => {
     setSettings,
     setCaptionSrt,
     setBgm,
+    setFinalVideo,
+    setAgentState,
+    patchAgentState,
     setCanvas,
     syncCanvasFromProject,
     setAspectRatio,

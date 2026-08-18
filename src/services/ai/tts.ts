@@ -8,12 +8,16 @@
  */
 
 import { getAIMode } from './client'
+import { spokenTextOnly } from './dialogue'
 import { getTtsConfig } from './runtime'
 
 export interface TTSInput {
   text: string
   voice?: string
   language?: 'Chinese' | 'English' | 'Auto'
+  /** 自然语言语气指令；不应包含要朗读的正文 */
+  instruction?: string
+  signal?: AbortSignal
 }
 
 export interface TTSOutput {
@@ -30,18 +34,12 @@ const log = (msg: string) =>
 
 /** qwen-audio-3.0-tts-flash 系统音色（百炼音色列表） */
 export const TTS_VOICES: { id: string; label: string }[] = [
-  { id: 'longanfengyue', label: '龙安风悦（女·自然亲切）' },
-  { id: 'longanhuan_v3.6', label: '龙安欢（女）' },
-  { id: 'longanlingxi', label: '龙安灵希（女·可爱甜美）' },
-  { id: 'longanxiaoxin', label: '龙安小昕（女·亲切活泼）' },
-  { id: 'longanyuanfei', label: '龙安元妃（女）' },
+  { id: 'longanhuan_v3.6', label: '龙安欢（女·自然普通话）' },
   { id: 'longjielidou_v3.6', label: '龙杰力豆（男童）' },
   { id: 'longpaopao_v3.6', label: '龙泡泡（女童）' },
   { id: 'longhuohuo_v3.6', label: '龙火火（顽皮少年）' },
   { id: 'longchuanshu_v3.6', label: '龙川叔（男）' },
-  { id: 'loongmary', label: 'loongmary（女·英音）' },
-  { id: 'loongeva_v3.6', label: 'loongeva（女·美音）' },
-  { id: 'loongjohn', label: 'loongJohn（男·美音）' }
+  { id: 'loongeva_v3.6', label: 'loongeva（女·美音）' }
 ]
 
 /** 这些仍按缩写处理（可以逐字母或习惯读法） */
@@ -128,8 +126,8 @@ function languageHint(language: string): string | undefined {
   return undefined
 }
 
-async function downloadAudioUrl(audioUrl: string): Promise<Blob> {
-  const aResp = await fetch(audioUrl)
+async function downloadAudioUrl(audioUrl: string, signal?: AbortSignal): Promise<Blob> {
+  const aResp = await fetch(audioUrl, { signal })
   if (!aResp.ok) throw new Error(`[TTS] 下载音频失败 ${aResp.status}`)
   const buf = await aResp.arrayBuffer()
   const ct = (aResp.headers.get('content-type') || '').toLowerCase()
@@ -160,16 +158,19 @@ async function speechSynthesizer(
   model: string,
   text: string,
   voice: string,
-  language: string
+  language: string,
+  instruction?: string,
+  signal?: AbortSignal
 ): Promise<Blob> {
   const hint = languageHint(language)
   const input: Record<string, unknown> = {
     text,
     voice,
-    format: 'mp3',
+    format: 'wav',
     sample_rate: 24000
   }
   if (hint) input.language_hints = [hint]
+  if (instruction) input.instruction = instruction
 
   const resp = await fetch(`${apiRoot}/services/audio/tts/SpeechSynthesizer`, {
     method: 'POST',
@@ -177,7 +178,8 @@ async function speechSynthesizer(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`
     },
-    body: JSON.stringify({ model, input })
+    body: JSON.stringify({ model, input }),
+    signal
   })
   const raw = await resp.text()
   let data: any
@@ -194,13 +196,13 @@ async function speechSynthesizer(
 
   const audio = data.output?.audio ?? data.audio
   if (audio?.data) {
-    return blobFromBase64(String(audio.data), 'audio/mpeg')
+    return blobFromBase64(String(audio.data), 'audio/wav')
   }
   const audioUrl = audio?.url
   if (!audioUrl) {
     throw new Error(`[TTS] SpeechSynthesizer 无音频：${JSON.stringify(data).slice(0, 240)}`)
   }
-  return downloadAudioUrl(audioUrl)
+  return downloadAudioUrl(audioUrl, signal)
 }
 
 /** 旧版 Qwen3-TTS multimodal-generation（兜底） */
@@ -210,7 +212,8 @@ async function nativeQwen3Speech(
   model: string,
   text: string,
   voice: string,
-  language: string
+  language: string,
+  signal?: AbortSignal
 ): Promise<Blob> {
   const apiRoot = origin.replace(/\/api\/v1$/i, '') + '/api/v1'
   const resp = await fetch(`${apiRoot}/services/aigc/multimodal-generation/generation`, {
@@ -226,7 +229,8 @@ async function nativeQwen3Speech(
         voice,
         language_type: language
       }
-    })
+    }),
+    signal
   })
   const raw = await resp.text()
   let data: any
@@ -244,7 +248,24 @@ async function nativeQwen3Speech(
   if (!audioUrl) {
     throw new Error(`[TTS] native 无音频：${JSON.stringify(data).slice(0, 240)}`)
   }
-  return downloadAudioUrl(audioUrl)
+  return downloadAudioUrl(audioUrl, signal)
+}
+
+/** 模型和音色版本不匹配时，服务偶尔不报错但输出异常发音；这里改成稳定安全音色。 */
+export function compatibleVoice(model: string, requested?: string): string {
+  const voice = (requested || '').trim()
+  if (/^qwen-audio-3\.0-tts-flash/i.test(model)) {
+    const safe = new Set([
+      'longanhuan_v3.6',
+      'longjielidou_v3.6',
+      'longpaopao_v3.6',
+      'longhuohuo_v3.6',
+      'longchuanshu_v3.6',
+      'loongeva_v3.6'
+    ])
+    return safe.has(voice) ? voice : 'longanhuan_v3.6'
+  }
+  return voice || 'longanhuan_v3.6'
 }
 
 function mockSpeechWav(text: string): Blob {
@@ -281,11 +302,11 @@ function mockSpeechWav(text: string): Blob {
 }
 
 export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
-  const text = normalizeForSpeech(clipText(input.text || ''))
+  const text = normalizeForSpeech(clipText(spokenTextOnly(input.text || '')))
   if (!text) throw new Error('没有口播文案，无法配音')
 
   const cfg = ttsConfig()
-  const voice = input.voice || cfg.voice
+  const voice = compatibleVoice(cfg.model, input.voice || cfg.voice)
   const language = input.language || detectSpeechLanguage(text)
   log(`口播文本：${text.slice(0, 80)}${text.length > 80 ? '…' : ''}  lang=${language}`)
 
@@ -306,7 +327,9 @@ export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
       cfg.model,
       text,
       voice,
-      language
+      language,
+      input.instruction,
+      input.signal
     )
     log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
     return { blob, mimeType: blob.type, model: cfg.model }
@@ -326,7 +349,8 @@ export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
         cfg.model,
         text,
         voice,
-        language
+        language,
+        input.signal
       )
       log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
       return { blob, mimeType: blob.type, model: cfg.model }

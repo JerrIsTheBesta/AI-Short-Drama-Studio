@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { runAgentTurn, type AgentEvent, type AgentMessage } from '@/services/canvas/agent'
 import GradientButton from '@/components/common/GradientButton.vue'
+import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/canvas/taskStore'
+import { estimateRequestText } from '@/services/canvas/toolRegistry'
+import type { AgentAutonomy } from '@/types'
 
 const messages = ref<AgentMessage[]>([
   {
@@ -19,6 +22,23 @@ const chips = ref<{ label: string; text: string }[]>([
   { label: '全流程', text: '全流程跑完' }
 ])
 const box = ref<HTMLElement | null>(null)
+const autonomy = ref<AgentAutonomy>('gated')
+let controller: AbortController | null = null
+
+const estimate = computed(() => estimateRequestText(input.value))
+
+onMounted(() => {
+  const saved = getAgentState()
+  autonomy.value = saved.autonomy
+  if (saved.messages.length) {
+    messages.value = saved.messages.map((message) => ({ role: message.role, content: message.content }))
+  }
+})
+
+async function chooseAutonomy(mode: AgentAutonomy) {
+  autonomy.value = mode
+  await setAgentAutonomy(mode)
+}
 
 function onProgress(ev: AgentEvent) {
   log.value = ev.label
@@ -35,21 +55,38 @@ async function sendText(text: string) {
   if (!t || busy.value) return
   input.value = ''
   messages.value.push({ role: 'user', content: t })
+  await appendAgentMessage('user', t)
   busy.value = true
   log.value = '开始…'
   steps.value = []
   chips.value = []
+  const turnController = new AbortController()
+  controller = turnController
   try {
-    const result = await runAgentTurn(messages.value, t, onProgress)
+    const result = await runAgentTurn(messages.value, t, onProgress, {
+      signal: turnController.signal,
+      autonomy: autonomy.value
+    })
     messages.value.push({ role: 'assistant', content: result.reply })
+    await appendAgentMessage('assistant', result.reply)
     chips.value = result.chips
   } catch (e: any) {
-    messages.value.push({ role: 'assistant', content: '失败：' + (e.message || e) })
+    const content = turnController.signal.aborted
+      ? '已停止。已完成的产物会保留，未开始的步骤不会继续。'
+      : '失败：' + (e.message || e)
+    messages.value.push({ role: 'assistant', content })
+    await appendAgentMessage('assistant', content)
   } finally {
     busy.value = false
+    controller = null
     await nextTick()
     box.value?.scrollTo({ top: box.value.scrollHeight })
   }
+}
+
+function cancel() {
+  controller?.abort()
+  log.value = '正在停止…'
 }
 
 async function send() {
@@ -63,6 +100,11 @@ async function send() {
       <strong>智能体</strong>
       <span :class="{ live: busy }">{{ busy ? log || '进行中…' : '做完一步再问你' }}</span>
     </header>
+    <div class="autonomy" aria-label="智能体自主度">
+      <button :class="{ active: autonomy === 'assist' }" @click="chooseAutonomy('assist')">陪我做</button>
+      <button :class="{ active: autonomy === 'gated' }" @click="chooseAutonomy('gated')">关键确认</button>
+      <button :class="{ active: autonomy === 'autopilot' }" @click="chooseAutonomy('autopilot')">自动完成</button>
+    </div>
     <div v-if="busy || steps.length" class="progress">
       <div v-for="s in steps" :key="s.key" class="p-row" :class="s.status">
         <i />
@@ -80,15 +122,17 @@ async function send() {
       </button>
     </div>
     <form class="composer" @submit.prevent="send">
+      <div v-if="input.trim() && estimate.calls" class="estimate">
+        预计 {{ estimate.calls }} 次生成调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
+      </div>
       <textarea
         v-model="input"
         rows="3"
         placeholder="说主题，或点下面的「继续」。需求不清我会先问。"
         @keydown.enter.exact.prevent="send"
       />
-      <GradientButton size="sm" :loading="busy" :disabled="!input.trim()" @click="send">
-        发送
-      </GradientButton>
+      <button v-if="busy" type="button" class="stop" @click="cancel">停止任务</button>
+      <GradientButton v-else size="sm" :disabled="!input.trim()" @click="send">发送</GradientButton>
     </form>
   </aside>
 </template>
@@ -109,6 +153,40 @@ header {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.autonomy {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+.autonomy button {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-3);
+  border-radius: 7px;
+  padding: 6px 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.autonomy button.active {
+  color: var(--color-text-1);
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-bg-2));
+}
+.estimate {
+  color: var(--color-text-3);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.stop {
+  border: 1px solid var(--color-danger, #ef4444);
+  color: var(--color-danger, #ef4444);
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
 }
 header span {
   font-size: 11px;

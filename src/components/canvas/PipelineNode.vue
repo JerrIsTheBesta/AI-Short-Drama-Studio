@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { Handle, Position } from '@vue-flow/core'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
+import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
-import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
+import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
+import { canBuildExport } from '@/utils/timeline'
+import { effectiveImagePrompt, effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory } from '@/utils/shot'
+import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
 import type { CanvasNodeType } from '@/types'
 
 const props = defineProps<{
   id: string
+  selected?: boolean
   data: {
     subjectId?: string
     sceneId?: string
@@ -27,23 +31,35 @@ const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 const project = useProjectStore()
 const assets = useAssetsStore()
 const toast = useToastStore()
-const router = useRouter()
 const mediaUrl = ref('')
 const videoUrl = ref('')
 const videoEl = ref<HTMLVideoElement | null>(null)
 const audioEl = ref<HTMLAudioElement | null>(null)
+const mediaBox = ref<HTMLElement | null>(null)
 const playing = ref(false)
 const playbackDuration = ref(0)
+const moreOpen = ref(false)
+const panelOpen = ref(false)
+const toolBusy = ref('')
+const cropOn = ref(false)
+const trimOn = ref(false)
+const crop = ref<NormRect>({ x: 0.08, y: 0.08, w: 0.84, h: 0.84 })
+const trimStart = ref(0)
+const trimEnd = ref(5)
+let drag: { kind: string; x: number; y: number; start: NormRect } | null = null
 
-const nodeMeta = computed(() => {
-  const p = project.current
-  const canvasNode = p?.canvas?.nodes.find((n) => n.id === props.id)
-  return canvasNode
-})
-
+const nodeMeta = computed(() => project.current?.canvas?.nodes.find((n) => n.id === props.id))
 const shot = computed(() =>
-  props.data.shotId
-    ? project.current?.shots.find((s) => s.id === props.data.shotId)
+  props.data.shotId ? project.current?.shots.find((s) => s.id === props.data.shotId) : undefined
+)
+const subject = computed(() =>
+  props.data.subjectId
+    ? (project.current?.subjects ?? []).find((s) => s.id === props.data.subjectId)
+    : undefined
+)
+const scene = computed(() =>
+  props.data.sceneId
+    ? (project.current?.scenes ?? []).find((s) => s.id === props.data.sceneId)
     : undefined
 )
 
@@ -59,108 +75,158 @@ const durationLabel = computed(() => {
 
 const title = computed(() => {
   if (type.value === 'script') return project.current?.script?.topic || project.current?.name || '文案'
-  if (type.value === 'subject') {
-    return (project.current?.subjects ?? []).find((s) => s.id === props.data.subjectId)?.name || '主体'
-  }
-  if (type.value === 'scene') {
-    return (project.current?.scenes ?? []).find((s) => s.id === props.data.sceneId)?.name || '场景'
-  }
+  if (subject.value) return subject.value.name
+  if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
+  if (type.value === 'export') return '合成成片'
+  if (type.value === 'final') return '成片预览'
   return props.data.label || type.value
 })
 
-const subtitle = computed(() => {
-  if (type.value === 'script') return '文案 / 拆分镜'
-  if (type.value === 'subject') return '多角度人设'
-  if (type.value === 'scene') return '场景底板'
-  if (type.value === 'shotImage') return '分镜配图'
-  if (type.value === 'shotVideo') {
-    return durationLabel.value ? `分镜视频 · ${durationLabel.value}` : '分镜视频'
-  }
-  if (type.value === 'audio') return '口播 TTS'
-  if (type.value === 'export') return '成片导出'
+const kindLabel = computed(() => {
+  if (type.value === 'subject') return '人设'
+  if (type.value === 'scene') return '场景'
+  if (type.value === 'shotImage') return '配图'
+  if (type.value === 'shotVideo') return '视频'
+  if (type.value === 'audio') return '口播'
+  if (type.value === 'export') return '合成'
+  if (type.value === 'final') return '成片'
   return ''
 })
 
 const assetId = computed(() => {
   const p = project.current
   if (!p) return undefined
-  if (type.value === 'subject') {
-    return (p.subjects ?? []).find((s) => s.id === props.data.subjectId)?.designSheetAssetId
-  }
-  if (type.value === 'scene') {
-    return (p.scenes ?? []).find((s) => s.id === props.data.sceneId)?.plateAssetId
-  }
-  const shot = p.shots.find((s) => s.id === props.data.shotId)
-  if (!shot) return undefined
-  if (type.value === 'shotImage') return shot.imageAssetId
-  if (type.value === 'shotVideo') return shot.videoAssetId
-  if (type.value === 'audio') return shot.audioAssetId
+  if (type.value === 'final') return p.finalVideoAssetId
+  if (type.value === 'subject') return subject.value?.designSheetAssetId
+  if (type.value === 'scene') return scene.value?.plateAssetId
+  if (!shot.value) return undefined
+  if (type.value === 'shotImage') return shot.value.imageAssetId
+  if (type.value === 'shotVideo') return shot.value.videoAssetId
+  if (type.value === 'audio') return shot.value.audioAssetId
   return undefined
 })
 
-/** 画面框跟项目片比走，contain 不裁切 */
 const mediaAspect = computed(() => {
   if (type.value === 'subject') return cssAspectRatio('16:9')
+  if (type.value === 'audio' || type.value === 'export') return '16 / 10'
   return cssAspectRatio(project.current?.settings.aspectRatio)
 })
 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
-const generating = computed(() => isNodeRunning(props.id) || status.value === 'running')
+const generating = computed(() => isNodeRunning(props.id))
 const hasAsset = computed(() => Boolean(assetId.value))
-const gateBlocked = computed(() => type.value !== 'script' && type.value !== 'export' && needsPlayReview(project.current))
+const gateBlocked = computed(
+  () =>
+    type.value !== 'script' &&
+    type.value !== 'export' &&
+    type.value !== 'final' &&
+    needsPlayReview(project.current)
+)
+
+const isVideoNode = computed(() => type.value === 'shotVideo' || type.value === 'final')
+const isImageNode = computed(
+  () => type.value === 'shotImage' || type.value === 'subject' || type.value === 'scene'
+)
+const showPrompt = computed(
+  () =>
+    type.value === 'shotImage' ||
+    type.value === 'shotVideo' ||
+    type.value === 'subject' ||
+    type.value === 'scene' ||
+    type.value === 'audio'
+)
+
+const promptValue = computed({
+  get() {
+    if (type.value === 'subject') return subject.value?.description || ''
+    if (type.value === 'scene') return scene.value?.description || ''
+    if (type.value === 'shotImage' && shot.value) return effectiveImagePrompt(shot.value)
+    if (type.value === 'shotVideo' && shot.value) return effectiveVideoPrompt(shot.value)
+    if (type.value === 'audio') return shot.value?.voiceover || ''
+    return ''
+  },
+  set(v: string) {
+    if (type.value === 'subject' && subject.value) project.updateSubject(subject.value.id, { description: v })
+    else if (type.value === 'scene' && scene.value) project.updateScene(scene.value.id, { description: v })
+    else if (type.value === 'shotImage' && shot.value) project.updateShot(shot.value.id, { imagePrompt: v })
+    else if (type.value === 'shotVideo' && shot.value) project.updateShot(shot.value.id, { videoPrompt: v })
+    else if (type.value === 'audio' && shot.value) project.updateShot(shot.value.id, { voiceover: v })
+  }
+})
+
+const promptHint = computed(() => {
+  if (type.value === 'shotImage') return '改提示词后点生成，只影响这一镜配图'
+  if (type.value === 'shotVideo')
+    return '写细：每个人的表情神态、动作，以及环境怎么动。不要写成静帧配图词'
+  if (type.value === 'subject') return '改外貌描述后重新生成人设图'
+  if (type.value === 'scene') return '改场景描述后重新生成底板'
+  if (type.value === 'audio') return '改口播后重新合成配音'
+  return ''
+})
+
+const metaLine = computed(() => {
+  const ar = project.current?.settings.aspectRatio || '16:9'
+  const w = project.current?.settings.width ?? 1280
+  const h = project.current?.settings.height ?? 720
+  if (type.value === 'shotVideo') return `MiniMax H3 · ${ar}`
+  if (type.value === 'audio') {
+    if (!shot.value) return '口播'
+    return effectiveShotAudioMode(shot.value) === 'tts' ? '后期 TTS' : 'H3 人声'
+  }
+  const model = project.current?.pipelineMode === 'remake' ? 'GPT Image' : 'Seedream'
+  return `${model} · ${ar} · ${w}×${h}`
+})
 
 const genLabel = computed(() => {
   if (gateBlocked.value) return '先验收剧本'
   const again = hasAsset.value
-  if (type.value === 'script') return project.current?.shots.length ? '重新拆分镜' : '拆分镜'
   if (type.value === 'subject') return again ? '重新生成' : '生成人设'
   if (type.value === 'scene') return again ? '重新生成' : '生成场景'
   if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
-  if (type.value === 'audio') return again ? '重新生成' : '生成口播'
-  if (type.value === 'export') return '打开导出'
+  if (type.value === 'audio') {
+    if (!shot.value || !needsExternalTts(shot.value)) return ''
+    return again ? '重新生成' : '生成口播'
+  }
+  if (type.value === 'export' || type.value === 'final') {
+    return again || project.current?.finalVideoAssetId ? '重新合成' : '合成成片'
+  }
   return again ? '重新生成' : '生成'
 })
 
-async function openExport(ev: Event) {
-  ev.stopPropagation()
-  if (!project.current) return
-  if (!canBuildExport(project.current)) {
-    toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
-    return
-  }
-  const { built, clips } = ensureTimelineFromShots(project.current)
-  if (built) {
-    project.setTimeline(clips)
-    await project.save()
-    toast.info(`已按分镜排好时间线（${clips.length} 段）`)
-  }
-  router.push('/export')
-}
+const { findNode, removeSelectedNodes } = useVueFlow()
 
-async function generateThis(ev: Event) {
-  ev.stopPropagation()
-  if (type.value === 'export') {
-    await openExport(ev)
-    return
-  }
-  if (generating.value || gateBlocked.value) return
-  try {
-    await runCanvasNode(props.id)
-    await loadMedia()
-  } catch {
-    /* 节点上会显示失败 */
-  }
-}
-
+watch(assetId, () => loadMedia(), { immediate: true })
 watch(
-  assetId,
-  () => {
-    loadMedia()
+  () => props.selected,
+  (on) => {
+    panelOpen.value = Boolean(on)
+    if (!on) {
+      moreOpen.value = false
+      cropOn.value = false
+      trimOn.value = false
+    }
   },
   { immediate: true }
 )
+
+const durationOptions = [5, 6, 7, 8, 9, 10] as const
+
+function setShotDuration(raw: number) {
+  if (!shot.value) return
+  const d = Math.min(10, Math.max(5, Math.round(Number(raw) || shot.value.duration || 5)))
+  project.updateShot(shot.value.id, { duration: d })
+}
+
+function dismissPanel() {
+  moreOpen.value = false
+  cropOn.value = false
+  trimOn.value = false
+  panelOpen.value = false
+  const n = findNode(props.id)
+  if (n) removeSelectedNodes([n])
+}
 
 async function loadMedia() {
   const id = assetId.value
@@ -171,7 +237,7 @@ async function loadMedia() {
     videoUrl.value = ''
     return
   }
-  if (type.value === 'shotVideo') {
+  if (type.value === 'shotVideo' || type.value === 'final') {
     videoUrl.value = (await assets.getUrl(id)) || ''
     mediaUrl.value = (await assets.ensureThumb(id)) || videoUrl.value
   } else {
@@ -182,15 +248,34 @@ async function loadMedia() {
 
 defineExpose({ loadMedia })
 
+async function generateThis(ev?: Event, hd = false) {
+  ev?.stopPropagation()
+  if (generating.value || gateBlocked.value || toolBusy.value) return
+  if ((type.value === 'export' || type.value === 'final') && !canBuildExport(project.current)) {
+    toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
+    return
+  }
+  moreOpen.value = false
+  dismissPanel()
+  try {
+    await runCanvasNode(props.id, undefined, undefined, hd ? { hd: true } : undefined)
+    await loadMedia()
+    if (hd) toast.success('已按更高分辨率重新生成')
+  } catch {
+    /* 节点上会显示失败 */
+  }
+}
+
 function onLoadedMetadata(ev: Event) {
   const v = ev.target as HTMLVideoElement
   if (v && Number.isFinite(v.duration) && v.duration > 0) {
     playbackDuration.value = v.duration
+    if (trimOn.value) trimEnd.value = Number(v.duration.toFixed(2))
   }
 }
 
 function currentMedia(): HTMLMediaElement | null {
-  if (type.value === 'shotVideo') return videoEl.value
+  if (isVideoNode.value) return videoEl.value
   if (type.value === 'audio') return audioEl.value
   return null
 }
@@ -211,7 +296,7 @@ async function togglePlay(ev: Event) {
           await v.play()
           playing.value = true
         } catch {
-          /* 浏览器拦截自动播放时忽略 */
+          /* ignore */
         }
       }
     }
@@ -224,12 +309,10 @@ async function togglePlay(ev: Event) {
 function onVideoPlay() {
   playing.value = true
 }
-
 function onVideoPause() {
   const v = videoEl.value
   if (!v || v.ended) playing.value = false
 }
-
 function bufferedEnd(v: HTMLVideoElement) {
   try {
     if (v.buffered.length === 0) return 0
@@ -238,13 +321,11 @@ function bufferedEnd(v: HTMLVideoElement) {
     return 0
   }
 }
-
 function onVideoEnded() {
   const v = videoEl.value
   if (v) {
     const dur = Number.isFinite(v.duration) ? v.duration : 0
     const buf = bufferedEnd(v)
-    // 元数据时长偏短或缓冲还没到头时，ended 会提前触发
     if (buf > v.currentTime + 0.2 || (dur > 0 && v.currentTime < dur - 0.35 && buf > v.currentTime + 0.05)) {
       v.play().catch(() => {})
       return
@@ -253,98 +334,283 @@ function onVideoEnded() {
   }
   playing.value = false
 }
-
 function onCanPlay() {
   const v = currentMedia()
-  if (playing.value && v?.paused && !v.ended) {
-    v.play().catch(() => {})
+  if (playing.value && v?.paused && !v.ended) v.play().catch(() => {})
+}
+function onAudioEnded() {
+  playing.value = false
+  if (audioEl.value) audioEl.value.currentTime = 0
+}
+
+function startCrop() {
+  if (!hasAsset.value) {
+    toast.warn('先生成图片再裁剪')
+    return
+  }
+  trimOn.value = false
+  cropOn.value = true
+  crop.value = { x: 0.08, y: 0.08, w: 0.84, h: 0.84 }
+}
+
+function startTrim() {
+  if (!videoUrl.value) {
+    toast.warn('先生成视频再剪辑')
+    return
+  }
+  cropOn.value = false
+  const dur = playbackDuration.value || shot.value?.duration || 5
+  trimStart.value = 0
+  trimEnd.value = Number(dur.toFixed(2))
+  trimOn.value = true
+  if (videoEl.value) videoEl.value.currentTime = 0
+}
+
+function onCropDown(kind: string, ev: PointerEvent) {
+  ev.preventDefault()
+  ev.stopPropagation()
+  const box = mediaBox.value
+  if (!box) return
+  drag = { kind, x: ev.clientX, y: ev.clientY, start: { ...crop.value } }
+  window.addEventListener('pointermove', onCropMove)
+  window.addEventListener('pointerup', onCropUp)
+}
+
+function onCropMove(ev: PointerEvent) {
+  if (!drag || !mediaBox.value) return
+  const rect = mediaBox.value.getBoundingClientRect()
+  const dx = (ev.clientX - drag.x) / rect.width
+  const dy = (ev.clientY - drag.y) / rect.height
+  const s = drag.start
+  if (drag.kind === 'move') {
+    crop.value = clampRect({ ...s, x: s.x + dx, y: s.y + dy })
+    return
+  }
+  let { x, y, w, h } = s
+  if (drag.kind.includes('w')) {
+    const nx = Math.min(x + w - 0.12, x + dx)
+    w += x - nx
+    x = nx
+  }
+  if (drag.kind.includes('e')) w = Math.max(0.12, w + dx)
+  if (drag.kind.includes('n')) {
+    const ny = Math.min(y + h - 0.12, y + dy)
+    h += y - ny
+    y = ny
+  }
+  if (drag.kind.includes('s')) h = Math.max(0.12, h + dy)
+  crop.value = clampRect({ x, y, w, h })
+}
+
+function onCropUp() {
+  drag = null
+  window.removeEventListener('pointermove', onCropMove)
+  window.removeEventListener('pointerup', onCropUp)
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointermove', onCropMove)
+  window.removeEventListener('pointerup', onCropUp)
+})
+
+async function applyCrop() {
+  const id = assetId.value
+  const box = mediaBox.value
+  if (!id || !box) return
+  toolBusy.value = '裁剪中…'
+  try {
+    const blob = await assets.getBlob(id)
+    if (!blob) throw new Error('原图读取失败')
+    const out = await cropContainedImage(blob, { width: box.clientWidth, height: box.clientHeight }, crop.value)
+    await replaceImage(out, `crop_${Date.now().toString(36)}`)
+    cropOn.value = false
+    toast.success('已裁剪并替换当前图')
+  } catch (e: any) {
+    toast.error(e?.message || '裁剪失败')
+  } finally {
+    toolBusy.value = ''
   }
 }
 
-function onAudioEnded() {
-  playing.value = false
-  const a = audioEl.value
-  if (a) a.currentTime = 0
+async function applyTrim() {
+  const id = assetId.value
+  if (!id) return
+  const start = Math.max(0, trimStart.value)
+  const end = Math.max(start + 0.2, trimEnd.value)
+  toolBusy.value = '剪辑中…'
+  try {
+    const blob = await assets.getBlob(id)
+    if (!blob) throw new Error('视频读取失败')
+    const w = project.current?.settings.width ?? 1280
+    const h = project.current?.settings.height ?? 720
+    const fps = project.current?.settings.fps ?? 30
+    const out = await trimVideoBlob(blob, start, end - start, w, h, fps, (m) => {
+      toolBusy.value = m
+    })
+    const asset = await assets.add(out, 'video', 'extracted', {
+      filename: `trim_${Date.now().toString(36)}`,
+      projectId: project.current?.id,
+      shotId: shot.value?.id
+    })
+    if (type.value === 'final') project.setFinalVideo(asset.id)
+    else if (shot.value) {
+      project.assignShotVideo(shot.value.id, asset.id)
+      project.updateShot(shot.value.id, { duration: Math.max(1, Math.round(end - start)) })
+    }
+    await project.save()
+    trimOn.value = false
+    await loadMedia()
+    toast.success('已剪辑并替换当前视频')
+  } catch (e: any) {
+    toast.error(e?.message || '剪辑失败')
+  } finally {
+    toolBusy.value = ''
+  }
 }
+
+async function replaceImage(blob: Blob, filename: string) {
+  const asset = await assets.add(blob, 'image', 'extracted', {
+    filename,
+    projectId: project.current?.id,
+    shotId: shot.value?.id
+  })
+  if (type.value === 'shotImage' && shot.value) project.assignShotImage(shot.value.id, asset.id)
+  else if (type.value === 'subject' && subject.value) {
+    project.updateSubject(subject.value.id, {
+      designSheetAssetId: asset.id,
+      designSheetHistoryIds: pushHistory(
+        subject.value.designSheetAssetId,
+        asset.id,
+        subject.value.designSheetHistoryIds
+      )
+    })
+  } else if (type.value === 'scene' && scene.value) {
+    project.updateScene(scene.value.id, {
+      plateAssetId: asset.id,
+      plateHistoryIds: pushHistory(scene.value.plateAssetId, asset.id, scene.value.plateHistoryIds)
+    })
+  }
+  await project.save()
+  await loadMedia()
+}
+
+async function downloadAsset() {
+  const id = assetId.value
+  if (!id) {
+    toast.warn('还没有可下载的素材')
+    return
+  }
+  const blob = await assets.getBlob(id)
+  if (!blob) {
+    toast.error('素材读取失败')
+    return
+  }
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${title.value}.${isVideoNode.value ? 'mp4' : type.value === 'audio' ? 'wav' : 'png'}`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function copyPrompt() {
+  const t = promptValue.value.trim()
+  if (!t) {
+    toast.warn('没有提示词')
+    return
+  }
+  navigator.clipboard.writeText(t).then(
+    () => toast.success('已复制提示词'),
+    () => toast.error('复制失败')
+  )
+}
+
+function openDetail() {
+  inspectCanvasNode(props.id)
+}
+
+function previewFull() {
+  if (isVideoNode.value && videoUrl.value) openLightbox(videoUrl.value, 'video', title.value)
+  else if (mediaUrl.value) openLightbox(mediaUrl.value, 'image', title.value)
+}
+
+function onTrimStart(v: number) {
+  trimStart.value = Math.min(v, trimEnd.value - 0.2)
+  if (videoEl.value) videoEl.value.currentTime = trimStart.value
+}
+
+function onTrimEnd(v: number) {
+  const max = playbackDuration.value || shot.value?.duration || 10
+  trimEnd.value = Math.max(v, trimStart.value + 0.2)
+  trimEnd.value = Math.min(trimEnd.value, max)
+  if (videoEl.value) videoEl.value.currentTime = trimEnd.value
+}
+
+const cropStyle = computed(() => ({
+  left: `${crop.value.x * 100}%`,
+  top: `${crop.value.y * 100}%`,
+  width: `${crop.value.w * 100}%`,
+  height: `${crop.value.h * 100}%`
+}))
 </script>
 
 <template>
-  <div class="pnode" :class="[`kind-${type}`, `st-${status}`]">
-    <Handle
-      v-if="type !== 'script'"
-      id="in"
-      type="target"
-      :position="Position.Left"
-      class="hndl"
-    />
-    <Handle
-      v-if="type === 'shotImage'"
-      id="char1"
-      type="target"
-      :position="Position.Left"
-      :style="{ top: '28%' }"
-      class="hndl"
-    />
-    <Handle
-      v-if="type === 'shotImage'"
-      id="char2"
-      type="target"
-      :position="Position.Left"
-      :style="{ top: '50%' }"
-      class="hndl"
-    />
-    <Handle
-      v-if="type === 'shotImage'"
-      id="scene"
-      type="target"
-      :position="Position.Left"
-      :style="{ top: '72%' }"
-      class="hndl"
-    />
-    <Handle
-      v-if="type === 'shotVideo'"
-      id="image"
-      type="target"
-      :position="Position.Left"
-      class="hndl"
-    />
+  <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset }]">
+    <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
+    <Handle v-if="type === 'shotImage'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
+    <Handle v-if="type === 'shotImage'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
+    <Handle v-if="type === 'shotImage'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
+    <Handle v-if="type === 'shotVideo'" id="image" type="target" :position="Position.Left" class="hndl" />
 
-    <div class="pnode-head">
-      <span class="pnode-k">{{ subtitle }}</span>
-      <span v-if="status === 'running'" class="badge run">生成中</span>
-      <span v-else-if="status === 'failed'" class="badge fail">生成失败</span>
-      <span v-else-if="status === 'success'" class="badge ok">完成</span>
-    </div>
-    <div class="pnode-title">{{ title }}</div>
-    <div v-if="type === 'script'" class="pnode-body text">
-      {{ (project.current?.script?.content || '还没有正文，在右侧填写或让智能体拆分镜').slice(0, 120) }}
-    </div>
-    <div v-else-if="type === 'audio'" class="pnode-body wave">
-      <audio
-        v-if="mediaUrl"
-        ref="audioEl"
-        class="nodrag nowheel"
-        :src="mediaUrl"
-        preload="auto"
-        @play="onVideoPlay"
-        @ended="onAudioEnded"
-        @canplay="onCanPlay"
-      />
-      <button
-        v-if="mediaUrl"
-        class="vo-play nodrag"
-        type="button"
-        :title="playing ? '暂停' : '试听'"
-        @click.stop="togglePlay"
-        @mousedown.stop
-      >
-        {{ playing ? '❚❚' : '▶' }}
-      </button>
-      <span>{{ shot?.voiceover?.slice(0, 40) || (mediaUrl ? '口播' : '无口播') }}</span>
-    </div>
-    <div v-else-if="type === 'export'" class="pnode-body text">拼接时间线 · 字幕 · BGM</div>
-    <div v-else class="pnode-media" :style="{ aspectRatio: mediaAspect }">
-      <template v-if="type === 'shotVideo' && videoUrl">
+    <transition name="float-up">
+      <div v-if="selected && panelOpen" class="toolbar-wrap nodrag nowheel" @mousedown.stop @click.stop>
+        <div class="toolbar">
+          <button v-if="isImageNode && hasAsset" type="button" :disabled="!!toolBusy" @click="startCrop">
+            <span>✂</span>裁剪
+          </button>
+          <button v-if="isImageNode" type="button" :disabled="generating || gateBlocked || !!toolBusy" @click="generateThis($event, true)">
+            <span>HD</span>高清
+          </button>
+          <button v-if="isVideoNode && hasAsset" type="button" :disabled="!!toolBusy" @click="startTrim">
+            <span>🎞</span>剪辑
+          </button>
+          <button v-if="genLabel" type="button" :disabled="generating || gateBlocked || !!toolBusy" @click="generateThis">
+            <span>↺</span>{{ hasAsset ? '重绘' : genLabel }}
+          </button>
+          <button v-if="hasAsset" type="button" @click="downloadAsset">
+            <span>⬇</span>下载
+          </button>
+          <button type="button" class="icon" title="更多" @click="moreOpen = !moreOpen">⋯</button>
+          <button v-if="hasAsset" type="button" class="icon" title="全屏" @click="previewFull">⛶</button>
+          <div v-if="moreOpen" class="more">
+            <button v-if="showPrompt" type="button" @click="copyPrompt(); moreOpen = false">复制提示词</button>
+            <button type="button" @click="openDetail(); moreOpen = false">打开右侧详情</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <div ref="mediaBox" class="pnode-media" :style="{ aspectRatio: mediaAspect }">
+      <template v-if="type === 'audio'">
+        <audio
+          v-if="mediaUrl"
+          ref="audioEl"
+          class="nodrag nowheel"
+          :src="mediaUrl"
+          preload="auto"
+          @play="onVideoPlay"
+          @ended="onAudioEnded"
+          @canplay="onCanPlay"
+        />
+        <div class="audio-card">
+          <button v-if="mediaUrl" class="vo-play nodrag" type="button" @click.stop="togglePlay" @mousedown.stop>
+            {{ playing ? '❚❚' : '▶' }}
+          </button>
+          <span>{{ shot?.voiceover?.slice(0, 36) || (mediaUrl ? '口播' : '无口播') }}</span>
+        </div>
+      </template>
+      <div v-else-if="type === 'export'" class="ph text">合成成片</div>
+      <template v-else-if="isVideoNode && videoUrl">
         <video
           ref="videoEl"
           class="nodrag nowheel"
@@ -352,51 +618,103 @@ function onAudioEnded() {
           :poster="mediaUrl && mediaUrl !== videoUrl ? mediaUrl : undefined"
           playsinline
           preload="auto"
-          title="点击播放 / 暂停"
           @loadedmetadata="onLoadedMetadata"
           @canplay="onCanPlay"
           @play="onVideoPlay"
           @pause="onVideoPause"
           @ended="onVideoEnded"
           @click.stop="togglePlay"
-          @mousedown.stop
         />
-        <button
-          v-if="!playing"
-          class="play-btn nodrag"
-          type="button"
-          title="播放"
-          @click.stop="togglePlay"
-          @mousedown.stop
-        >
+        <button v-if="!playing" class="play-btn nodrag" type="button" title="播放" @click.stop="togglePlay" @mousedown.stop>
           ▶
         </button>
       </template>
-      <img
-        v-else-if="mediaUrl"
-        :src="mediaUrl"
-        alt=""
-        title="点击查看大图"
-        @click.stop="openLightbox(mediaUrl, 'image', title)"
-        @mousedown.stop
-      />
-      <div v-else class="ph">{{ type === 'shotVideo' ? '▶' : '＋' }}</div>
-      <span v-if="type === 'shotVideo' && durationLabel" class="dur">{{ durationLabel }}</span>
+      <img v-else-if="mediaUrl" :src="mediaUrl" alt="" />
+      <div v-else class="ph">{{ isVideoNode ? '▶' : '＋' }}</div>
+      <span v-if="isVideoNode && durationLabel && !trimOn" class="dur">{{ durationLabel }}</span>
+      <span v-if="generating || toolBusy" class="busy">{{ toolBusy || '生成中…' }}</span>
+      <div v-if="status === 'failed' && nodeMeta?.error && !selected" class="fail-dot" :title="nodeMeta.error" />
+
+      <div v-if="cropOn" class="crop-mask nodrag nowheel" @mousedown.stop>
+        <div class="crop-box" :style="cropStyle" @pointerdown="onCropDown('move', $event)">
+          <i class="h nw" @pointerdown.stop="onCropDown('nw', $event)" />
+          <i class="h ne" @pointerdown.stop="onCropDown('ne', $event)" />
+          <i class="h sw" @pointerdown.stop="onCropDown('sw', $event)" />
+          <i class="h se" @pointerdown.stop="onCropDown('se', $event)" />
+        </div>
+        <div class="crop-actions">
+          <button type="button" @click="cropOn = false">取消</button>
+          <button type="button" class="ok" @click="applyCrop">应用裁剪</button>
+        </div>
+      </div>
+
+      <div v-if="trimOn" class="trim-bar nodrag nowheel" @mousedown.stop @click.stop>
+        <div class="trim-times">{{ trimStart.toFixed(1) }}s — {{ trimEnd.toFixed(1) }}s</div>
+        <input
+          type="range"
+          min="0"
+          :max="playbackDuration || shot?.duration || 10"
+          step="0.1"
+          :value="trimStart"
+          @input="onTrimStart(Number(($event.target as HTMLInputElement).value))"
+        />
+        <input
+          type="range"
+          min="0"
+          :max="playbackDuration || shot?.duration || 10"
+          step="0.1"
+          :value="trimEnd"
+          @input="onTrimEnd(Number(($event.target as HTMLInputElement).value))"
+        />
+        <div class="crop-actions">
+          <button type="button" @click="trimOn = false">取消</button>
+          <button type="button" class="ok" :disabled="!!toolBusy" @click="applyTrim">应用剪辑</button>
+        </div>
+      </div>
     </div>
-    <div v-if="nodeMeta?.error" class="pnode-err">{{ nodeMeta.error }}</div>
-    <button
-      v-if="genLabel"
-      class="pnode-gen"
-      :disabled="
-        generating ||
-        gateBlocked ||
-        (type === 'export' && !canBuildExport(project.current))
-      "
-      @click="generateThis"
-      @mousedown.stop
-    >
-      {{ generating ? '生成中…' : genLabel }}
-    </button>
+
+    <div class="pnode-name">
+      <span v-if="kindLabel" class="kind">{{ kindLabel }}</span>
+      <span class="name" :title="title">{{ title }}</span>
+      <span v-if="isVideoNode && durationLabel" class="len">{{ durationLabel }}</span>
+    </div>
+
+    <transition name="float-down">
+      <div v-if="selected && panelOpen && showPrompt && !cropOn && !trimOn" class="prompt nodrag nowheel" @mousedown.stop @click.stop>
+      <textarea
+        rows="5"
+        :value="promptValue"
+        :placeholder="promptHint"
+        @input="promptValue = ($event.target as HTMLTextAreaElement).value"
+      />
+      <ShotRefStrip
+        v-if="shot && (type === 'shotImage' || type === 'shotVideo')"
+        :shot="shot"
+        :mode="type === 'shotVideo' ? 'video' : 'image'"
+      />
+      <div class="prompt-foot">
+        <span>{{ metaLine }}</span>
+        <label v-if="type === 'shotVideo' && shot" class="dur-edit">
+          <select
+            :value="Math.min(10, Math.max(5, Math.round(Number(shot.duration) || 5)))"
+            @change="setShotDuration(Number(($event.target as HTMLSelectElement).value))"
+          >
+            <option v-for="n in durationOptions" :key="n" :value="n">{{ n }} 秒</option>
+          </select>
+        </label>
+        <button
+          v-if="genLabel"
+          class="go"
+          type="button"
+          :disabled="generating || gateBlocked || !!toolBusy"
+          :title="genLabel"
+          @click="generateThis"
+        >
+          ↑
+        </button>
+      </div>
+      </div>
+    </transition>
 
     <Handle id="out" type="source" :position="Position.Right" class="hndl" />
   </div>
@@ -404,13 +722,20 @@ function onAudioEnded() {
 
 <style scoped>
 .pnode {
+  position: relative;
   width: 240px;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border-strong);
+  background: #11111a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
-  overflow: hidden;
-  box-shadow: var(--shadow-md);
+  overflow: visible;
   color: var(--color-text-1);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.2s ease, box-shadow 0.22s ease;
+}
+.pnode.on {
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
+  z-index: 4;
 }
 .pnode.st-running {
   border-color: var(--color-accent);
@@ -418,33 +743,87 @@ function onAudioEnded() {
 .pnode.st-failed {
   border-color: var(--color-error);
 }
-.pnode.st-success {
-  border-color: rgba(16, 185, 129, 0.5);
+.toolbar-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  z-index: 6;
+  transform-origin: 50% 100%;
 }
-.pnode-head {
+.toolbar {
+  position: relative;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 6px 10px 0;
-}
-.pnode-k {
-  font-size: 10px;
-  color: var(--color-text-4);
-  letter-spacing: 0.04em;
-}
-.pnode-title {
-  font-size: 13px;
-  font-weight: 700;
-  padding: 2px 10px 6px;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #fff;
+  color: #1a1a1a;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+.toolbar > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #222;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.toolbar > button span {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.toolbar > button:hover:not(:disabled) {
+  background: #f2f2f4;
+}
+.toolbar > button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.toolbar > button.icon {
+  width: 30px;
+  justify-content: center;
+  padding: 6px 0;
+}
+.more {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 4px;
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+.more button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+  color: #222;
+}
+.more button:hover {
+  background: #f2f2f4;
 }
 .pnode-media {
   position: relative;
   width: 100%;
   background: #0b0b14;
   overflow: hidden;
+  border-radius: 12px 12px 0 0;
 }
 .pnode-media img,
 .pnode-media video {
@@ -456,9 +835,6 @@ function onAudioEnded() {
   object-position: center;
   display: block;
   background: #0b0b14;
-}
-.pnode-media img {
-  cursor: zoom-in;
 }
 .pnode-media video {
   cursor: pointer;
@@ -484,19 +860,34 @@ function onAudioEnded() {
 .play-btn:hover {
   background: rgba(124, 58, 237, 0.9);
 }
-.dur {
+.dur,
+.busy {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  z-index: 2;
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
   font-weight: 700;
   color: #fff;
   background: rgba(0, 0, 0, 0.72);
-  padding: 1px 6px;
+  padding: 2px 6px;
   border-radius: 4px;
   pointer-events: none;
-  letter-spacing: 0.02em;
+}
+.dur {
+  right: 6px;
+  bottom: 6px;
+}
+.busy {
+  left: 6px;
+  top: 6px;
+}
+.fail-dot {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
 }
 .ph {
   position: absolute;
@@ -507,27 +898,21 @@ function onAudioEnded() {
   color: var(--color-text-4);
   font-size: 22px;
 }
-.pnode-body {
-  padding: 8px 10px 12px;
-  font-size: 11px;
-  color: var(--color-text-3);
-  line-height: 1.45;
-  min-height: 48px;
+.ph.text {
+  font-size: 13px;
+  font-weight: 600;
 }
-.pnode-body.wave {
-  position: relative;
+.audio-card {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--color-text-2);
 }
-.pnode-body.wave audio {
-  position: absolute;
-  width: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-.pnode-body.wave span {
+.audio-card span {
   min-width: 0;
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -545,67 +930,223 @@ function onAudioEnded() {
   background: rgba(124, 58, 237, 0.85);
   color: #fff;
   font-size: 12px;
-  line-height: 1;
   cursor: pointer;
 }
-.vo-play:hover {
-  background: var(--color-accent);
+.pnode-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  background: #16161f;
+  border-radius: 0 0 11px 11px;
 }
-.pnode-err {
-  padding: 4px 10px 8px;
+.pnode-name .kind {
+  flex-shrink: 0;
   font-size: 10px;
-  color: var(--color-error);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-text-4);
 }
-.badge {
+.pnode-name .name {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pnode-name .len {
+  flex-shrink: 0;
   font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 99px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-4);
 }
-.badge.run {
-  background: rgba(124, 58, 237, 0.25);
-  color: #c4b5fd;
+.prompt {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  z-index: 5;
+  width: 400px;
+  min-width: 400px;
+  transform: translateX(-50%);
+  transform-origin: 50% 0;
+  background: #16161f;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
 }
-.badge.fail {
-  background: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
+.prompt textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: inherit;
 }
-.badge.ok {
-  background: rgba(16, 185, 129, 0.2);
-  color: #6ee7b7;
+.prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
 }
-.pnode.kind-subject {
-  border-color: rgba(251, 191, 36, 0.45);
+.prompt-foot span {
+  font-size: 10px;
+  color: var(--color-text-4);
 }
-.pnode.kind-scene {
-  border-color: rgba(96, 165, 250, 0.45);
+.dur-edit {
+  margin-left: auto;
 }
-.pnode.kind-shotImage {
-  border-color: rgba(167, 139, 250, 0.45);
-}
-.pnode.kind-shotVideo {
-  border-color: rgba(244, 114, 182, 0.45);
-}
-.pnode-gen {
-  width: calc(100% - 16px);
-  margin: 0 8px 8px;
-  font-size: 11px;
-  padding: 5px 8px;
+.dur-edit select {
+  display: block;
+  height: 28px;
+  min-width: 72px;
+  padding: 0 26px 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
-  background: var(--color-bg-3);
-  color: var(--color-text-2);
+  background-color: #2a2a38;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px;
+  color: #f5f5fa;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 28px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  color-scheme: dark;
 }
-.pnode-gen:hover:not(:disabled) {
-  background: var(--color-accent);
-  color: #fff;
+.dur-edit select option {
+  background: #1c1c28;
+  color: #f5f5fa;
 }
-.pnode-gen:disabled {
-  opacity: 0.6;
+.go {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  border: none;
+  border-radius: 7px;
+  background: #fff;
+  color: #111;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.go:disabled {
+  opacity: 0.4;
   cursor: default;
+}
+.crop-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: rgba(0, 0, 0, 0.35);
+}
+.crop-box {
+  position: absolute;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.45);
+  cursor: move;
+}
+.crop-box .h {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-radius: 2px;
+}
+.crop-box .nw { left: -5px; top: -5px; cursor: nwse-resize; }
+.crop-box .ne { right: -5px; top: -5px; cursor: nesw-resize; }
+.crop-box .sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
+.crop-box .se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.crop-actions {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  z-index: 5;
+}
+.crop-actions button,
+.trim-bar button {
+  margin: 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 11px;
+}
+.crop-actions .ok,
+.trim-bar .ok {
+  background: #fff;
+  color: #111;
+  font-weight: 700;
+}
+.trim-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  padding: 8px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.82));
+}
+.trim-times {
+  font-size: 11px;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.trim-bar input[type='range'] {
+  width: 100%;
+  margin: 0 0 4px;
 }
 .hndl {
   width: 8px;
   height: 8px;
   background: #a78bfa;
   border: 1px solid #fff;
+}
+.pnode.kind-subject { border-color: rgba(251, 191, 36, 0.35); }
+.pnode.kind-scene { border-color: rgba(96, 165, 250, 0.35); }
+.pnode.kind-shotImage { border-color: rgba(167, 139, 250, 0.35); }
+.pnode.kind-shotVideo { border-color: rgba(244, 114, 182, 0.35); }
+.pnode.on.kind-subject,
+.pnode.on.kind-scene,
+.pnode.on.kind-shotImage,
+.pnode.on.kind-shotVideo {
+  border-color: rgba(255, 255, 255, 0.55);
+}
+
+.float-up-enter-active,
+.float-up-leave-active,
+.float-down-enter-active,
+.float-down-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.float-up-enter-from,
+.float-up-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px) scale(0.96);
+}
+.float-down-enter-from,
+.float-down-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-10px) scale(0.98);
 }
 </style>

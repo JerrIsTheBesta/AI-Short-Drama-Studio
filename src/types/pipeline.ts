@@ -37,6 +37,21 @@ export interface PipelineTask {
   shotId?: string
 }
 
+export interface AgentTaskGraphNode {
+  id: string
+  tool: string
+  phase: number
+  dependsOn: string[]
+  estimatedSeconds: number
+  estimatedCalls: number
+}
+
+export interface AgentTaskGraph {
+  id: string
+  nodes: AgentTaskGraphNode[]
+  createdAt: number
+}
+
 export type PipelineStepId =
   | 'script'
   | 'storyboard'

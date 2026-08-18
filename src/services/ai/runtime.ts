@@ -1,5 +1,5 @@
 /**
- * 运行时 AI 配置：画布右侧面板优先，缺省回落到 .env
+ * 运行时 AI 配置：设置页保存值优先，缺省回落到 .env
  */
 
 import { useSettingsStore } from '@/stores'
@@ -27,6 +27,18 @@ export function getLlmConfig() {
     baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
     apiKey: s?.apiKey || d.apiKey,
     model: s?.model || d.model
+  }
+}
+
+export function getVisionConfig() {
+  const d = envDefaults().vision
+  const s = pick()?.vision
+  const selectedModel = s?.model || d.model
+  return {
+    baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
+    apiKey: s?.apiKey || d.apiKey,
+    // 旧视觉配置自动迁移到项目指定的 Qwen3-VL。
+    model: /^(qwen3\.7|qwen-vl-)/i.test(selectedModel) ? 'qwen3-vl-plus' : selectedModel
   }
 }
 
@@ -69,4 +81,17 @@ export function getMusicConfig() {
     apiKey: s?.apiKey || d.apiKey,
     model: s?.model || d.model
   }
+}
+
+export function getRemakeVisionModel() {
+  return envDefaults().remakeVisionModel || 'qwen3.8-max'
+}
+
+export function getRemakeImageModel() {
+  return envDefaults().remakeImageModel || 'gpt-image-2'
+}
+
+/** 视频复刻项目强制走 APIYI GPT 出图，其它项目用设置页默认模型 */
+export function imageModelForProject(pipelineMode?: string) {
+  return pipelineMode === 'remake' ? getRemakeImageModel() : undefined
 }
