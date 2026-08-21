@@ -17,6 +17,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
+import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import { lookFromScript } from '@/utils/visualStyle'
 import { openLightbox } from '@/composables/useLightbox'
 import type { Shot, ID, Subject, Scene } from '@/types'
@@ -500,6 +501,7 @@ function next() {
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/storyboard')">← 上一步</GradientButton>
+        <ImageModelSelect />
         <GradientButton
           icon="✨"
           :loading="generating.size > 0"
@@ -883,6 +885,10 @@ function next() {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+  align-items: center;
+}
+.head-actions :deep(.img-model) {
+  flex: 0 1 220px;
 }
 
 .project-refs {

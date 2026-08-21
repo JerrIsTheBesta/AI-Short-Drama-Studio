@@ -73,7 +73,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "extract_cast" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
-{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "配图静帧词，可选", "imagePrompt": "可选", "videoPrompt": "视频内容表现：谁做什么、说什么、镜头怎么走，可选", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
+{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "配图静帧词，可选", "imagePrompt": "可选", "videoPrompt": "场景叙事：从第一帧接着演。画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
 { "tool": "generate_shot_image", "shotId": "shot_xxx" }
@@ -453,7 +453,7 @@ function wrapUpReply(
     }
   }
   if (didAud) {
-    return { reply: `口播好了。可以点「合成成片」节点出成片，结果会显示在成片结果节点里。${failLine}`, chips: [] }
+    return { reply: `口播好了。可以点「合成视频」节点，结果会显示在视频预览里。${failLine}`, chips: [] }
   }
   const next = nextPipelineStep(p)
   return {

@@ -348,7 +348,7 @@ const tab = ref<SettingsTab>('llm')
 
       <GlassCard padding="lg">
         <h2>ℹ 关于</h2>
-        <p class="card-desc">剧流 Studio · 从剧本到成片</p>
+        <p class="card-desc">剧流 Studio · 从剧本到视频</p>
         <div class="about">
           <div class="about-row">
             <span>版本</span><b>v0.1.0</b>

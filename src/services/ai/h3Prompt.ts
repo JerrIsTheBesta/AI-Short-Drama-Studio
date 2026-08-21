@@ -1,10 +1,12 @@
 /**
  * MiniMax H3 ComfyUI 提示词组装
- * 画面走制作模板；环境音单独写 overall_soundscape（英文）；台词只进 <d>。
+ * 场景叙事：两段中文（配图里已有人）。
+ * 格式化：Aesthetic / SHOT / Visual Prompt；环境音 overall_soundscape（英文）；台词进 <d>。
  */
 
 import type { AspectRatio, Shot } from '@/types'
 import { spokenTextOnly } from './dialogue'
+import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 export interface H3PromptInput {
   /** 分镜视觉描述（可中文；会写入英文结构句中） */
@@ -26,6 +28,11 @@ export interface H3PromptInput {
   cameraMovement?: Shot['cameraMovement']
   /** 默认 I2VA：图生视频 */
   mode?: 'I2VA' | 'T2VA'
+  /**
+   * scene-narrative：只送两段中文叙事（配图里已有人）。
+   * formatted：套 Aesthetic / SHOT 结构（人物图+空镜底板）。
+   */
+  promptStyle?: VideoPromptStyle
 }
 
 const CAMERA_PHRASE: Record<NonNullable<Shot['cameraMovement']>, string> = {
@@ -234,6 +241,21 @@ function dialogueLine(input: H3PromptInput): string {
  * 组装传给 ComfyUI / MiniMax H3 的最终 prompt
  */
 export function composeH3VideoPrompt(input: H3PromptInput): string {
+  const style = input.promptStyle ?? 'scene-narrative'
+  if (style === 'scene-narrative') return composeSceneNarrativePrompt(input)
+  return composeFormattedPrompt(input)
+}
+
+/** 配图里已经有人：从第一帧接着演。画面中谁是谁 + 连续演戏。不要套英文标签。 */
+function composeSceneNarrativePrompt(input: H3PromptInput): string {
+  const visual = (input.prompt || '').trim()
+  if (!visual) return '从第一帧接着演。'
+  if (/^从第一帧接着演/.test(visual)) return visual
+  return `从第一帧接着演。${visual}`
+}
+
+/** 人物图 + 空镜底板：按 MiniMax H3 制作模板组装 */
+function composeFormattedPrompt(input: H3PromptInput): string {
   const mode = input.mode ?? 'I2VA'
   const visual = (input.prompt || '').trim() || 'the scene continues from the first frame'
   const camera =

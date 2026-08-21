@@ -1,7 +1,17 @@
 import type { Shot, ShotAudioMode } from '@/types'
 import { composeShotVisualPrompt } from '@/utils/shotPrompt'
 
-export { composeVideoPerformance, synthesizeVideoPerformance, isVideoPerformanceThin, VIDEO_PERFORMANCE_SPEC } from '@/utils/shotPrompt'
+export {
+  composeVideoPerformance,
+  synthesizeVideoPerformance,
+  isVideoPerformanceThin,
+  VIDEO_PERFORMANCE_SPEC,
+  assembleShotVideoPrompt,
+  videoPerformanceSpec,
+  videoPromptJsonHint,
+  editableVideoPrompt
+} from '@/utils/shotPrompt'
+export type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 /** 配图实际使用的提示词：独立覆盖优先，否则用分镜画面描述 */
 export function effectiveImagePrompt(shot: Shot): string {

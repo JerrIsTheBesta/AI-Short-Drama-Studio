@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
-import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
+import { useAssetsStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
@@ -10,8 +10,9 @@ import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
+import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import { canBuildExport } from '@/utils/timeline'
-import { effectiveImagePrompt, effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory } from '@/utils/shot'
+import { effectiveImagePrompt, effectiveShotAudioMode, needsExternalTts, pushHistory, editableVideoPrompt } from '@/utils/shot'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
 import type { CanvasNodeType } from '@/types'
 
@@ -31,6 +32,7 @@ const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 
 const project = useProjectStore()
 const assets = useAssetsStore()
+const settings = useSettingsStore()
 const toast = useToastStore()
 const mediaUrl = ref('')
 const videoUrl = ref('')
@@ -79,8 +81,8 @@ const title = computed(() => {
   if (subject.value) return subject.value.name
   if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
-  if (type.value === 'export') return '合成成片'
-  if (type.value === 'final') return '成片预览'
+  if (type.value === 'export') return '合成视频'
+  if (type.value === 'final') return '视频预览'
   return props.data.label || type.value
 })
 
@@ -91,7 +93,7 @@ const kindLabel = computed(() => {
   if (type.value === 'shotVideo') return '视频'
   if (type.value === 'audio') return '口播'
   if (type.value === 'export') return '合成'
-  if (type.value === 'final') return '成片'
+  if (type.value === 'final') return '预览'
   return ''
 })
 
@@ -143,7 +145,7 @@ const promptValue = computed({
     if (type.value === 'subject') return subject.value?.description || ''
     if (type.value === 'scene') return scene.value?.description || ''
     if (type.value === 'shotImage' && shot.value) return effectiveImagePrompt(shot.value)
-    if (type.value === 'shotVideo' && shot.value) return effectiveVideoPrompt(shot.value)
+    if (type.value === 'shotVideo' && shot.value) return editableVideoPrompt(shot.value)
     if (type.value === 'audio') return shot.value?.voiceover || ''
     return ''
   },
@@ -159,7 +161,7 @@ const promptValue = computed({
 const promptHint = computed(() => {
   if (type.value === 'shotImage') return '改提示词后点生成，只影响这一镜配图'
   if (type.value === 'shotVideo')
-    return '写细：每个人的表情神态、动作，以及环境怎么动。不要写成静帧配图词'
+    return '直接改这段。清空不会自动填回；要点「按分镜动作重写」才会用场记再写。'
   if (type.value === 'subject') return '改外貌描述后重新生成人设图'
   if (type.value === 'scene') return '改场景描述后重新生成底板'
   if (type.value === 'audio') return '改口播后重新合成配音'
@@ -175,7 +177,7 @@ const metaLine = computed(() => {
     if (!shot.value) return '口播'
     return effectiveShotAudioMode(shot.value) === 'tts' ? '后期 TTS' : 'H3 人声'
   }
-  const model = project.current?.pipelineMode === 'remake' ? 'GPT Image' : 'Seedream'
+  const model = settings.config.image.model || '出图'
   return `${model} · ${ar} · ${w}×${h}`
 })
 
@@ -191,7 +193,7 @@ const genLabel = computed(() => {
     return again ? '重新生成' : '生成口播'
   }
   if (type.value === 'export' || type.value === 'final') {
-    return again || project.current?.finalVideoAssetId ? '重新合成' : '合成成片'
+    return again || project.current?.finalVideoAssetId ? '重新合成' : '合成视频'
   }
   return again ? '重新生成' : '生成'
 })
@@ -253,7 +255,7 @@ async function generateThis(ev?: Event, hd = false) {
   ev?.stopPropagation()
   if (generating.value || gateBlocked.value || toolBusy.value) return
   if ((type.value === 'export' || type.value === 'final') && !canBuildExport(project.current)) {
-    toast.warn('还没有可导出的视频或图片，请先生成分镜成片')
+    toast.warn('还没有可导出的视频或图片，请先生成分镜视频')
     return
   }
   moreOpen.value = false
@@ -610,7 +612,7 @@ const cropStyle = computed(() => ({
           <span>{{ shot?.voiceover?.slice(0, 36) || (mediaUrl ? '口播' : '无口播') }}</span>
         </div>
       </template>
-      <div v-else-if="type === 'export'" class="ph text">合成成片</div>
+      <div v-else-if="type === 'export'" class="ph text">合成视频</div>
       <template v-else-if="isVideoNode && videoUrl">
         <video
           ref="videoEl"
@@ -694,7 +696,8 @@ const cropStyle = computed(() => ({
         :mode="type === 'shotVideo' ? 'video' : 'image'"
       />
       <div class="prompt-foot">
-        <span>{{ metaLine }}</span>
+        <ImageModelSelect v-if="isImageNode" />
+        <span v-else>{{ metaLine }}</span>
         <label v-if="type === 'shotVideo' && shot" class="dur-edit">
           <select
             :value="Math.min(10, Math.max(5, Math.round(Number(shot.duration) || 5)))"

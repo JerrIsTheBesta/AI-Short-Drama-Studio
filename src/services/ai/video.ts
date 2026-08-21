@@ -18,11 +18,12 @@
  */
 
 import { getAIMode } from './client'
-import { getVideoConfig } from './runtime'
+import { getVideoConfig, getVideoPromptStyle } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt } from './h3Prompt'
 import type { Shot, AspectRatio } from '@/types'
 import { abortableDelay, throwIfAborted } from './abort'
+import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 export interface VideoGenInput {
   /** 主输入图（分镜自己的图） */
@@ -61,6 +62,7 @@ export interface VideoGenInput {
   /** 0-1，154:strength_model */
   strength?: number
   signal?: AbortSignal
+  promptStyle?: VideoPromptStyle
 }
 
 export interface VideoGenOutput {
@@ -464,9 +466,9 @@ async function realWorkflowVideo(
 
 /** 拼最终喂给 ComfyUI / MiniMax H3 的视频提示词（页面预览 / 实际生成共用）
  *
- * 项目生产模板：Aesthetic → [SHOT 1] → Duration → Camera Motion →
+ * 场景叙事：两段中文（从第一帧接着演。画面中谁是谁 + 连续演戏）。
+ * 格式化：Aesthetic → [SHOT 1] → Duration → Camera Motion →
  * Visual Prompt → overall_soundscape（英文环境音）→ non_diegetic_music。
- * 对白只写在 Visual Prompt 下的 <d> 里，不与环境音混在一行。
  */
 export function composeVideoPrompt(input: VideoGenInput): string {
   return buildPrompt(input)
@@ -485,7 +487,8 @@ function buildPrompt(input: VideoGenInput): string {
     height: input.height,
     aspectRatio: input.aspectRatio,
     cameraMovement: input.cameraMovement,
-    mode: input.imageBlob || input.referenceImages?.length ? 'I2VA' : 'T2VA'
+    mode: input.imageBlob || input.referenceImages?.length ? 'I2VA' : 'T2VA',
+    promptStyle: input.promptStyle ?? getVideoPromptStyle()
   })
 }
 
@@ -498,7 +501,7 @@ export async function generateVideo(
     if (!input.imageBlob) {
       throw new Error('[video] 真实模式需要分镜配图作为输入')
     }
-    // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成片
+    // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
     return await realWorkflowVideo(input, onProgress)
   }
 

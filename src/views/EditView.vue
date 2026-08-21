@@ -388,7 +388,7 @@ function next() {
           <h3>💡 提示</h3>
           <p class="hint">点击时间线上的片段可以在这里编辑它的属性。</p>
           <p class="hint">
-            <Tag size="sm" type="accent">时长</Tag> 决定该片段在最终成片里持续多久。
+            <Tag size="sm" type="accent">时长</Tag> 决定该片段在最终视频里持续多久。
           </p>
           <p class="hint">
             <Tag size="sm" type="accent">转场</Tag> 让片段之间更平滑。

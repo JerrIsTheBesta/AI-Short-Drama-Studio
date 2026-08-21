@@ -3,7 +3,7 @@
  *
  * 对接阿里云百炼语音合成（文档 2938790 / 实时与非实时 SpeechSynthesizer）：
  *   POST {origin}/api/v1/services/audio/tts/SpeechSynthesizer
- * 默认模型：qwen-audio-3.0-tts-flash（同系列，成片配音用非实时 HTTP）
+ * 默认模型：qwen-audio-3.0-tts-flash（同系列，视频配音用非实时 HTTP）
  * 生成视频时顺带合成，导出时叠到对应片段上。
  */
 

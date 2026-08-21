@@ -40,7 +40,7 @@ export function ensureTimelineFromShots(project: Project): {
   return { built: clips.length > 0, clips }
 }
 
-/** 是否具备导出条件（时间线有启用片段，或分镜已有成片素材） */
+/** 是否具备导出条件（时间线有启用片段，或分镜已有视频素材） */
 export function canBuildExport(project: Project | null | undefined): boolean {
   if (!project) return false
   if (project.timeline.some((c) => c.enabled)) return true

@@ -319,7 +319,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
           return toBlob(data, 'video/mp4')
         }
       } else {
-        await safeExec(ffmpeg, ['-i', finalName, '-c', 'copy', '-y', outName], '封装成片')
+        await safeExec(ffmpeg, ['-i', finalName, '-c', 'copy', '-y', outName], '封装视频')
       }
     }
 

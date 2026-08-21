@@ -301,7 +301,7 @@ export interface Project {
   bgmAssetId?: ID
   /** 生成 BGM 用的提示词 */
   bgmPrompt?: string
-  /** 画布/导出合成的最终成片视频 */
+  /** 画布/导出合成的最终视频 */
   finalVideoAssetId?: ID
   /** 桌面端项目文件夹绝对路径 */
   folderPath?: string
@@ -319,7 +319,7 @@ export interface Project {
    * remake：上传参考视频复刻镜头，产品必须换成用户图
    */
   pipelineMode?: 'standard' | 'remake'
-  /** 视频复刻的参考成片 */
+  /** 视频复刻的参考视频 */
   sourceVideoAssetId?: ID
   createdAt: number
   updatedAt: number

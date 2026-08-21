@@ -4,9 +4,10 @@ import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from
 import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
 import { runCanvasNode, runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
-import { effectiveShotAudioMode, effectiveVideoPrompt, needsExternalTts, pushHistory, synthesizeVideoPerformance } from '@/utils/shot'
+import { effectiveShotAudioMode, editableVideoPrompt, needsExternalTts, pushHistory, synthesizeVideoPerformance } from '@/utils/shot'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
+import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
@@ -119,8 +120,13 @@ const actionLabel = computed(() => {
     if (!shot.value || !needsExternalTts(shot.value)) return '无需独立配音'
     return again ? '重新生成口播' : '生成口播'
   }
-  if (t === 'export' || t === 'final') return again ? '重新合成成片' : '合成成片'
+  if (t === 'export' || t === 'final') return again ? '重新合成视频' : '合成视频'
   return again ? '重新生成' : '生成这个节点'
+})
+
+const isImageNode = computed(() => {
+  const t = props.node?.type
+  return t === 'subject' || t === 'scene' || t === 'shotImage'
 })
 
 const canRun = computed(() => {
@@ -148,8 +154,8 @@ const kindLabel = computed(() => {
     return d ? `分镜 · 视频 · ${d}s` : '分镜 · 视频'
   }
   if (t === 'audio') return '分镜 · 口播'
-  if (t === 'export') return '成片 · 合成'
-  if (t === 'final') return '成片 · 结果'
+  if (t === 'export') return '视频 · 合成'
+  if (t === 'final') return '视频 · 预览'
   return t || ''
 })
 
@@ -159,8 +165,8 @@ const title = computed(() => {
   if (subject.value) return subject.value.name
   if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
-  if (props.node.type === 'export') return '合成成片'
-  if (props.node.type === 'final') return '成片预览'
+  if (props.node.type === 'export') return '合成视频'
+  if (props.node.type === 'final') return '视频预览'
   return props.node.data.label || props.node.type
 })
 
@@ -174,7 +180,12 @@ const historyIds = computed(() => {
 })
 
 const imagePromptValue = computed(() => shot.value?.imagePrompt ?? shot.value?.visualPrompt ?? '')
-const videoPromptValue = computed(() => (shot.value ? effectiveVideoPrompt(shot.value) : ''))
+const videoPromptValue = computed(() => (shot.value ? editableVideoPrompt(shot.value) : ''))
+const videoPromptPlaceholder = computed(() =>
+  (settings.config.video.promptStyle || 'scene-narrative') === 'formatted'
+    ? '每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。'
+    : '从第一帧接着演。画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
+)
 
 async function refreshPreview() {
   preview.value = ''
@@ -228,12 +239,12 @@ async function restoreHistory(assetId: string) {
 async function downloadFinal() {
   const id = project.current?.finalVideoAssetId
   if (!id) {
-    toast.warn('还没有成片，请先合成')
+    toast.warn('还没有合成视频，请先合成')
     return
   }
   const blob = await assets.getBlob(id)
   if (!blob) {
-    toast.error('成片文件读取失败')
+    toast.error('视频文件读取失败')
     return
   }
   const url = URL.createObjectURL(blob)
@@ -406,10 +417,10 @@ function resetVideoPrompt() {
         分两步：先写完整剧本（还不拆节点），看完再点「提炼节点」生成人物、场景、分镜。
       </p>
       <p v-else-if="node.type === 'export'" class="hint">
-        先调下方音频与字幕，再点合成。成片会出现在「成片结果」节点。
+        先调下方音频与字幕，再点合成。视频会出现在「视频预览」节点。
       </p>
       <p v-else-if="node.type === 'final'" class="hint">
-        可预览/下载成片。改音频设置后点重新合成即可。
+        可预览/下载视频。改音频设置后点重新合成即可。
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
 
@@ -573,10 +584,18 @@ function resetVideoPrompt() {
           <label>本镜视频内容表现</label>
           <button class="link" type="button" @click="resetVideoPrompt">按分镜动作重写</button>
         </div>
+        <p class="hint">
+          直接改这段文字。清空后不会自动填回；要点上面「按分镜动作重写」才会用场记再写一段。
+          {{
+            (settings.config.video.promptStyle || 'scene-narrative') === 'formatted'
+              ? '当前是格式化写法。'
+              : '当前是场景叙事。'
+          }}
+        </p>
         <textarea
           rows="8"
           :value="videoPromptValue"
-          placeholder="每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。"
+          :placeholder="videoPromptPlaceholder"
           @input="project.updateShot(shot.id, { videoPrompt: ($event.target as HTMLTextAreaElement).value })"
         />
         <label>时长（秒）</label>
@@ -640,6 +659,7 @@ function resetVideoPrompt() {
         </div>
       </div>
 
+      <ImageModelSelect v-if="isImageNode" />
       <GradientButton
         v-if="node.type === 'script'"
         block
@@ -674,7 +694,7 @@ function resetVideoPrompt() {
         type="secondary"
         @click="downloadFinal"
       >
-        下载成片
+        下载视频
       </GradientButton>
       <button class="ghost" type="button" @click="refreshPreview">刷新预览</button>
     </template>

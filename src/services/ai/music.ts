@@ -2,7 +2,7 @@
  * 整片背景音乐（纯音乐，无人声）
  *
  * 分镜视频自带的配乐切来切去不流畅，导出时会丢掉。
- * 这里按主题/风格生成一段 BGM，循环铺满成片，再叠口播。
+ * 这里按主题/风格生成一段 BGM，循环铺满视频，再叠口播。
  *
  * MiniMax Music 3.0：
  *   POST https://api.minimaxi.com/v1/music_generation

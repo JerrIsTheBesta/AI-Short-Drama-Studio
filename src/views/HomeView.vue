@@ -247,7 +247,7 @@ function fmtDuration(sec: number) {
         </div>
         <h1 class="title">
           一句话，<span class="gradient-text">一条 AI 流水线</span>，<br />
-          输出一条成片
+          输出一条视频
         </h1>
         <p class="subtitle">
           桌面端无限画布 + 智能体：人设、分镜、配图、视频都在一张图上连起来。资源存在本地文件夹。
@@ -276,7 +276,7 @@ function fmtDuration(sec: number) {
             <div class="stat-value gradient-text">
               {{ fmtDuration(totalDuration) }}
             </div>
-            <div class="stat-label">成片总时长</div>
+            <div class="stat-label">视频总时长</div>
           </div>
         </div>
       </div>
@@ -298,7 +298,7 @@ function fmtDuration(sec: number) {
         v-if="filteredProjects.length === 0"
         icon="🎬"
         title="还没有项目"
-        description="点击「创建新项目」开始你的第一条成片"
+        description="点击「创建新项目」开始你的第一条视频"
       >
         <template #action>
           <GradientButton @click="showCreateModal = true">创建新项目</GradientButton>
@@ -373,7 +373,7 @@ function fmtDuration(sec: number) {
               creating
                 ? createProgress
                 : pipelineMode === 'remake'
-                  ? '上传参考成片和产品图，AI 会按镜头复刻脚本；配音后期合成，成片视频不出口播。'
+                  ? '上传参考视频和产品图，AI 会按镜头复刻脚本；配音后期合成，视频里不出口播。'
                   : '起个好名字，下一步可以填具体文案'
             }}
           </p>
@@ -428,10 +428,10 @@ function fmtDuration(sec: number) {
                   </label>
                 </div>
                 <label v-else class="video-add">
-                  ＋ 上传参考成片
+                  ＋ 上传参考视频
                   <input class="file-hidden" type="file" accept="video/*" @change="onPickRemakeVideo" />
                 </label>
-                <p class="upload-hint">支持 mp4 / mov 等常见成片，会抽帧理解镜头语言。</p>
+                <p class="upload-hint">支持 mp4 / mov 等常见视频，会抽帧理解镜头语言。</p>
               </div>
 
               <div class="field">

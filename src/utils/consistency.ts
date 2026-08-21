@@ -16,6 +16,45 @@ function uniqueIds(ids: ID[]): ID[] {
   return out
 }
 
+/** 用来对上人物：id、名字、身份称呼 */
+export function subjectMatchKeys(sub: Subject): string[] {
+  return uniqueIds(
+    [sub.id, sub.name, sub.role]
+      .map((s) => String(s ?? '').trim())
+      .filter((s) => s.length >= 2)
+  )
+}
+
+export function matchSubject(token: string, subjects: Subject[]): Subject | undefined {
+  const key = String(token ?? '').trim()
+  if (!key) return undefined
+  const lower = key.toLowerCase()
+  return subjects.find((s) =>
+    subjectMatchKeys(s).some((k) => k === key || k.toLowerCase() === lower)
+  )
+}
+
+export function inferSubjectsFromText(text: string, subjects: Subject[]): Subject[] {
+  const t = text || ''
+  if (!t.trim() || !subjects.length) return []
+  return subjects.filter((s) => subjectMatchKeys(s).some((k) => t.includes(k)))
+}
+
+export function shotCastText(shot: Pick<Shot, 'title' | 'visualPrompt' | 'videoPrompt' | 'voiceover' | 'blocking'>): string {
+  return [shot.title, shot.visualPrompt, shot.videoPrompt, shot.voiceover, shot.blocking]
+    .map((s) => String(s ?? ''))
+    .join('\n')
+}
+
+/** 这一镜真正该用的人物：既认 id，也认名字/称呼，并从文案里补漏绑 */
+export function boundSubjectIds(shot: Shot, subjects: Subject[]): ID[] {
+  const explicit = (shot.subjectIds ?? [])
+    .map((token) => matchSubject(String(token), subjects)?.id)
+    .filter((id): id is ID => Boolean(id))
+  const inferred = inferSubjectsFromText(shotCastText(shot), subjects).map((s) => s.id)
+  return uniqueIds([...explicit, ...inferred])
+}
+
 /**
  * 配图参考：
  * - 普通项目固定 3 槽：1-2 角色设计图 + 场景底板
@@ -25,7 +64,7 @@ export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
   const subjects = project.subjects ?? []
   const scenes = project.scenes ?? []
 
-  const wanted = (shot.subjectIds?.length ? shot.subjectIds : subjects.map((s) => s.id)).slice(0, 4)
+  const wanted = boundSubjectIds(shot, subjects).slice(0, 4)
   const chars: { id: ID; label: string }[] = []
   for (const sid of wanted) {
     const sub = subjects.find((s) => s.id === sid)
@@ -111,12 +150,10 @@ export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
 
 export function subjectsForShot(shot: Shot, project: Project): Subject[] {
   const all = project.subjects ?? []
-  if (shot.subjectIds?.length) {
-    return shot.subjectIds
-      .map((id) => all.find((s) => s.id === id))
-      .filter((s): s is Subject => Boolean(s))
-  }
-  return all
+  const ids = boundSubjectIds(shot, all)
+  return ids
+    .map((id) => all.find((s) => s.id === id))
+    .filter((s): s is Subject => Boolean(s))
 }
 
 export function sceneForShot(shot: Shot, project: Project): Scene | undefined {

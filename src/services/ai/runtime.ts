@@ -5,6 +5,7 @@
 import { useSettingsStore } from '@/stores'
 import { envDefaults } from './env'
 import type { AIMode } from '@/stores/settings'
+import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 function pick() {
   try {
@@ -61,13 +62,18 @@ export function getTtsConfig() {
   }
 }
 
+export function getVideoPromptStyle(): VideoPromptStyle {
+  return pick()?.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
+}
+
 export function getVideoConfig() {
   const d = envDefaults().video
   const s = pick()?.video
   return {
     baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
     apiKey: s?.apiKey || d.apiKey,
-    workflowId: s?.workflowId || d.workflowId
+    workflowId: s?.workflowId || d.workflowId,
+    promptStyle: getVideoPromptStyle()
   }
 }
 
@@ -89,7 +95,9 @@ export function getRemakeImageModel() {
   return envDefaults().remakeImageModel || 'gpt-image-2'
 }
 
-/** 视频复刻项目强制走 APIYI GPT 出图，其它项目用设置页默认模型 */
+/** 出图模型：设置页当前选中的；没配时复刻项目回落到 GPT Image */
 export function imageModelForProject(pipelineMode?: string) {
+  const selected = pick()?.image?.model?.trim()
+  if (selected) return selected
   return pipelineMode === 'remake' ? getRemakeImageModel() : undefined
 }

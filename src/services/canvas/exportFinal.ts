@@ -1,5 +1,5 @@
 /**
- * 画布内合成最终成片（不跳转经典导出页）
+ * 画布内合成最终视频（不跳转经典导出页）
  */
 
 import { exportVideo, parseSRT, buildCuesFromClips } from '@/services/ffmpeg'
@@ -13,7 +13,7 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
   const p = project.current
   if (!p) throw new Error('没有打开的项目')
   if (!canBuildExport(p)) {
-    throw new Error('还没有可导出的视频或图片，请先生成分镜成片')
+    throw new Error('还没有可导出的视频或图片，请先生成分镜视频')
   }
 
   const { built, clips } = ensureTimelineFromShots(p)
@@ -108,10 +108,10 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
     onProgress
   })
 
-  onProgress?.('写入成片...')
+  onProgress?.('写入视频...')
   const asset = await assets.add(blob, 'video', 'ai-generated', {
     filename: `final_${p.name || 'cut'}_${Date.now().toString(36)}.mp4`,
-    prompt: `成片 · ${p.script?.topic || p.name || ''}`,
+    prompt: `视频 · ${p.script?.topic || p.name || ''}`,
     projectId: p.id
   })
   project.setFinalVideo(asset.id)

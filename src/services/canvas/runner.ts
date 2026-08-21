@@ -20,8 +20,9 @@ import {
   remakeShotsFromAnalysis
 } from '@/services/ai'
 import { blobToChatImageUrl } from '@/services/ai/client'
-import { imageModelForProject } from '@/services/ai/runtime'
-import { collectShotRefIds, composeShotImagePrompt, sceneForShot, subjectsForShot, videoExtraRefIds, videoExtraRefLead } from '@/utils/consistency'
+import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
+import { collectShotRefIds, composeShotImagePrompt, boundSubjectIds, sceneForShot, subjectsForShot, videoExtraRefIds, videoExtraRefLead } from '@/utils/consistency'
+import { assembleShotVideoPrompt } from '@/utils/shotPrompt'
 import {
   effectiveImagePrompt,
   h3VoiceMode,
@@ -182,6 +183,11 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
+  const rebound = boundSubjectIds(shot, project.current.subjects ?? [])
+  if (rebound.length) {
+    project.updateShot(shot.id, { subjectIds: rebound })
+    shot = project.current.shots.find((s) => s.id === shot.id) || { ...shot, subjectIds: rebound }
+  }
   const look = lookFromScript(project.current.script)
   const style = look.style
   const bundle = collectShotRefIds(shot, project.current)
@@ -237,10 +243,12 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const main = await assets.getBlob(shot.imageAssetId)
   if (!main) throw new Error('配图读取失败')
   onProgress?.('识别画面人物…')
+  const promptStyle = getVideoPromptStyle()
   const identityLock = await h3IdentityLockFromFrame({
     imageBlob: main,
     subjects: subjectsForShot(shot, project.current),
-    signal
+    signal,
+    promptStyle
   })
   onProgress?.('写细视频内容表现…')
   const performance = await enrichVideoPerformance({
@@ -252,14 +260,19 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   if (performance && performance !== shot.videoPrompt) {
     project.updateShot(shot.id, { videoPrompt: performance })
   }
-  const extraIds = videoExtraRefIds(shot).slice(0, 2)
+  const extraIds = promptStyle === 'formatted' ? videoExtraRefIds(shot).slice(0, 2) : []
   const extras: Blob[] = []
   for (const id of extraIds) {
     const b = await assets.getBlob(id)
     if (b) extras.push(b)
   }
   const lead = extras.length ? videoExtraRefLead(shot, project.current) : ''
-  const prompt = [lead, identityLock, performance].filter(Boolean).join('\n\n')
+  const prompt = assembleShotVideoPrompt({
+    style: promptStyle,
+    identityLock,
+    performance,
+    extraLead: lead
+  })
   onProgress?.(
     extras.length ? `生成视频（本镜配图 + ${extras.length} 张参考）…` : '生成视频（仅本镜配图）…'
   )
@@ -278,6 +291,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       height: project.current.settings.height,
       aspectRatio: project.current.settings.aspectRatio,
       cameraMovement: shot.cameraMovement,
+      promptStyle,
       signal
     },
     onProgress
@@ -298,7 +312,8 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       width: project.current.settings.width,
       height: project.current.settings.height,
       aspectRatio: project.current.settings.aspectRatio,
-      cameraMovement: shot.cameraMovement
+      cameraMovement: shot.cameraMovement,
+      promptStyle
     }),
     projectId: project.current.id,
     shotId: shot.id
@@ -504,7 +519,7 @@ export async function runStoryboard(onProgress?: (msg: string) => void, signal?:
   return runGeneratePlay(onProgress, signal)
 }
 
-/** 视频复刻：存参考成片 + 产品图 → 分析镜头 → 写剧本并提炼节点 */
+/** 视频复刻：存参考视频 + 产品图 → 分析镜头 → 写剧本并提炼节点 */
 export async function runVideoRemake(
   input: {
     videoFile: File | Blob

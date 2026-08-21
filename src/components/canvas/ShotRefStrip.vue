@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
-import { imageRefSlots, videoRefSlots } from '@/utils/consistency'
+import { imageRefSlots, videoRefSlots, boundSubjectIds } from '@/utils/consistency'
 import { openLightbox } from '@/composables/useLightbox'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import type { ID, Shot } from '@/types'
@@ -16,6 +16,14 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 const urls = ref<Record<string, string>>({})
 const pickerOpen = ref(false)
+
+const unboundCast = computed(() => {
+  const p = project.current
+  if (!p || props.mode !== 'image') return false
+  const people = (p.subjects ?? []).filter((s) => s.kind !== 'other')
+  if (!people.length) return false
+  return boundSubjectIds(props.shot, people).length === 0
+})
 
 const slots = computed(() => {
   if (!project.current) return []
@@ -126,7 +134,10 @@ onBeforeUnmount(() => {
       </div>
       <button type="button" class="ref-add" title="添加参考图" @click="pickerOpen = true">＋</button>
     </div>
-    <p v-if="mode === 'video' && !shot.imageAssetId" class="hint">先生成配图，才会作为本镜参考帧。</p>
+    <p v-if="mode === 'image' && unboundCast" class="hint">
+      这镜还没绑人物，人设图不会进配图。重新提炼节点，或在画面描述里写出角色名字。
+    </p>
+    <p v-else-if="mode === 'video' && !shot.imageAssetId" class="hint">先生成配图，才会作为本镜参考帧。</p>
     <AssetPicker
       :open="pickerOpen"
       kind="image"

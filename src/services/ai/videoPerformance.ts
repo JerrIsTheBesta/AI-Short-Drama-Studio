@@ -1,9 +1,10 @@
 import type { Scene, Shot, Subject } from '@/types'
 import { callLLM, getAIMode } from './client'
+import { getVideoPromptStyle } from './runtime'
 import {
   composeVideoPerformance,
   isVideoPerformanceThin,
-  VIDEO_PERFORMANCE_SPEC
+  videoPerformanceSpec
 } from '@/utils/shotPrompt'
 
 function stripJsonFence(text: string): string {
@@ -11,8 +12,8 @@ function stripJsonFence(text: string): string {
 }
 
 /**
- * 出视频前把内容表现写细：每个角色的表情神态、动作，以及环境反应。
- * 已经够细就原样返回。
+ * 出视频前的内容表现：你写过的原文原样用，不再自动改写。
+ * 只有空着时才按场记补一段，必要时再扩写。
  */
 export async function enrichVideoPerformance(opts: {
   shot: Shot
@@ -20,6 +21,9 @@ export async function enrichVideoPerformance(opts: {
   scene?: Pick<Scene, 'name' | 'description' | 'lighting' | 'mainAnchor'>
   signal?: AbortSignal
 }): Promise<string> {
+  const own = (opts.shot.videoPrompt || '').trim()
+  if (own) return own
+
   const current = composeVideoPerformance(opts.shot)
   if (!isVideoPerformanceThin(current)) return current
   if (getAIMode() === 'mock') return current
@@ -36,7 +40,7 @@ export async function enrichVideoPerformance(opts: {
       messages: [
         {
           role: 'system',
-          content: `你给图生视频写「视频内容表现」。${VIDEO_PERFORMANCE_SPEC}
+          content: `你给图生视频写「视频内容表现」。${videoPerformanceSpec(getVideoPromptStyle())}
 只输出 JSON：{"videoPrompt":"..."}
 配图静帧词只当布景参考，不要抄成视频词。台词必须用下面给的原词。`
         },

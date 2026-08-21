@@ -1,6 +1,7 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
 import { emptyCanvas } from '@/types/canvas'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { boundSubjectIds } from '@/utils/consistency'
 
 export const NODE_W = 240
 const GAP = 14
@@ -136,7 +137,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   pushGroup('group-scenes', '场景', 'scene', scnBox)
   pushGroup('group-shots', '分镜', 'shot', shotBox)
   pushGroup('group-audio', '口播', 'audio', audBox)
-  pushGroup('group-export', '成片', 'export', expBox)
+  pushGroup('group-export', '合成视频', 'export', expBox)
 
   function attach(groupId: string, node: CanvasNode) {
     node.parentGroupId = groupId
@@ -218,10 +219,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       parentGroupId: 'group-audio'
     })
 
-    const wanted = (shot.subjectIds?.length ? shot.subjectIds : subjects.map((s) => s.id)).slice(
-      0,
-      2
-    )
+    const wanted = boundSubjectIds(shot, subjects).slice(0, 2)
     wanted.forEach((sid, idx) => {
       const src = `subject:${sid}`
       if (!nodes.some((n) => n.id === src)) return
@@ -271,7 +269,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     id: 'export',
     type: 'export',
     position: cell(0, 0, shotH),
-    data: { label: '合成成片' },
+    data: { label: '合成视频' },
     status: persistStatus(prev.get('export')?.status, hasFinal),
     parentGroupId: 'group-export'
   })
@@ -279,7 +277,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     id: 'final',
     type: 'final',
     position: cell(0, 1, shotH),
-    data: { label: '成片结果' },
+    data: { label: '视频预览' },
     status: persistStatus(prev.get('final')?.status, hasFinal),
     parentGroupId: 'group-export'
   })

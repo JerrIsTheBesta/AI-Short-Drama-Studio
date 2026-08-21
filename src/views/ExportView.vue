@@ -172,7 +172,7 @@ async function doExport() {
     })()
 
     if (burnCaptions.value && captionCues.length === 0) {
-      toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕成片。')
+      toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕视频。')
     }
 
     // 构造 mediaMap
@@ -208,8 +208,8 @@ async function doExport() {
     } else {
       toast.warn(
         keepAmbientAudio.value
-          ? '没有配乐：成片会保留环境音并叠口播（若有）。'
-          : '没有配乐：成片已去掉各镜原声，将只保留口播（若有）。'
+          ? '没有配乐：视频会保留环境音并叠口播（若有）。'
+          : '没有配乐：视频已去掉各镜原声，将只保留口播（若有）。'
       )
     }
 
@@ -236,7 +236,7 @@ async function doExport() {
       if (blob) voiceoverAudioMap.set(clip.shotId, blob)
     }
     if (missingVo > 0) {
-      toast.warn(`${missingVo} 个分镜有口播文案但还没配音，成片这些段会没有人声。可回「字幕」页生成口播。`)
+      toast.warn(`${missingVo} 个分镜有口播文案但还没配音，视频这些段会没有人声。可回「字幕」页生成口播。`)
     }
 
     const blob = await exportVideo({
@@ -315,7 +315,7 @@ const segmentSummary = computed(() => {
   <div class="page">
     <header class="page-head">
       <div>
-        <h1>🚀 导出成片</h1>
+        <h1>🚀 导出视频</h1>
         <p>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠配乐和字幕</p>
       </div>
       <div class="head-actions">

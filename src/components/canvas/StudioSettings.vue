@@ -142,7 +142,7 @@ function removeActiveLlm() {
     <EndpointForm
       v-else-if="module === 'image'"
       title="生图"
-      hint="人设、空镜、分镜配图。选接入方式后填 Key。"
+      hint="人设、空镜、分镜配图。选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。"
       :presets="IMAGE_PROVIDERS"
       :base-url="settings.config.image.baseUrl"
       :api-key="settings.config.image.apiKey"
@@ -177,7 +177,26 @@ function removeActiveLlm() {
     <template v-else-if="module === 'video'">
       <section class="video">
         <h3>图生视频</h3>
-        <p class="hint">MiniMax H3 / ComfyUI。填工作流地址和 ID。</p>
+        <p class="hint">MiniMax H3 / ComfyUI。填工作流地址和 ID。提示词写法会记住，提炼分镜和出视频都按这个来。</p>
+        <label>提示词写法</label>
+        <div class="style-cards">
+          <button
+            type="button"
+            :class="{ on: (settings.config.video.promptStyle || 'scene-narrative') === 'scene-narrative' }"
+            @click="settings.patchVideo({ promptStyle: 'scene-narrative' })"
+          >
+            <strong>场景叙事</strong>
+            <span>分镜配图里已经有人。从第一帧接着演：先按衣服、站位点名谁是谁，再连续写这一镜怎么演、怎么说、镜头怎么走。</span>
+          </button>
+          <button
+            type="button"
+            :class="{ on: settings.config.video.promptStyle === 'formatted' }"
+            @click="settings.patchVideo({ promptStyle: 'formatted' })"
+          >
+            <strong>格式化</strong>
+            <span>人物图 + 空镜底板直接出视频。按 Aesthetic / SHOT / Visual Prompt 结构组装，适合画面里还没合成好人。</span>
+          </button>
+        </div>
         <label>服务地址</label>
         <input
           :value="settings.config.video.baseUrl"
@@ -339,6 +358,38 @@ select {
 }
 .llm-cards span {
   font-size: 11px;
+  color: var(--color-text-4);
+}
+.style-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+.style-cards button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  text-align: left;
+}
+.style-cards button.on {
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+  background: rgba(124, 58, 237, 0.16);
+}
+.style-cards strong {
+  font-size: 13px;
+}
+.style-cards span {
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--color-text-4);
 }
 .name-label {

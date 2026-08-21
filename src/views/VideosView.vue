@@ -3,7 +3,9 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { generateVideo, composeVideoPrompt, h3IdentityLockFromFrame, enrichVideoPerformance } from '@/services/ai'
-import { effectiveShotAudioMode, effectiveVideoPrompt, h3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
+import { getVideoPromptStyle } from '@/services/ai/runtime'
+import { effectiveShotAudioMode, editableVideoPrompt, h3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
+import { assembleShotVideoPrompt } from '@/utils/shotPrompt'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -42,6 +44,11 @@ const aspectRatio = computed(() => project.current?.settings.aspectRatio ?? '16:
 const width = computed(() => project.current?.settings.width ?? 1280)
 const height = computed(() => project.current?.settings.height ?? 720)
 const aesthetic = computed(() => project.current?.script?.h3Aesthetic || project.current?.script?.aesthetic || '')
+const videoPromptPlaceholder = computed(() =>
+  getVideoPromptStyle() === 'formatted'
+    ? '每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。'
+    : '从第一帧接着演。画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
+)
 
 const shotsWithoutImage = computed(() =>
   shots.value.filter((s) => !s.imageAssetId)
@@ -87,7 +94,7 @@ async function loadHistory() {
 }
 
 function promptOf(shot: Shot) {
-  return effectiveVideoPrompt(shot)
+  return editableVideoPrompt(shot).trim() || synthesizeVideoPerformance(shot)
 }
 
 function updateVideoPrompt(shot: Shot, value: string) {
@@ -107,8 +114,12 @@ function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
 }
 
 function composedPrompt(shot: Shot) {
+  const promptStyle = getVideoPromptStyle()
   return composeVideoPrompt({
-    prompt: promptOf(shot),
+    prompt: assembleShotVideoPrompt({
+      style: promptStyle,
+      performance: promptOf(shot)
+    }),
     aesthetic: aesthetic.value,
     audioDescription: shot.audioDescription,
     voiceover: shot.voiceover,
@@ -118,7 +129,8 @@ function composedPrompt(shot: Shot) {
     width: width.value,
     height: height.value,
     aspectRatio: aspectRatio.value,
-    cameraMovement: shot.cameraMovement
+    cameraMovement: shot.cameraMovement,
+    promptStyle
   })
 }
 
@@ -140,9 +152,11 @@ async function generateOne(shot: Shot) {
     const main = await collectShotFrame(shot)
 
     progress.value[shot.id] = '识别画面人物...'
+    const promptStyle = getVideoPromptStyle()
     const identityLock = await h3IdentityLockFromFrame({
       imageBlob: main,
-      subjects: project.current ? subjectsForShot(shot, project.current) : []
+      subjects: project.current ? subjectsForShot(shot, project.current) : [],
+      promptStyle
     })
     progress.value[shot.id] = '写细视频内容表现...'
     const performance = await enrichVideoPerformance({
@@ -153,14 +167,19 @@ async function generateOne(shot: Shot) {
     if (performance && performance !== shot.videoPrompt) {
       project.updateShot(shot.id, { videoPrompt: performance })
     }
-    const extraIds = videoExtraRefIds(shot).slice(0, 2)
+    const extraIds = promptStyle === 'formatted' ? videoExtraRefIds(shot).slice(0, 2) : []
     const extras: Blob[] = []
     for (const id of extraIds) {
       const b = await assets.getBlob(id)
       if (b) extras.push(b)
     }
     const lead = project.current && extras.length ? videoExtraRefLead(shot, project.current) : ''
-    const prompt = [lead, identityLock, performance].filter(Boolean).join('\n\n')
+    const prompt = assembleShotVideoPrompt({
+      style: promptStyle,
+      identityLock,
+      performance,
+      extraLead: lead
+    })
     progress.value[shot.id] = extras.length
       ? `生成视频中（本镜配图 + ${extras.length} 张参考）...`
       : '生成视频中（仅本镜配图）...'
@@ -179,6 +198,7 @@ async function generateOne(shot: Shot) {
         height: height.value,
         aspectRatio: aspectRatio.value,
         cameraMovement: shot.cameraMovement,
+        promptStyle,
         strength: 0.75
       },
       (msg) => {
@@ -200,7 +220,8 @@ async function generateOne(shot: Shot) {
         width: width.value,
         height: height.value,
         aspectRatio: aspectRatio.value,
-        cameraMovement: shot.cameraMovement
+        cameraMovement: shot.cameraMovement,
+        promptStyle
       }),
       projectId: project.current?.id,
       shotId: shot.id
@@ -412,8 +433,8 @@ function next() {
           <textarea
             class="prompt-edit"
             rows="5"
-            :value="effectiveVideoPrompt(shot)"
-            placeholder="每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。"
+            :value="editableVideoPrompt(shot)"
+            :placeholder="videoPromptPlaceholder"
             @input="updateVideoPrompt(shot, ($event.target as HTMLTextAreaElement).value)"
           />
           <pre v-if="expanded.has(shot.id)" class="composed">{{ composedPrompt(shot) }}</pre>

@@ -6,8 +6,11 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { envDefaults } from '@/services/ai/env'
+import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 const STORAGE_KEY = 'ai-cut:settings'
+
+export type { VideoPromptStyle }
 
 export type AIMode = 'mock' | 'real'
 
@@ -35,6 +38,11 @@ export interface VideoEndpoint {
   baseUrl: string
   apiKey: string
   workflowId: string
+  /**
+   * scene-narrative：配图里已经有人，从第一帧接着演（默认）。
+   * formatted：人物图 + 空镜底板直接出视频，套 Aesthetic / SHOT 结构。
+   */
+  promptStyle: VideoPromptStyle
 }
 
 export interface AppSettings {
@@ -154,7 +162,8 @@ function buildDefaults(): AppSettings {
     video: {
       baseUrl: env.video.baseUrl,
       apiKey: env.video.apiKey,
-      workflowId: env.video.workflowId
+      workflowId: env.video.workflowId,
+      promptStyle: 'scene-narrative'
     },
     music: endpoint(env.music.baseUrl, env.music.apiKey, env.music.model, MUSIC_PRESETS)
   }
@@ -226,7 +235,12 @@ function load(): AppSettings {
         ...parsed.tts,
         models: uniq([...(parsed.tts?.models ?? []), ...defaults.tts.models])
       },
-      video: { ...defaults.video, ...parsed.video },
+      video: {
+        ...defaults.video,
+        ...parsed.video,
+        promptStyle:
+          parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
+      },
       music: {
         ...defaults.music,
         ...parsed.music,

@@ -126,7 +126,7 @@ export function greetingReply(p: Project | null | undefined): string {
   if (next) {
     return `你好。当前下一步是「${next.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
   }
-  return '你好。素材基本齐了，可以点「合成成片」出结果；要改某一镜直接点节点重新生成就行。'
+  return '你好。素材基本齐了，可以点「合成视频」出结果；要改某一镜直接点节点重新生成就行。'
 }
 
 export function isVagueRequest(text: string, p: Project | null | undefined) {
@@ -169,7 +169,7 @@ export function clarifyMessage(p: Project | null | undefined): string {
   if (n) {
     return `下一步是「${n.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
   }
-  return '人设、配图、视频目前都齐了。可以点「合成成片」出结果；要改某一镜可以说「重新生成第1镜配图」。'
+  return '人设、配图、视频目前都齐了。可以点「合成视频」出结果；要改某一镜可以说「重新生成第1镜配图」。'
 }
 
 export function continueQuestion(next: PipelineStep | null, justDid: string) {

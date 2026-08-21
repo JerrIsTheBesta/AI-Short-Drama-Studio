@@ -1,6 +1,6 @@
 /**
  * 视频复刻：抽帧 → Qwen3.8-Max 理解镜头 → 写成剧本/分镜
- * 配音一律后期 TTS；成片视频不让 H3 出人声。
+ * 配音一律后期 TTS；合成视频不让 H3 出人声。
  */
 
 import { callLLM, blobToChatImageUrl, getAIMode, type LLMContentPart } from './client'
@@ -247,7 +247,7 @@ export async function analyzeRemakeVideo(
     const parts: LLMContentPart[] = [
       {
         type: 'text',
-        text: `你是短视频分镜导演。下面按时间顺序给出参考成片的关键帧（全片约 ${duration.toFixed(1)} 秒，画面比例 ${input.aspectRatio}）。
+        text: `你是短视频分镜导演。下面按时间顺序给出参考视频的关键帧（全片约 ${duration.toFixed(1)} 秒，画面比例 ${input.aspectRatio}）。
 请理解：内容讲什么、每镜景别/运镜/动作、听到的口播、现场环境音、出场人物与场景。
 然后写成可复刻的分镜脚本。商品外观不要抄原视频品牌，只写「用户产品」，因为后续会换成用户上传的 ${input.productCount} 张产品图。
 

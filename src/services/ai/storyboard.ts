@@ -12,7 +12,7 @@ import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './clie
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, Subject, VisualStyle } from '@/types'
 import { getSkillBody } from '@/skills'
-import { getLlmConfig } from './runtime'
+import { getLlmConfig, getVideoPromptStyle } from './runtime'
 import {
   buildStyleBriefForLLM,
   extractUserMediumPhrase,
@@ -22,8 +22,9 @@ import {
   styleLabel,
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
-import { synthesizeVideoPerformance, VIDEO_PERFORMANCE_SPEC, videoPerformanceIssue } from '@/utils/shotPrompt'
+import { synthesizeVideoPerformance, videoPerformanceIssue, videoPerformanceSpec, videoPromptJsonHint } from '@/utils/shotPrompt'
 import { extractJsonText, parseJsonRobust } from '@/utils/jsonRepair'
+import { boundSubjectIds, inferSubjectsFromText, shotCastText, subjectMatchKeys } from '@/utils/consistency'
 
 export interface StoryboardInput {
   topic: string
@@ -264,13 +265,13 @@ async function repairStoryboardOnce(
 ): Promise<StoryboardResult> {
   const extractHint =
     input.mode === 'extract'
-      ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。遗漏人物必须补进 subjects——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。相关 shots 的 subjectIds 要挂上。'
+      ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。遗漏人物必须补进 subjects——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。每个已建档人物必须出现在至少一镜：subjectIds 挂上，visualPrompt / videoPrompt 写名字。禁止只做人物卡、分镜里却换成路人或「一个男人」。'
       : '每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。'
   const repair = await callLLM({
     messages: [
       {
         role: 'system',
-        content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。不新增用户没说的产品、人物、数字或事实；但用户原文中已经出现的人物、台词和事件必须补全。\n${extractHint}\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按镜头分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。口播必须像真人说话，一句一个意思；每镜口播字数不超过 duration*4。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${VIDEO_PERFORMANCE_SPEC}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
+        content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。不新增用户没说的产品、人物、数字或事实；但用户原文中已经出现的人物、台词和事件必须补全。\n${extractHint}\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按镜头分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。口播必须像真人说话，一句一个意思；每镜口播字数不超过 duration*4。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${videoPerformanceSpec(getVideoPromptStyle())}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
       },
       {
         role: 'user',
@@ -431,7 +432,7 @@ ${
 直接输出 JSON，不要解释。`
 
   const extractSystemExtra = extractMode
-    ? `\n【本轮任务】输入已是完整剧本。只做提炼与落库字段补全，禁止改口播原意，禁止合并剧本里已分开的人物。`
+    ? `\n【本轮任务】输入已是完整剧本。只做提炼与落库字段补全，禁止改口播原意，禁止合并剧本里已分开的人物。每个 subject 必须在至少一镜的 subjectIds 和 visualPrompt 里出场点名，不能只建档不入镜。`
     : ''
 
   const messages: LLMMessage[] = [
@@ -445,7 +446,7 @@ ${stylePriority}
 ${extractSystemExtra}
 
 【字段语言】h3Aesthetic 用英文。visualPrompt 用中文写静帧可画内容。videoPrompt 用中文写这一镜的视频内容表现。
-${VIDEO_PERFORMANCE_SPEC}
+${videoPerformanceSpec(getVideoPromptStyle())}
 
 【输出 JSON】
 {
@@ -484,7 +485,7 @@ ${VIDEO_PERFORMANCE_SPEC}
       "continuity": "<开始什么样 → 这几秒环境或人变了啥（风、水、脚步）→ 结束定在哪>",
       "propFocus": "<这镜要看清的物件及它现在的状态，没有写无>",
       "visualPrompt": "<镜头语言：近到远写清画面里所有实物；水/风/衣摆动或不动；光从哪来；人穿什么、踩哪、手拿什么。这是静帧配图词。画风词点一次。禁止画风套话段，禁止只写站位>",
-      "videoPrompt": "<视频内容表现，中文，180-450字。先点名谁是谁。每个出场的人都要写表情神态（眉眼嘴角眼神）和手脚动作。环境要动（门、桌、光、风、衣摆、桌上的东西）。台词用原词并写说话神态。最后写镜头怎么走、怎么收。不要写成静帧配图词>",
+      "videoPrompt": "${videoPromptJsonHint(getVideoPromptStyle())}",
       "audioDescription": "<现场能听到的，逗号分隔>",
       "voiceover": "<这一镜要念的；没有就空字符串>",
       "audioMode": "h3-dialogue|h3-voiceover|tts|none",
@@ -601,6 +602,7 @@ export function storyboardQualityIssues(
   if (!result.h3Aesthetic || result.h3Aesthetic.length < 35) {
     issues.push('缺少可直接传给 H3 的英文 Aesthetic')
   }
+  const people = (result.subjects ?? []).filter((s) => s.kind !== 'other')
   result.shots.forEach((shot, index) => {
     const label = `第 ${index + 1} 镜`
     const spokenChars = (shot.voiceover || '').replace(/[\s，。！？、,.!?：:；;]/g, '').length
@@ -620,10 +622,23 @@ export function storyboardQualityIssues(
     }
     if (!shot.sceneId) issues.push(`${label} 没有关联场景`)
     if (!shot.cameraMovement) issues.push(`${label} 缺少运镜方式`)
+    const emptyPlate =
+      !shot.voiceover.trim() && /空镜|空景|无人/.test(`${shot.title}${shot.visualPrompt}`)
+    if (people.length && !(shot.subjectIds ?? []).length && !emptyPlate) {
+      issues.push(`严重：${label} 没有关联人物，人设图不会进这镜配图`)
+    }
   })
   const source = (input.content || '').trim()
   if (source.length > 0 && result.shots.every((shot) => !shot.voiceover.trim())) {
     issues.push('严重：用户有完整文案，但所有镜头口播均为空')
+  }
+  for (const sub of people) {
+    const used = result.shots.some(
+      (shot) =>
+        (shot.subjectIds ?? []).includes(sub.id) ||
+        inferSubjectsFromText(shotCastText(shot as Shot), [sub]).length > 0
+    )
+    if (!used) issues.push(`严重：人物「${sub.name}」已建档，但所有分镜都没用上`)
   }
   return issues.slice(0, 16)
 }
@@ -659,6 +674,30 @@ function resolveIds(
     if (id && !out.includes(id)) out.push(id)
   }
   return out.length ? out : fallback
+}
+
+function stampCastNames(prompt: string, chars: Subject[]): string {
+  const body = (prompt || '').trim()
+  if (!chars.length) return body
+  const line = `出场：${chars.map((c) => c.name).join('、')}。必须是人设里这些人，脸、发型、衣服跟设计图一致，禁止另造路人。`
+  if (body.includes('出场：') && chars.every((c) => body.includes(c.name))) return body
+  return body ? `${body}\n${line}` : line
+}
+
+function bindCastIntoShots(shots: StoryboardShot[], subjects: Subject[]): StoryboardShot[] {
+  if (!subjects.length) return shots
+  return shots.map((shot) => {
+    const ids = boundSubjectIds(shot as Shot, subjects)
+    const chars = ids
+      .map((id) => subjects.find((s) => s.id === id))
+      .filter((s): s is Subject => Boolean(s))
+    return {
+      ...shot,
+      subjectIds: ids,
+      visualPrompt: stampCastNames(shot.visualPrompt, chars),
+      videoPrompt: stampCastNames(shot.videoPrompt || '', chars)
+    }
+  })
 }
 
 /** 把 LLM 的 subjects/scenes/shot 绑定规范成稳定 id；按用户主题画风补强过短提示 */
@@ -754,12 +793,17 @@ export function normalizeStoryboard(
       subMap.set(String(s.name), id)
       subMap.set(String(s.name).toLowerCase(), id)
     }
+    if (s?.role) {
+      const role = String(s.role).trim()
+      if (role.length >= 2) subMap.set(role, id)
+    }
     subMap.set(id, id)
   })
   subjects.forEach((s) => {
     subMap.set(s.id, s.id)
     subMap.set(s.name, s.id)
     subMap.set(s.name.toLowerCase(), s.id)
+    for (const key of subjectMatchKeys(s)) subMap.set(key, s.id)
   })
 
   const scnMap = new Map<string, string>()
@@ -779,15 +823,14 @@ export function normalizeStoryboard(
     scnMap.set(s.name.toLowerCase(), s.id)
   })
 
-  const defaultSub = subjects.slice(0, 2).map((s) => s.id)
   const defaultScn = scenes[0].id
 
   const shots: StoryboardShot[] = shotsIn.map((s: any, i: number) => {
     const subjectIds = resolveIds(
       s?.subjectIds ?? s?.subjectNames ?? s?.characters,
       subMap,
-      defaultSub
-    ).slice(0, 2)
+      []
+    ).slice(0, 3)
     const sceneIds = resolveIds(s?.sceneId ?? s?.sceneName ?? s?.location, scnMap, [
       defaultScn
     ])
@@ -863,6 +906,8 @@ export function normalizeStoryboard(
     }
   })
 
+  const boundShots = bindCastIntoShots(shots, subjects)
+
   const look = lookFromTexts(style, options.topic, options.content, options.keywords)
   const styleCn = styleLabel(look.matched ?? style)
   let aesthetic = optStr(raw?.aesthetic)
@@ -890,7 +935,7 @@ export function normalizeStoryboard(
     lightingNote: optStr(raw?.lightingNote),
     subjects,
     scenes,
-    shots
+    shots: boundShots
   }
 }
 
