@@ -3,10 +3,27 @@ import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
 
 export interface PipelineStep {
-  id: 'play' | 'board' | 'review' | 'cast' | 'images' | 'videos' | 'audio'
+  id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'videos' | 'audio'
   label: string
   tools: { tool: string }[]
   focusNodeId?: string
+}
+
+export type ExtractStage = 'subjects' | 'scenes' | 'shots'
+
+export function nextExtractStage(p: Project | null | undefined): ExtractStage | null {
+  if (!(p?.subjects ?? []).length) return 'subjects'
+  if (!(p?.scenes ?? []).length) return 'scenes'
+  if (!p?.shots.length) return 'shots'
+  return null
+}
+
+export function extractStageLabel(p: Project | null | undefined): string {
+  if (p?.shots.length) return '重新提炼节点'
+  const stage = nextExtractStage(p)
+  if (stage === 'subjects') return '第 1 步：提炼人物'
+  if (stage === 'scenes') return '第 2 步：提炼场景'
+  return '第 3 步：拆分镜'
 }
 
 export function nextPipelineStep(p: Project | null | undefined): PipelineStep | null {
@@ -23,7 +40,7 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
   if (!p.shots.length) {
     return {
       id: 'board',
-      label: '提炼节点',
+      label: extractStageLabel(p),
       tools: [{ tool: 'extract_cast' }],
       focusNodeId: 'script'
     }
@@ -36,17 +53,47 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'script'
     }
   }
-  const missingSheets = (p.subjects ?? []).some((s) => !s.designSheetAssetId)
-  const missingPlates = (p.scenes ?? []).some((s) => !s.plateAssetId)
-  if (missingSheets || missingPlates) {
-    const tools: { tool: string }[] = []
-    if (missingSheets) tools.push({ tool: 'generate_all_sheets' })
-    if (missingPlates) tools.push({ tool: 'generate_all_scenes' })
+  const missingFour = (p.subjects ?? []).some((s) => !s.designSheetAssetId)
+  if (missingFour) {
     return {
       id: 'cast',
-      label: '人设和场景图',
-      tools,
-      focusNodeId: missingSheets ? 'group-subjects' : 'group-scenes'
+      label: '角色四视图',
+      tools: [{ tool: 'generate_all_sheets' }],
+      focusNodeId: 'group-subjects'
+    }
+  }
+  const missingProps = (p.subjects ?? []).some((s) => !s.propSheetAssetId)
+  if (missingProps) {
+    return {
+      id: 'cast',
+      label: '角色资产图',
+      tools: [{ tool: 'generate_all_prop_sheets' }],
+      focusNodeId: 'group-subjects'
+    }
+  }
+  const missingPlates = (p.scenes ?? []).some((s) => !s.plateAssetId)
+  if (missingPlates) {
+    return {
+      id: 'cast',
+      label: '场景锚点图',
+      tools: [{ tool: 'generate_all_scenes' }],
+      focusNodeId: 'group-scenes'
+    }
+  }
+  if (p.shots.some((s) => !s.boardAssetId)) {
+    return {
+      id: 'panels',
+      label: '故事看板图',
+      tools: [{ tool: 'generate_all_boards' }],
+      focusNodeId: 'group-shots'
+    }
+  }
+  if (p.shots.some((s) => !s.videoAssetId)) {
+    return {
+      id: 'videos',
+      label: '分镜视频',
+      tools: [{ tool: 'generate_all_videos' }],
+      focusNodeId: 'group-shots'
     }
   }
   if (p.shots.some((s) => !s.imageAssetId)) {
@@ -54,14 +101,6 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       id: 'images',
       label: '分镜配图',
       tools: [{ tool: 'generate_all_images' }],
-      focusNodeId: 'group-shots'
-    }
-  }
-  if (p.shots.some((s) => s.imageAssetId && !s.videoAssetId)) {
-    return {
-      id: 'videos',
-      label: '分镜视频',
-      tools: [{ tool: 'generate_all_videos' }],
       focusNodeId: 'group-shots'
     }
   }
@@ -110,7 +149,7 @@ export function greetingReply(p: Project | null | undefined): string {
   if (!p?.script?.content?.trim()) {
     return [
       '你好，我是画布里的制作助手。',
-      '把主题或口播文案发我，我先写成完整剧本，再提炼人物/场景/分镜节点，然后配图出视频。',
+      '把主题或口播文案发我，我先写成完整剧本；之后一次只拆一步：先人物，再场景，再分镜。',
       '也可以直接说「全流程」。'
     ].join('\n')
   }
@@ -118,7 +157,7 @@ export function greetingReply(p: Project | null | undefined): string {
     return '你好。草稿已经有了，回「写剧本」或「继续」我先写成完整剧本。'
   }
   if (!p.shots.length) {
-    return '你好。完整剧本在左侧，回「提炼节点」或「继续」我再拆出人物、场景、分镜。'
+    return `你好。完整剧本在左侧，回「继续」我先${extractStageLabel(p)}，不会一次拆完。`
   }
   if (needsPlayReview(p)) {
     return '你好。分镜节点已铺上画布，看完回「确认通过」或「继续」，我再往下做人设和场景。'
@@ -134,7 +173,7 @@ export function isVagueRequest(text: string, p: Project | null | undefined) {
   if (!t) return true
   if (isGreetingOrChitchat(t)) return false
   if (
-    /拆分镜|拆镜|故事板|出分镜|生成分镜|剧本|人设|角色图|场景图|底板|配图|出图|视频|口播|第.+镜|全流程|全部做完|确认通过|验收|继续|下一步/.test(
+    /拆分镜|拆镜|故事板|故事看板|看板图|出分镜|生成分镜|剧本|续写|接着写|人设|四视图|资产图|角色图|场景图|底板|配图|出图|视频|口播|第.+镜|全流程|全部做完|确认通过|验收|继续|下一步/.test(
       t
     )
   ) {
@@ -153,14 +192,14 @@ export function clarifyMessage(p: Project | null | undefined): string {
   if (!p?.script?.content?.trim()) {
     lines.push('1. 这条片子讲什么？把主题或口播文案发我就行。')
     lines.push('2. 大概多长？15 秒、30 秒还是 1 分钟。')
-    lines.push('3. 只要剧本，还是人设配图一起做？全自动可以说「全流程」。')
+    lines.push('3. 只要剧本，还是人设、场景宫格和故事看板一起做？全自动可以说「全流程」。')
     return lines.join('\n')
   }
   if (!p.script?.playReady) {
     return '草稿已经有了。回「写剧本」或「继续」，我先写成完整剧本（还不拆节点）。'
   }
   if (!p.shots.length) {
-    return '完整剧本已经在左侧。回「提炼节点」或「继续」，我再拆出人物、场景、分镜节点。'
+    return `完整剧本已经在左侧。回「继续」我先${extractStageLabel(p)}，拆完再停下来给你看。`
   }
   if (needsPlayReview(p)) {
     return '分镜节点已经铺上画布。看完回「确认通过」或「继续」，我再做人设和场景。'
@@ -169,7 +208,7 @@ export function clarifyMessage(p: Project | null | undefined): string {
   if (n) {
     return `下一步是「${n.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
   }
-  return '人设、配图、视频目前都齐了。可以点「合成视频」出结果；要改某一镜可以说「重新生成第1镜配图」。'
+  return '人设、场景宫格、故事看板和视频目前都齐了。可以点「合成视频」出结果；要改某一镜可以说「重新生成第1镜看板」。'
 }
 
 export function continueQuestion(next: PipelineStep | null, justDid: string) {
@@ -179,14 +218,19 @@ export function continueQuestion(next: PipelineStep | null, justDid: string) {
 
 export const TOOL_LABEL: Record<string, string> = {
   generate_play: '写完整剧本',
+  continue_play: '续写剧本',
   generate_storyboard: '写完整剧本',
-  extract_cast: '从剧本提炼人物/场景/分镜',
+  extract_cast: '提炼下一步（人物/场景/分镜）',
   approve_play: '记下剧本已验收',
   revise_shot: '局部修改分镜',
-  generate_sheet: '生成人设图',
-  generate_all_sheets: '补齐人设图',
-  generate_scene: '生成场景图',
-  generate_all_scenes: '补齐场景底板',
+  generate_sheet: '生成四视图',
+  generate_all_sheets: '补齐四视图',
+  generate_prop_sheet: '生成资产图',
+  generate_all_prop_sheets: '补齐资产图',
+  generate_scene: '生成场景锚点图',
+  generate_all_scenes: '补齐场景锚点图',
+  generate_shot_board: '生成故事看板',
+  generate_all_boards: '补齐故事看板',
   generate_shot_image: '生成分镜配图',
   generate_all_images: '补齐分镜配图',
   generate_video: '生成分镜视频',

@@ -39,7 +39,7 @@ export interface VideoEndpoint {
   apiKey: string
   workflowId: string
   /**
-   * scene-narrative：配图里已经有人，从第一帧接着演（默认）。
+   * scene-narrative：配图里已经有人，直接写谁是谁和怎么演（默认）。
    * formatted：人物图 + 空镜底板直接出视频，套 Aesthetic / SHOT 结构。
    */
   promptStyle: VideoPromptStyle

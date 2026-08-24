@@ -8,27 +8,23 @@
  *   GET  {baseUrl}/api/workflow/result?prompt_id={id}   轮询
  *   GET  {baseUrl}/api/comfy/proxy/history?prompt_id={id}  兼容旧
  *
- * input_values 字段（按 workflow_id 变，这里是 minimax_h3_light2v-1）：
- *   137:image / 139:image / 141:image    3 张图（URL 或 data:base64）
- *   92:filename_prefix / format / codec  输出
- *   145:预设分辨率 / 批量大小 / 自定义宽/高
- *   146:prompt                            文本
- *   147:value                             帧数/时长
- *   154:strength_model                    模型强度
+ * input_values 字段（按 workflow_id 变）：
+ *   U09-API-9图版：137/139/146/147/148/149/150/151/170:image，最多 9 张
+ *   旧 3 槽：137/139/141:image
  */
 
 import { getAIMode } from './client'
 import { getVideoConfig, getVideoPromptStyle } from './runtime'
 import { generateMockVideo } from './mock'
-import { composeH3VideoPrompt } from './h3Prompt'
+import { assertValidH3Prompt, composeH3VideoPrompt } from './h3Prompt'
 import type { Shot, AspectRatio } from '@/types'
 import { abortableDelay, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 export interface VideoGenInput {
-  /** 主输入图（分镜自己的图） */
+  /** 第一张参考图：角色设计图 / 场景图 / 故事看板之一，不是人物+场景配图 */
   imageBlob?: Blob
-  /** 参考图（0-3 张，和 imageBlob 合并） */
+  /** 其余参考图，按角色设计图 → 场景图 → 故事看板的顺序 */
   referenceImages?: Blob[]
   /**
    * 分镜视觉描述（中文，详细场景）
@@ -41,18 +37,26 @@ export interface VideoGenInput {
   aesthetic?: string
   /**
    * 音效描述（中文短句，比如"雨声、灯火燃烧声"）
-   * 写入 H3 overall_soundscape
+   * 写入 H3【声音设计】
    */
   audioDescription?: string
   /**
-   * 口播/台词原文。按 MiniMax H3 规范原样写入 <d>[Language] ...</d>
-   * 默认按 H3 出镜对白
+   * 口播/台词原文。人物名前缀会被剥离，只有正文进入 <d>[语言] 原词</d>。
    */
   voiceover?: string
   /** dialogue=H3 对口型；voiceover=H3 画外口播；none=不让 H3 生成人声 */
   voiceMode?: 'dialogue' | 'voiceover' | 'none'
   /** 说话人音色/身份提示（不含台词） */
   speakerHint?: string
+  /** H3 官方多图提示词中的实际人物、场景与图片职责。 */
+  speakerName?: string
+  sceneName?: string
+  sceneDescription?: string
+  sceneLighting?: string
+  sceneAnchor?: string
+  shotTitle?: string
+  imageAssignments?: string[]
+  onScreenNames?: string[]
   duration: number
   width: number
   height: number
@@ -77,6 +81,65 @@ const log = (msg: string) =>
 
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|avi|mkv)(?:$|[?#])/i
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|[?#])/i
+
+const NINE_SLOT_IMAGE_KEYS = [
+  '137:image',
+  '139:image',
+  '146:image',
+  '147:image',
+  '148:image',
+  '149:image',
+  '150:image',
+  '151:image',
+  '170:image'
+]
+
+function isNineSlotWorkflow(workflowId: string): boolean {
+  return /9图|U09-API|U06-API/i.test(workflowId)
+}
+
+function resolveWorkflowId(workflowId: string): string {
+  if (!workflowId || workflowId === 'minimax_h3_light2v-1' || workflowId === 'minimax_h3_light2v') {
+    return 'U09-API-9图版'
+  }
+  return workflowId
+}
+
+function workflowBindings(workflowId: string) {
+  if (isNineSlotWorkflow(workflowId)) {
+    return {
+      imageKeys: NINE_SLOT_IMAGE_KEYS,
+      promptKey: '138:value',
+      durationKey: '132:value',
+      extras: (width: number, height: number, prefix: string, strength: number) => ({
+        '168:filename_prefix': prefix,
+        '168:format': 'video/h264-mp4',
+        '205:strength_model': strength,
+        '300:预设分辨率': '自定义',
+        '300:自定义宽': width,
+        '300:自定义高': height,
+        '301:预设分辨率': '自定义',
+        '301:自定义宽': width,
+        '301:自定义高': height
+      })
+    }
+  }
+  return {
+    imageKeys: ['137:image', '139:image', '141:image'],
+    promptKey: '146:prompt',
+    durationKey: '147:value',
+    extras: (width: number, height: number, prefix: string, strength: number) => ({
+      '92:filename_prefix': prefix,
+      '92:format': 'auto',
+      '92:codec': 'auto',
+      '145:预设分辨率': '自定义',
+      '145:批量大小': 1,
+      '145:自定义宽': width,
+      '145:自定义高': height,
+      '154:strength_model': strength
+    })
+  }
+}
 
 function resultUrl(r: any): string {
   return String(r?.url ?? r?.video_url ?? r?.videoUrl ?? r?.filename ?? '').trim()
@@ -205,39 +268,63 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
   })
 }
 
+/** Keep a three-reference JSON request below common proxy body limits. */
+async function blobToVideoImageDataUrl(blob: Blob): Promise<string> {
+  try {
+    const bitmap = await createImageBitmap(blob)
+    const maxEdge = 1600
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('canvas context unavailable')
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, width, height)
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+    const compressed = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9))
+    return await blobToDataUrl(compressed || blob)
+  } catch {
+    return await blobToDataUrl(blob)
+  }
+}
+
 /** 提交到 ComfyUI workflow 服务并轮询结果 */
 async function realWorkflowVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const { baseUrl, apiKey, workflowId } = getVideoConfig()
+  const { baseUrl, apiKey, workflowId: rawWorkflowId } = getVideoConfig()
+  const workflowId = resolveWorkflowId(rawWorkflowId)
+  const bindings = workflowBindings(workflowId)
   throwIfAborted(input.signal)
 
   if (!baseUrl) {
     throw new Error('[video] 没配图生视频地址，请到设置页填写 ComfyUI 地址')
   }
 
-  // 1) 收集图：imageBlob + referenceImages，最多 3 张
   const allBlobs = [input.imageBlob, ...(input.referenceImages ?? [])]
     .filter((b): b is Blob => !!b)
-    .slice(0, 3)
+    .slice(0, bindings.imageKeys.length)
 
   if (allBlobs.length === 0) {
     throw new Error('[video] 没有可用图片')
   }
 
   onProgress?.(`准备参考图...`)
-  // 2) 转 data:base64（最稳，不用管公网 URL）
   const dataUrls: string[] = []
   for (const blob of allBlobs) {
-    dataUrls.push(await blobToDataUrl(blob))
+    dataUrls.push(await blobToVideoImageDataUrl(blob))
   }
-  // 3 张槽：只应是本镜配图。缺槽时复用同一张分镜图，不要填人设/空镜。
-  const [img1, img2, img3] = [
-    dataUrls[0],
-    dataUrls[1] ?? dataUrls[0],
-    dataUrls[2] ?? dataUrls[0]
-  ]
+  const referencePayloadMb = dataUrls.reduce((sum, value) => sum + value.length, 0) / 1024 / 1024
+  onProgress?.(`参考图已准备：${dataUrls.length} 张 / 约 ${referencePayloadMb.toFixed(1)} MB`)
+  const imageValues: Record<string, string | null> = {}
+  bindings.imageKeys.forEach((key, index) => {
+    imageValues[key] = dataUrls[index] ?? null
+  })
 
   // 3) 尺寸 clamp：宽高都不能超过 2048（workflow 限制）
   const MAX_DIM = 2048
@@ -263,38 +350,42 @@ async function realWorkflowVideo(
     )
   }
 
+  // 付费请求前做确定性检查：制作说明不得混入中文引号，只有清洗后的原词可被朗读。
+  const finalPrompt = buildPrompt(input)
+  const expectedDialogue = input.voiceMode === 'none' ? '' : input.voiceover
+  assertValidH3Prompt(finalPrompt, expectedDialogue)
+  onProgress?.('H3 提示词自检通过')
+
   // 2) 提交任务
   onProgress?.('提交生成任务...')
-  const submitResp = await fetch(`${baseUrl}/api/workflow/generate`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
-    },
-    body: JSON.stringify({
-      workflow_id: workflowId,
-      input_values: {
-        '137:image': img1,
-        '139:image': img2,
-        '141:image': img3,
-        '92:filename_prefix': 'ai-cut',
-        '92:format': 'auto',
-        '92:codec': 'auto',
-        '145:预设分辨率': '自定义',
-        '145:批量大小': 1,
-        '145:自定义宽': width,
-        '145:自定义高': height,
-        '146:prompt': buildPrompt(input),
-        '147:value': targetDuration,
-        '154:strength_model': input.strength ?? 0.75
-      }
-    }),
-    signal: input.signal
-  })
+  let submitResp: Response
+  try {
+    submitResp = await fetch(`${baseUrl}/api/workflow/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        workflow_id: workflowId,
+        input_values: {
+          ...imageValues,
+          [bindings.promptKey]: finalPrompt,
+          [bindings.durationKey]: targetDuration,
+          ...bindings.extras(width, height, 'ai-cut', input.strength ?? 0.75)
+        }
+      }),
+      signal: input.signal
+    })
+  } catch (error: any) {
+    throw new Error(`[video] 无法连接生成服务：${error?.message || String(error)}（参考图约 ${referencePayloadMb.toFixed(1)} MB）`)
+  }
 
   if (!submitResp.ok) {
+    const body = await submitResp.text()
+    const hint = submitResp.status === 413 ? '；请求体过大，请降低参考图尺寸或检查代理上传限制' : ''
     throw new Error(
-      `[video] 任务提交失败 ${submitResp.status} ${await submitResp.text()}`
+      `[video] 任务提交失败 ${submitResp.status}${hint}：${body.slice(0, 1200)}`
     )
   }
   const submitData = await submitResp.json()
@@ -401,7 +492,7 @@ async function realWorkflowVideo(
       return {
         blob,
         mimeType: blob.type || 'video/mp4',
-        prompt: buildPrompt(input),
+        prompt: finalPrompt,
         duration: input.duration
       }
     }
@@ -442,7 +533,7 @@ async function realWorkflowVideo(
       return {
         blob,
         mimeType: blob.type || 'video/mp4',
-        prompt: buildPrompt(input),
+        prompt: finalPrompt,
         duration: input.duration
       }
     }
@@ -466,9 +557,8 @@ async function realWorkflowVideo(
 
 /** 拼最终喂给 ComfyUI / MiniMax H3 的视频提示词（页面预览 / 实际生成共用）
  *
- * 场景叙事：两段中文（从第一帧接着演。画面中谁是谁 + 连续演戏）。
- * 格式化：Aesthetic → [SHOT 1] → Duration → Camera Motion →
- * Visual Prompt → overall_soundscape（英文环境音）→ non_diegetic_music。
+ * 按 H3 官方 I2VA 编译：首帧对齐句 + integrated_multimodal_description +
+ * overall_soundscape + non_diegetic_music。
  */
 export function composeVideoPrompt(input: VideoGenInput): string {
   return buildPrompt(input)
@@ -482,6 +572,14 @@ function buildPrompt(input: VideoGenInput): string {
     voiceover: input.voiceover,
     voiceMode: input.voiceMode,
     speakerHint: input.speakerHint,
+    speakerName: input.speakerName,
+    sceneName: input.sceneName,
+    sceneDescription: input.sceneDescription,
+    sceneLighting: input.sceneLighting,
+    sceneAnchor: input.sceneAnchor,
+    shotTitle: input.shotTitle,
+    imageAssignments: input.imageAssignments,
+    onScreenNames: input.onScreenNames,
     duration: input.duration,
     width: input.width,
     height: input.height,
@@ -499,7 +597,7 @@ export async function generateVideo(
   const mode = getAIMode()
   if (mode === 'real') {
     if (!input.imageBlob) {
-      throw new Error('[video] 真实模式需要分镜配图作为输入')
+      throw new Error('[video] 真实模式需要角色设计图、场景图和故事看板作为参考输入')
     }
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
     return await realWorkflowVideo(input, onProgress)

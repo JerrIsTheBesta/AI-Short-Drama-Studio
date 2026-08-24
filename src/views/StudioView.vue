@@ -29,7 +29,9 @@ const rightOpen = ref(false)
 const nodeTypes = {
   script: ScriptDocNode,
   subject: PipelineNode,
+  subjectProps: PipelineNode,
   scene: PipelineNode,
+  shotBoard: PipelineNode,
   shotImage: PipelineNode,
   shotVideo: PipelineNode,
   audio: AudioNode,

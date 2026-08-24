@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref } from 'vue'
 import { runAgentTurn, type AgentEvent, type AgentMessage } from '@/services/canvas/agent'
+import { friendlyAiError, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
 import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/canvas/taskStore'
 import { estimateRequestText } from '@/services/canvas/toolRegistry'
-import { useSettingsStore } from '@/stores'
+import { onCanvasActivity, type CanvasActivity } from '@/services/canvas/canvasBridge'
+import { nextPipelineStep } from '@/services/canvas/pipeline'
+import { useProjectStore, useSettingsStore } from '@/stores'
 import { llmModelGroups } from '@/stores/settings'
 import type { AgentAutonomy } from '@/types'
 
@@ -26,7 +29,7 @@ const feed = ref<FeedItem[]>([
     type: 'msg',
     role: 'assistant',
     content:
-      '跟我说你要拍什么。需求不清楚我会先问。拆完剧本会写到画布左侧，每一步做完问你要不要继续。说「全流程」才自动跑完。'
+      '跟我说你要拍什么。剧本写完后先拆人物，再拆场景，再拆分镜，每步做完会停下来。右侧点生成时，这边也会同步进度；失败了会告诉你原因。说「全流程」才自动跑完。'
   }
 ])
 const messages = computed<AgentMessage[]>(() =>
@@ -47,6 +50,10 @@ const box = ref<HTMLElement | null>(null)
 const autonomy = ref<AgentAutonomy>('gated')
 const modeOpen = ref(false)
 const modelOpen = ref(false)
+const canvasLive = ref(false)
+const canvasTrace = ref<TraceRow[]>([])
+const project = useProjectStore()
+let offActivity: (() => void) | undefined
 const hoverMode = ref<AgentAutonomy | null>(null)
 const settings = useSettingsStore()
 let controller: AbortController | null = null
@@ -60,7 +67,7 @@ const MODES: { id: AgentAutonomy; label: string; desc: string }[] = [
   {
     id: 'gated',
     label: '关键确认',
-    desc: '能连续做几步，但写完剧本、提炼节点、验收这些关键点会停下来问你。'
+    desc: '能连续做几步，但写完剧本、拆人物/场景/分镜、验收这些关键点会停下来问你。'
   },
   {
     id: 'autopilot',
@@ -88,9 +95,12 @@ const activeLlmLabel = computed(() => {
 
 const estimate = computed(() => estimateRequestText(input.value))
 const statusText = computed(() => {
-  if (!busy.value) return currentMode.value.label
-  if (thinking.value) return '思考中'
-  return log.value || '执行中'
+  if (busy.value) {
+    if (thinking.value) return '思考中'
+    return log.value || '执行中'
+  }
+  if (canvasLive.value) return log.value || '画布生成中'
+  return currentMode.value.label
 })
 
 onMounted(() => {
@@ -107,10 +117,12 @@ onMounted(() => {
       }))
   }
   window.addEventListener('pointerdown', onDocPointer, true)
+  offActivity = onCanvasActivity(applyCanvasActivity)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onDocPointer, true)
+  offActivity?.()
 })
 
 function onDocPointer(ev: PointerEvent) {
@@ -144,6 +156,15 @@ function upsertStep(key: string, patch: Partial<TraceRow>) {
     trace.value[i] = { ...trace.value[i], ...patch }
   } else {
     trace.value = [...trace.value, { key, kind: 'step', label: patch.label || key, ...patch }]
+  }
+}
+
+function upsertCanvasStep(key: string, patch: Partial<TraceRow>) {
+  const i = canvasTrace.value.findIndex((s) => s.key === key)
+  if (i >= 0) {
+    canvasTrace.value[i] = { ...canvasTrace.value[i], ...patch }
+  } else {
+    canvasTrace.value = [...canvasTrace.value, { key, kind: 'step', label: patch.label || key, ...patch }]
   }
 }
 
@@ -181,6 +202,57 @@ function onProgress(ev: AgentEvent) {
   void scrollToEnd()
 }
 
+function applyCanvasActivity(ev: CanvasActivity) {
+  if (ev.source === 'agent' && busy.value) return
+  canvasLive.value = true
+  if (!busy.value) log.value = ev.message || ev.label
+  upsertCanvasStep(ev.nodeId, {
+    kind: 'step',
+    label: ev.label,
+    status: ev.kind === 'done' ? 'done' : ev.kind === 'error' ? 'fail' : 'running',
+    detail: ev.message
+  })
+  if (ev.kind === 'done' || ev.kind === 'error') {
+    void finishCanvasRun(ev)
+  }
+  void scrollToEnd()
+}
+
+async function finishCanvasRun(ev: CanvasActivity) {
+  const stillRunning = canvasTrace.value.some(
+    (row) => row.kind === 'step' && row.status === 'running' && row.key !== ev.nodeId
+  )
+  if (stillRunning) return
+  if (canvasTrace.value.length) {
+    feed.value.push({
+      id: `canvas-${Date.now()}`,
+      type: 'run',
+      rows: canvasTrace.value.map((row) => ({ ...row }))
+    })
+  }
+  const next = nextPipelineStep(project.current)
+  const content =
+    ev.kind === 'error'
+      ? `画布上的「${ev.label}」失败了。\n原因：${ev.message || '未知错误'}\n可以改提示词后在右侧重试，或回「继续」走别的步骤。`
+      : `画布上的「${ev.label}」已完成。${ev.message ? `\n${ev.message}` : ''}\n${
+          next ? `下一步是「${next.label}」。回「继续」只做这一步。` : '这条流水线目前齐了。'
+        }`
+  feed.value.push({ id: `a-${Date.now()}`, type: 'msg', role: 'assistant', content })
+  await appendAgentMessage('assistant', content)
+  if (!busy.value) {
+    chips.value = next
+      ? [
+          { label: `继续：${next.label}`, text: '继续' },
+          { label: '先看看', text: '先看看' }
+        ]
+      : []
+  }
+  canvasLive.value = false
+  canvasTrace.value = []
+  if (!busy.value) log.value = ''
+  await scrollToEnd()
+}
+
 async function sendText(text: string) {
   const t = text.trim()
   if (!t || busy.value) return
@@ -211,9 +283,10 @@ async function sendText(text: string) {
     chips.value = result.chips
   } catch (e: any) {
     thinking.value = false
-    const content = turnController.signal.aborted
+    const cancelled = turnController.signal.aborted || (isAbortError(e) && !isTimeoutAbort(e))
+    const content = cancelled
       ? '已停止。已完成的产物会保留，未开始的步骤不会继续。'
-      : '失败：' + (e.message || e)
+      : '失败：' + friendlyAiError(e)
     feed.value.push({ id: `a-${Date.now()}`, type: 'msg', role: 'assistant', content })
     await appendAgentMessage('assistant', content)
   } finally {
@@ -239,7 +312,7 @@ async function send() {
   <aside class="agent">
     <header class="head">
       <strong>智能体</strong>
-      <span :class="{ live: busy }">{{ statusText }}</span>
+      <span :class="{ live: busy || canvasLive }">{{ statusText }}</span>
     </header>
 
     <div ref="box" class="msgs">
@@ -264,6 +337,22 @@ async function send() {
         </div>
       </template>
 
+      <div v-if="canvasLive && canvasTrace.length" class="turn live">
+        <ol class="trace">
+          <li
+            v-for="s in canvasTrace"
+            :key="'c-' + s.key"
+            :class="[s.kind, s.status]"
+          >
+            <i />
+            <div>
+              <p>{{ s.label }}</p>
+              <small v-if="s.detail">{{ s.detail }}</small>
+            </div>
+          </li>
+        </ol>
+      </div>
+
       <div v-if="busy" class="turn live">
         <div v-if="thinking" class="think">
           <i class="dots" />
@@ -285,7 +374,7 @@ async function send() {
       </div>
     </div>
 
-    <div v-if="chips.length && !busy" class="chips">
+    <div v-if="chips.length && !busy && !canvasLive" class="chips">
       <button v-for="c in chips" :key="c.text + c.label" type="button" @click="sendText(c.text)">
         {{ c.label }}
       </button>

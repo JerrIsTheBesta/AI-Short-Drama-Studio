@@ -7,6 +7,7 @@ import characterRaw from './character-consistency.md?raw'
 import pipelineRaw from './pipeline-batch.md?raw'
 import qaRaw from './qa-verify.md?raw'
 import shotImageRaw from './shot-image.md?raw'
+import storyboardPanelRaw from './storyboard-panel.md?raw'
 import shotVideoRaw from './shot-video.md?raw'
 import storyboardRaw from './storyboard-director.md?raw'
 import h3PromptRaw from './h3-prompt-writing.md?raw'
@@ -76,6 +77,7 @@ export const ALL_SKILLS: Skill[] = [
   toSkill(pipelineRaw),
   toSkill(storyboardRaw),
   toSkill(characterRaw),
+  toSkill(storyboardPanelRaw),
   toSkill(shotImageRaw),
   toSkill(shotVideoRaw),
   toSkill(h3PromptRaw),
@@ -112,7 +114,7 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
     if (triggeredByText(skill, text)) add(skill.id)
   }
 
-  if (/拆分镜|拆镜|故事板|出分镜|生成分镜/.test(text)) {
+  if (/拆分镜|拆镜|故事板|出分镜|生成分镜|续写|接着写/.test(text)) {
     add('storyboard-director')
   }
   if (
@@ -120,8 +122,13 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   ) {
     add('character-consistency')
   }
+  if (/故事看板|看板图|线稿/.test(text)) {
+    add('storyboard-panel')
+    add('character-consistency')
+  }
   if (/配图|出图|关键帧|画面|第.+镜/.test(text)) {
     add('shot-image')
+    add('storyboard-panel')
     add('character-consistency')
   }
   if (/视频|图生视频|运镜|Comfy|H3|配音/.test(text)) {
@@ -135,6 +142,7 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
     add('pipeline-batch')
     if (!ctx.hasShots) add('storyboard-director')
     add('character-consistency')
+    add('storyboard-panel')
     add('shot-image')
     add('shot-video')
     add('h3-prompt-writing')
@@ -145,7 +153,7 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   const list = [...picked.values()].sort(
     (a, b) => order.indexOf(a.id) - order.indexOf(b.id)
   )
-  return list.slice(0, 6)
+  return list.slice(0, 7)
 }
 
 export function catalogPrompt(): string {

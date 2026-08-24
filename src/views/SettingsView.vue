@@ -203,7 +203,7 @@ const tab = ref<SettingsTab>('llm')
     </nav>
 
     <GlassCard v-if="tab !== 'system'" padding="lg">
-      <StudioSettings :module="tab === 'system' ? 'llm' : tab" />
+      <StudioSettings :module="tab" />
     </GlassCard>
 
     <div v-else class="sys-grid">

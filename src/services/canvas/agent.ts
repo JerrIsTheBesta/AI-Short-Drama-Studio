@@ -2,6 +2,7 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
+import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
 import { runAgentLoop } from './agentLoop'
@@ -62,25 +63,33 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
 3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本（不创建人物/场景/分镜节点）；用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
-4. 每做完一步，say 里问要不要继续下一步。用户说「继续」才走下一步。
-5. 没说「全流程 / 全部做完」禁止一次把人设+配图+视频全做完。
-6. 分镜节点未验收时禁止配图/视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
-7. 一次最多 8 个 actions。
+3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。
+4. 已有完整剧本时：
+   - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
+   - 用户明确说「重新写剧本」，或在讲一个和当前剧本无关的新故事（新题材、新人物、新画风）→ 必须先 seed_script（text=用户这几轮的故事原文，含画风时长题材人物），再 generate_play。禁止 continue_play，禁止拿旧剧本当草稿。
+5. 每做完一步，say 里问要不要继续下一步。用户说「继续」才走下一步。用户说「续写」不是流水线的「继续」。
+6. 没说「全流程 / 全部做完」禁止一次把人设+场景宫格+故事看板+视频全做完。出视频只传角色设计图、场景图和本镜故事看板，禁止传人物+场景配图。
+7. 分镜节点未验收时禁止生成故事看板或视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
+8. 一次最多 8 个 actions。
 
 可用工具：
-{ "tool": "seed_script", "text": "用户原文" }
-{ "tool": "generate_play" }
+{ "tool": "seed_script", "text": "用户这几轮的故事原文，必须完整" }
+{ "tool": "generate_play", "text": "可选，与 seed_script 相同的故事原文" }
+{ "tool": "continue_play", "text": "续写方向，可选。例如再写两场、写父亲回家之后" }
 { "tool": "extract_cast" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
-{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "配图静帧词，可选", "imagePrompt": "可选", "videoPrompt": "场景叙事：从第一帧接着演。画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
+{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "看板画面与动作，可选", "videoPrompt": "场景叙事：画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
+{ "tool": "generate_prop_sheet", "subjectId": "sub_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
-{ "tool": "generate_shot_image", "shotId": "shot_xxx" }
+{ "tool": "generate_shot_board", "shotId": "shot_xxx" }
 { "tool": "generate_video", "shotId": "shot_xxx" }
 { "tool": "generate_audio", "shotId": "shot_xxx" }
 { "tool": "generate_all_sheets" }
+{ "tool": "generate_all_prop_sheets" }
 { "tool": "generate_all_scenes" }
+{ "tool": "generate_all_boards" }
 { "tool": "generate_all_images" }
 { "tool": "generate_all_videos" }
 { "tool": "generate_all_audio" }
@@ -110,9 +119,9 @@ function skillSelectContext(userText: string) {
   return {
     userText,
     hasShots: shots.length > 0,
-    missingSheets: subjects.some((s) => !s.designSheetAssetId),
+    missingSheets: subjects.some((s) => !s.designSheetAssetId || !s.propSheetAssetId),
     missingPlates: scenes.some((s) => !s.plateAssetId),
-    missingImages: shots.some((s) => !s.imageAssetId),
+    missingImages: shots.some((s) => !s.boardAssetId),
     missingVideos: shots.some((s) => !s.videoAssetId)
   }
 }
@@ -124,10 +133,10 @@ function qaNotes(p: Project): string {
   if (noSheet.length) issues.push(`没人设：${noSheet.map((s) => s.name).join('、')}`)
   const noPlate = (p.scenes ?? []).filter((s) => !s.plateAssetId)
   if (noPlate.length) issues.push(`没底板：${noPlate.map((s) => s.name).join('、')}`)
-  const noImg = p.shots.filter((s) => !s.imageAssetId)
-  if (noImg.length) issues.push(`${noImg.length} 镜还没配图`)
-  const noVid = p.shots.filter((s) => s.imageAssetId && !s.videoAssetId)
-  if (noVid.length) issues.push(`${noVid.length} 镜有图没视频`)
+  const noImg = p.shots.filter((s) => !s.boardAssetId)
+  if (noImg.length) issues.push(`${noImg.length} 镜还没故事看板`)
+  const noVid = p.shots.filter((s) => s.boardAssetId && !s.videoAssetId)
+  if (noVid.length) issues.push(`${noVid.length} 镜有看板没视频`)
   const unbound = p.shots.filter((s) => !s.sceneId || !(s.subjectIds && s.subjectIds.length))
   if (unbound.length) issues.push(`${unbound.length} 镜没绑人物或场景`)
   if (!issues.length) return '清单过了一遍，目前能往下剪。'
@@ -200,7 +209,13 @@ export async function runAgentTurn(
       chips: nextChips(n)
     }
   }
-  if (isVagueRequest(userText, p0) && !wantAll(userText) && !isContinueRequest(userText) && !isApprovePlayRequest(userText)) {
+  if (
+    isVagueRequest(userText, p0) &&
+    !wantAll(userText) &&
+    !isContinueRequest(userText) &&
+    !isApprovePlayRequest(userText) &&
+    !isNewStoryBrief(userText, p0)
+  ) {
     onEvent({ kind: 'log', label: '需求不够清楚，先问你几句' })
     return { reply: clarifyMessage(p0), results: [], chips: clarifyChips(p0) }
   }
@@ -223,7 +238,7 @@ export async function runAgentTurn(
         { role: 'system', content: `${TOOLS_HINT}\n\n${skillPack.prompt}` },
         {
           role: 'user',
-          content: `当前项目完整上下文：\n${projectContextPrompt(userText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。需求含糊就提问，不要瞎做。只修改用户点名的范围。`
+          content: `当前项目完整上下文：\n${projectContextPrompt(userText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。若用户在讲一个和当前剧本无关的新故事，不要沿用旧剧本。需求含糊就提问，不要瞎做。只修改用户点名的范围。`
         },
         ...chat
       ],
@@ -235,12 +250,15 @@ export async function runAgentTurn(
     })
     plan = parseAgentJson(resp.content)
     plan.actions = applyPlayGate(
-      dedupeActions(sanitizeActions(plan.actions, userText)),
+      dedupeActions(alignNewStoryActions(sanitizeActions(plan.actions, userText), userText, history)),
       userText
     )
   } else {
     plan = heuristicPlan(userText)
-    plan.actions = applyPlayGate(dedupeActions(plan.actions), userText)
+    plan.actions = applyPlayGate(
+      dedupeActions(alignNewStoryActions(plan.actions, userText, history)),
+      userText
+    )
   }
 
   const gated =
@@ -249,7 +267,7 @@ export async function runAgentTurn(
     !isApprovePlayRequest(userText) &&
     !isContinueRequest(userText) &&
     !plan.actions.some(
-      (a) => a.tool === 'generate_storyboard' || a.tool === 'generate_play' || a.tool === 'seed_script'
+      (a) => a.tool === 'generate_storyboard' || a.tool === 'generate_play' || a.tool === 'continue_play' || a.tool === 'seed_script'
     )
   if (gated && !plan.actions.length) {
     plan.say = PLAY_GATE_MSG
@@ -274,7 +292,7 @@ export async function runAgentTurn(
             messages: [
               {
                 role: 'system',
-                content: `${TOOLS_HINT}\n\n你正在做失败恢复。只输出 JSON。不要重复已经成功的工具；不要用相同参数盲目重试鉴权或输入错误。最多给 4 个替代 actions。`
+                content: `${TOOLS_HINT}\n\n你正在做失败恢复。只输出 JSON。先根据错误、已完成步骤和最新项目状态判断根因属于：缺少上游产物、输入不合法、产物验收失败、临时服务错误，还是鉴权/额度/用户权限问题。\n- 缺上游：先补最小依赖，再让原目标继续。\n- 输入或产物质量问题：只修改有问题的局部节点，再重试目标。\n- 临时服务错误：允许一次同目标重试。\n- 鉴权、额度、内容安全或必须由用户决定的问题：actions 返回空，不得绕过。\n不要重复已经成功的工具，不要扩大用户授权范围，不要重做无关产物。最多给 4 个修复 actions；AgentLoop 会在修复动作后自动重新验收原目标。`
               },
               {
                 role: 'user',
@@ -289,7 +307,7 @@ export async function runAgentTurn(
           })
           const repaired = parseAgentJson(response.content)
           return applyPlayGate(
-            dedupeActions(sanitizeActions(repaired.actions, userText)),
+            dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, userText), userText, history)),
             userText
           ).slice(0, 4)
         }
@@ -298,7 +316,11 @@ export async function runAgentTurn(
   const results = loop.results
 
   if (project.current) {
-    project.setCanvas(rebuildCanvasGraph(project.current, true))
+    try {
+      project.setCanvas(rebuildCanvasGraph(project.current, true))
+    } catch {
+      project.setCanvas(rebuildCanvasGraph(project.current, false))
+    }
     await project.save()
   }
 
@@ -385,12 +407,13 @@ function wrapUpReply(
   const p = useProjectStore().current
   const fail = results.filter((r) => !r.ok)
   const failLine = fail.length
-    ? `\n失败 ${fail.length} 项：${fail.map((f) => TOOL_LABEL[f.tool] || f.tool).join('；')}`
+    ? `\n失败 ${fail.length} 项：${fail.map((f) => `${TOOL_LABEL[f.tool] || f.tool}：${f.detail}`).join('；')}`
     : ''
   const all = wantAll(userText)
   const didPlay = results.some(
     (r) => r.ok && (r.tool === 'generate_play' || r.tool === 'generate_storyboard')
   )
+  const didContinue = results.some((r) => r.ok && r.tool === 'continue_play')
   const didBoard = results.some((r) => r.ok && r.tool === 'extract_cast')
   const didApprove = results.some((r) => r.ok && r.tool === 'approve_play')
   const didCast = results.some(
@@ -407,11 +430,31 @@ function wrapUpReply(
       chips: nextChips(next)
     }
   }
+  if (didContinue) {
+    const hasShots = Boolean(p?.shots.length)
+    return {
+      reply: hasShots
+        ? `已经顺着当前剧后续写，原场次保留。\n新场还没进画布节点。回「重新提炼节点」把新场拆出来；或者说「继续」走下一步。${failLine}`
+        : `已经顺着当前剧后续写，原场次保留。\n看完可再改字，回「继续」先拆人物（不会同时拆场景和分镜）。${failLine}`,
+      chips: hasShots
+        ? [
+            { label: '重新提炼节点', text: '重新提炼节点' },
+            { label: '再续写', text: '续写剧本' },
+            { label: '先看看', text: '先看看' }
+          ]
+        : [
+            { label: '先拆人物', text: '继续' },
+            { label: '再续写', text: '续写剧本' },
+            { label: '先看看', text: '先看看' }
+          ]
+    }
+  }
   if (didPlay && !(p?.shots.length)) {
     return {
-      reply: `完整剧本已经写到画布左侧了（还没拆节点）。\n看完可改字，再回「继续」提炼人物、场景、分镜；说「全流程」会自动跑完。${failLine}`,
+      reply: `完整剧本已经写到画布左侧了（还没拆节点）。\n看完可改字，再回「继续」只拆人物；场景和分镜要再各走一步。说「全流程」会自动跑完。${failLine}`,
       chips: [
-        { label: '提炼节点', text: '继续' },
+        { label: '先拆人物', text: '继续' },
+        { label: '续写', text: '续写剧本' },
         { label: '先看看', text: '先看看' },
         { label: '全流程', text: '全流程跑完' }
       ]
@@ -419,8 +462,28 @@ function wrapUpReply(
   }
   if (didBoard) {
     const n = p?.shots.length ?? 0
+    const subjectCount = p?.subjects?.length ?? 0
+    const sceneCount = p?.scenes?.length ?? 0
+    if (!n && !sceneCount) {
+      return {
+        reply: `第 1 步完成：已提炼并保存 ${subjectCount} 个角色。没有同时运行场景和分镜。\n确认人物没问题后，回「继续」再单独提炼场景。${failLine}`,
+        chips: [
+          { label: '继续提炼场景', text: '继续' },
+          { label: '先检查人物', text: '先看看人物' }
+        ]
+      }
+    }
+    if (!n) {
+      return {
+        reply: `第 2 步完成：已保留 ${subjectCount} 个角色，并保存 ${sceneCount} 个场景。\n确认场景没问题后，回「继续」再单独拆分镜。${failLine}`,
+        chips: [
+          { label: '继续拆分镜', text: '继续' },
+          { label: '先检查场景', text: '先看看场景' }
+        ]
+      }
+    }
     return {
-      reply: `已从剧本提炼出节点：${n} 个分镜。请先看一遍。\n看完回「继续」做人设和场景；说「全流程」会自动跑完。${failLine}`,
+      reply: `第 3 步完成：已拆出 ${n} 个分镜，并与现有角色和场景绑定。请先看一遍。\n看完回「继续」做人设和场景；说「全流程」会自动跑完。${failLine}`,
       chips: reviewChips()
     }
   }
@@ -441,7 +504,7 @@ function wrapUpReply(
   if (didImg && !didVid) {
     const next = nextPipelineStep(p)
     return {
-      reply: continueQuestion(next, '分镜配图已经铺到画布上了。\n') + failLine,
+      reply: continueQuestion(next, '六格故事看板已经铺到画布上了。\n') + failLine,
       chips: nextChips(next)
     }
   }
@@ -463,12 +526,37 @@ function wrapUpReply(
 }
 
 /** 演示模式 / 模型跑偏时：砍掉用户没点名的动作 */
+function alignNewStoryActions(
+  actions: any[],
+  userText: string,
+  history: AgentMessage[]
+): any[] {
+  const p = useProjectStore().current
+  if (!isNewStoryBrief(userText, p)) return actions
+  const brief = collectStoryBrief(history, userText)
+  const triedWrite = actions.some((a) =>
+    ['generate_play', 'continue_play', 'seed_script', 'generate_storyboard'].includes(String(a.tool))
+  )
+  const detailed = brief.length >= 36 || /女主|男主|人物|修仙|炼丹|场景|对白|热梗/.test(brief)
+  if (!triedWrite && !detailed) return actions
+  const out = actions.filter((a) => a.tool !== 'continue_play' && a.tool !== 'extract_cast')
+  const seed = out.find((a) => a.tool === 'seed_script')
+  if (seed) seed.text = brief
+  else out.unshift({ tool: 'seed_script', text: brief })
+  const gen = out.find((a) => a.tool === 'generate_play' || a.tool === 'generate_storyboard')
+  if (gen) gen.text = brief
+  else out.push({ tool: 'generate_play', text: brief })
+  return out
+}
+
 function sanitizeActions(actions: any[], userText: string): any[] {
   const all = wantAll(userText)
   const t = userText
-  const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本/.test(t)
-  const askedSheet = /人设|角色图/.test(t)
+  const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本|续写|接着写|再写/.test(t)
+  const askedSheet = /人设|角色图|四视图/.test(t)
+  const askedProp = /资产图/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
+  const askedPanel = /故事看板|看板图|线稿分镜/.test(t)
   const askedImage = /配图|出图|关键帧|画面/.test(t)
   const askedVideo = /视频|图生视频/.test(t)
   const askedAudio = /口播|配音|语音/.test(t)
@@ -480,15 +568,19 @@ function sanitizeActions(actions: any[], userText: string): any[] {
     if (tool === 'focus_node') return true
     if (tool === 'approve_play') return true
     if (tool === 'generate_all_sheets') return askedSheet || all
+    if (tool === 'generate_all_prop_sheets') return askedProp || askedSheet || all
     if (tool === 'generate_all_scenes') return askedScene || all
+    if (tool === 'generate_all_boards') return askedPanel || all
     if (tool === 'generate_all_images') return askedImage || all
     if (tool === 'generate_all_videos') return askedVideo || all
     if (tool === 'generate_all_audio') return askedAudio || all
-    if (tool === 'generate_storyboard' || tool === 'extract_cast' || tool === 'generate_play') {
-      return askedBoard || all
+    if (tool === 'generate_storyboard' || tool === 'extract_cast' || tool === 'generate_play' || tool === 'continue_play') {
+      return askedBoard || all || isNewStoryBrief(t, useProjectStore().current)
     }
     if (tool === 'generate_sheet') return askedSheet || all
+    if (tool === 'generate_prop_sheet') return askedProp || askedSheet || all
     if (tool === 'generate_scene') return askedScene || all
+    if (tool === 'generate_shot_board') return askedPanel || shotHit || all
     if (tool === 'generate_shot_image') return askedImage || shotHit || all
     if (tool === 'generate_video') return askedVideo || all
     if (tool === 'generate_audio') return askedAudio || all
@@ -511,7 +603,12 @@ function applyPlayGate(actions: any[], userText: string): any[] {
   const p = useProjectStore().current
   if (all) {
     const out = [...actions]
-    const hasBoard = out.some((a) => a.tool === 'generate_storyboard' || a.tool === 'extract_cast')
+    const hasBoard = out.some(
+      (a) =>
+        a.tool === 'generate_storyboard' ||
+        a.tool === 'extract_cast' ||
+        a.tool === 'continue_play'
+    )
     const hasApprove = out.some((a) => a.tool === 'approve_play')
     if (!hasApprove) {
       const idx = out.findIndex((a) => a.tool === 'generate_storyboard' || a.tool === 'extract_cast')
@@ -530,6 +627,7 @@ function applyPlayGate(actions: any[], userText: string): any[] {
     (a) =>
       a.tool === 'generate_storyboard' ||
       a.tool === 'generate_play' ||
+      a.tool === 'continue_play' ||
       a.tool === 'extract_cast' ||
       a.tool === 'seed_script'
   )
@@ -538,13 +636,14 @@ function applyPlayGate(actions: any[], userText: string): any[] {
       (a) =>
         a.tool === 'generate_storyboard' ||
         a.tool === 'generate_play' ||
+        a.tool === 'continue_play' ||
         a.tool === 'extract_cast' ||
         a.tool === 'seed_script' ||
         a.tool === 'sync_canvas' ||
         a.tool === 'focus_node'
     )
     const writingPlay = kept.some(
-      (a) => a.tool === 'generate_play' || a.tool === 'generate_storyboard'
+      (a) => a.tool === 'generate_play' || a.tool === 'generate_storyboard' || a.tool === 'continue_play'
     )
     // 非全流程：写剧本和提炼拆开，同一轮只写剧本
     if (writingPlay) {
@@ -568,29 +667,39 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   const namedScns = (p.scenes ?? []).filter((s) => s.name && t.includes(s.name))
 
   const askedExtract = /提炼节点|提炼人物|提炼场景|拆节点|出节点/.test(t)
-  const askedPlay = /写剧本|完整剧本|重新写剧本/.test(t)
+  const askedContinuePlay = /续写|接着写|再写[一两三四\d]*场|加一场|往后写|续一[场段]|写下去/.test(t)
+  const askedPlay = /写剧本|完整剧本|重新写剧本/.test(t) && !askedContinuePlay
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|拆剧本/.test(t)
-  const askedSheet = /人设|角色图/.test(t)
+  const askedSheet = /人设|角色图|四视图/.test(t)
+  const askedProp = /资产图/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
+  const askedPanel = /故事看板|看板图|线稿分镜/.test(t)
   const askedImage = /配图|出图|关键帧|把图画上|缺的图/.test(t)
   const askedVideo = /图生视频|生成视频|出视频/.test(t) || /第.+镜.*视频/.test(t)
   const askedAudio = /口播|配音|语音/.test(t)
   const looksLikeBrief =
     t.length >= 16 &&
     !askedSheet &&
+    !askedProp &&
     !askedImage &&
     !askedVideo &&
     !askedScene &&
     !p.shots.length &&
     !p.script?.playReady
   const playReady = Boolean(p.script?.playReady && p.script.content?.trim())
+  const newStory = isNewStoryBrief(t, p)
 
-  if (!p.script?.content?.trim() && (askedBoard || askedPlay || looksLikeBrief || all)) {
+  if (newStory) {
+    actions.push({ tool: 'seed_script', text: t })
+    actions.push({ tool: 'generate_play', text: t })
+  } else if (!p.script?.content?.trim() && (askedBoard || askedPlay || looksLikeBrief || all)) {
     actions.push({ tool: 'seed_script', text: t })
   }
-  if (askedExtract || (askedBoard && playReady && !p.shots.length)) {
+  if (!newStory && askedContinuePlay && playReady) {
+    actions.push({ tool: 'continue_play', text: t })
+  } else if (!newStory && (askedExtract || (askedBoard && playReady && !p.shots.length))) {
     actions.push({ tool: 'extract_cast' })
-  } else if (askedPlay || askedBoard || looksLikeBrief) {
+  } else if (!newStory && (askedPlay || askedBoard || looksLikeBrief)) {
     actions.push({ tool: 'generate_play' })
   }
 
@@ -598,6 +707,11 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     for (const s of namedSubs) actions.push({ tool: 'generate_sheet', subjectId: s.id })
   } else if (askedSheet) {
     actions.push({ tool: 'generate_all_sheets' })
+  }
+  if (namedSubs.length && askedProp && !askedSheet) {
+    for (const s of namedSubs) actions.push({ tool: 'generate_prop_sheet', subjectId: s.id })
+  } else if (askedProp && !askedSheet) {
+    actions.push({ tool: 'generate_all_prop_sheets' })
   }
 
   if (namedScns.length && askedScene) {
@@ -610,16 +724,19 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     for (const i of shotIdxs) {
       const shot = p.shots[i] ?? p.shots.find((s) => s.index === i)
       if (!shot) continue
-      if (askedVideo && !askedImage) {
+      if (askedVideo && !askedImage && !askedPanel) {
         actions.push({ tool: 'generate_video', shotId: shot.id })
-      } else if (askedAudio && !askedImage && !askedVideo) {
+      } else if (askedAudio && !askedImage && !askedVideo && !askedPanel) {
         actions.push({ tool: 'generate_audio', shotId: shot.id })
+      } else if (askedPanel && !askedImage) {
+        actions.push({ tool: 'generate_shot_board', shotId: shot.id })
       } else {
         actions.push({ tool: 'generate_shot_image', shotId: shot.id })
         if (askedVideo) actions.push({ tool: 'generate_video', shotId: shot.id })
       }
     }
   } else {
+    if (askedPanel) actions.push({ tool: 'generate_all_boards' })
     if (askedImage) actions.push({ tool: 'generate_all_images' })
     if (askedVideo) actions.push({ tool: 'generate_all_videos' })
     if (askedAudio) actions.push({ tool: 'generate_all_audio' })
@@ -635,11 +752,14 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     if (!actions.some((a) => a.tool === 'generate_all_sheets')) {
       actions.push({ tool: 'generate_all_sheets' })
     }
+    if (!actions.some((a) => a.tool === 'generate_all_prop_sheets')) {
+      actions.push({ tool: 'generate_all_prop_sheets' })
+    }
     if (!actions.some((a) => a.tool === 'generate_all_scenes')) {
       actions.push({ tool: 'generate_all_scenes' })
     }
-    if (!actions.some((a) => a.tool === 'generate_all_images')) {
-      actions.push({ tool: 'generate_all_images' })
+    if (!actions.some((a) => a.tool === 'generate_all_boards')) {
+      actions.push({ tool: 'generate_all_boards' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_videos')) {
       actions.push({ tool: 'generate_all_videos' })
@@ -654,12 +774,18 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
       }
     }
     return {
-      say: '你想让我做哪一步？可以说：写剧本、提炼节点、确认通过、出人设、第1镜配图。说「全流程」才会整条跑。',
+      say: '你想让我做哪一步？可以说：写剧本、续写、提炼节点、确认通过、出人设、第1镜配图。说「全流程」才会整条跑。',
       actions: []
     }
   }
+  if (newStory && !all) {
+    return { say: '按你这轮说的新故事重写剧本，不再沿用旧稿。', actions }
+  }
   if (askedExtract && !all) {
     return { say: '按完整剧本提炼人物、场景、分镜节点。', actions }
+  }
+  if (askedContinuePlay && !all) {
+    return { say: '顺着当前剧本往后加场，已有场次和台词不动。', actions }
   }
   if ((askedPlay || askedBoard || looksLikeBrief) && !all) {
     return { say: '先写完整剧本，还不拆节点。写完看左侧，回「继续」再提炼。', actions }

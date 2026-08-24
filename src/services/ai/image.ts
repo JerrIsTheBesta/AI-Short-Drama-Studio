@@ -246,7 +246,7 @@ function buildPrompt(input: ImageGenInput, withRefs: boolean): string {
       ? input.referenceLabels
           .map((l, i) => `图${i + 1}：${l}`)
           .join('；')
-      : '图1/图2 为人设多角度参考（脸型发型服装必须一致）；图3 为场景底板（地点光线必须一致）。'
+      : '图1/图2 为角色四视图（脸型发型服装必须一致）；图3 为场景四宫格锚点图（同一地点，不要把四格画进成片）。'
 
   return `${base}。参考说明：${labels}。人物面部、发型、体型、服装与场景必须严格与对应参考图一致。`
 }

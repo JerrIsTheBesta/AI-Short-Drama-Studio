@@ -7,6 +7,7 @@ import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, editableVideoPrompt, needsExternalTts, pushHistory, synthesizeVideoPerformance } from '@/utils/shot'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
+import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
@@ -29,6 +30,7 @@ const bgmPrompt = ref('')
 const bgmUrl = ref('')
 const generatingBgm = ref(false)
 const bgmError = ref('')
+const continueHint = ref('')
 
 const keepAmbientAudio = computed({
   get: () => project.current?.settings.keepAmbientAudio !== false,
@@ -90,7 +92,9 @@ const currentAssetId = computed(() => {
   const t = props.node?.type
   if (t === 'final') return project.current?.finalVideoAssetId
   if (t === 'subject') return subject.value?.designSheetAssetId
+  if (t === 'subjectProps') return subject.value?.propSheetAssetId
   if (t === 'scene') return scene.value?.plateAssetId
+  if (t === 'shotBoard') return shot.value?.boardAssetId
   if (t === 'shotImage') return shot.value?.imageAssetId
   if (t === 'shotVideo') return shot.value?.videoAssetId
   if (t === 'audio') return shot.value?.audioAssetId
@@ -112,8 +116,10 @@ const actionLabel = computed(() => {
   if (t === 'script') {
     return isPlayReady(project.current?.script) ? '重新写剧本' : '写剧本'
   }
-  if (t === 'subject') return again ? '重新生成人设图' : '生成人设图'
-  if (t === 'scene') return again ? '重新生成场景图' : '生成场景图'
+  if (t === 'subject') return again ? '重新生成四视图' : '生成四视图'
+  if (t === 'subjectProps') return again ? '重新生成资产图' : '生成资产图'
+  if (t === 'scene') return again ? '重新生成锚点图' : '生成锚点图'
+  if (t === 'shotBoard') return again ? '重新生成故事看板' : '生成故事看板'
   if (t === 'shotImage') return again ? '重新生成配图' : '生成配图'
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
   if (t === 'audio') {
@@ -124,9 +130,19 @@ const actionLabel = computed(() => {
   return again ? '重新生成' : '生成这个节点'
 })
 
+const extractLabel = computed(() =>
+  project.current?.shots.length
+    ? '重新提炼节点'
+    : !(project.current?.subjects?.length)
+      ? '第 1 步：提炼人物'
+      : !(project.current?.scenes?.length)
+        ? '第 2 步：提炼场景'
+        : '第 3 步：拆分镜'
+)
+
 const isImageNode = computed(() => {
   const t = props.node?.type
-  return t === 'subject' || t === 'scene' || t === 'shotImage'
+  return t === 'subject' || t === 'subjectProps' || t === 'scene' || t === 'shotBoard' || t === 'shotImage'
 })
 
 const canRun = computed(() => {
@@ -139,15 +155,19 @@ const canRun = computed(() => {
 })
 
 const previewAspect = computed(() => {
-  if (props.node?.type === 'subject') return cssAspectRatio('16:9')
+  if (props.node?.type === 'subject' || props.node?.type === 'subjectProps' || props.node?.type === 'scene') {
+    return cssAspectRatio('16:9')
+  }
   return cssAspectRatio(project.current?.settings.aspectRatio)
 })
 
 const kindLabel = computed(() => {
   const t = props.node?.type
   if (t === 'script') return '完整剧本'
-  if (t === 'subject') return '人物 · 人设图'
-  if (t === 'scene') return '场景 · 底板图'
+  if (t === 'subject') return '人物 · 四视图'
+  if (t === 'subjectProps') return '人物 · 资产图'
+  if (t === 'scene') return '场景 · 锚点图'
+  if (t === 'shotBoard') return '分镜 · 故事看板'
   if (t === 'shotImage') return '分镜 · 配图'
   if (t === 'shotVideo') {
     const d = shot.value?.duration
@@ -173,7 +193,9 @@ const title = computed(() => {
 const historyIds = computed(() => {
   const t = props.node?.type
   if (t === 'subject') return subject.value?.designSheetHistoryIds ?? []
+  if (t === 'subjectProps') return subject.value?.propSheetHistoryIds ?? []
   if (t === 'scene') return scene.value?.plateHistoryIds ?? []
+  if (t === 'shotBoard') return shot.value?.boardHistoryIds ?? []
   if (t === 'shotImage') return shot.value?.imageHistoryIds ?? []
   if (t === 'shotVideo') return shot.value?.videoHistoryIds ?? []
   return []
@@ -184,7 +206,7 @@ const videoPromptValue = computed(() => (shot.value ? editableVideoPrompt(shot.v
 const videoPromptPlaceholder = computed(() =>
   (settings.config.video.promptStyle || 'scene-narrative') === 'formatted'
     ? '每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。'
-    : '从第一帧接着演。画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
+    : '画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
 )
 
 async function refreshPreview() {
@@ -210,7 +232,18 @@ async function loadHistory() {
 async function restoreHistory(assetId: string) {
   const t = props.node?.type
   if (t === 'shotImage' && shot.value) project.assignShotImage(shot.value.id, assetId)
+  else if (t === 'shotBoard' && shot.value) project.assignShotBoard(shot.value.id, assetId)
   else if (t === 'shotVideo' && shot.value) project.assignShotVideo(shot.value.id, assetId)
+  else if (t === 'subjectProps' && subject.value) {
+    project.updateSubject(subject.value.id, {
+      propSheetAssetId: assetId,
+      propSheetHistoryIds: pushHistory(
+        subject.value.propSheetAssetId,
+        assetId,
+        subject.value.propSheetHistoryIds
+      )
+    })
+  }
   else if (t === 'subject' && subject.value) {
     project.updateSubject(subject.value.id, {
       designSheetAssetId: assetId,
@@ -323,13 +356,23 @@ async function run() {
     if (props.node.type === 'script') {
       await runScriptNode('play', undefined, undefined, llmModel.value)
     } else {
-      await runCanvasNode(props.node.id, () => {})
+      await runCanvasNode(props.node.id)
     }
     await refreshPreview()
     await loadHistory()
     toast.success(actionLabel.value + '完成')
   } catch (e: any) {
-    toast.error(e.message || '生成失败')
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e) || '生成失败')
+  }
+}
+
+async function runContinue() {
+  if (!props.node) return
+  try {
+    await runScriptNode('continue', undefined, undefined, llmModel.value, continueHint.value)
+    toast.success('已续写剧本')
+  } catch (e: any) {
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e) || '续写失败')
   }
 }
 
@@ -339,7 +382,7 @@ async function runExtract() {
     await runScriptNode('extract', undefined, undefined, llmModel.value)
     toast.success('节点已从剧本提炼出来')
   } catch (e: any) {
-    toast.error(e.message || '提炼失败')
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e) || '提炼失败')
   }
 }
 
@@ -414,7 +457,7 @@ function resetVideoPrompt() {
       </p>
 
       <p v-else-if="node.type === 'script'" class="hint">
-        分两步：先写完整剧本（还不拆节点），看完再点「提炼节点」生成人物、场景、分镜。
+        分两步：先写完整剧本（还不拆节点）。写好后可续写（保留已有场次），或提炼人物、场景、分镜。
       </p>
       <p v-else-if="node.type === 'export'" class="hint">
         先调下方音频与字幕，再点合成。视频会出现在「视频预览」节点。
@@ -547,7 +590,7 @@ function resetVideoPrompt() {
       </template>
 
       <template v-else-if="node.type === 'subject' && subject">
-        <label>人设生图提示词</label>
+        <label>四视图提示词</label>
         <textarea
           rows="9"
           :value="subject.description"
@@ -556,13 +599,46 @@ function resetVideoPrompt() {
         />
       </template>
 
-      <template v-else-if="node.type === 'scene' && scene">
-        <label>场景生图提示词</label>
+      <template v-else-if="node.type === 'subjectProps' && subject">
+        <label>身上有哪些东西</label>
         <textarea
           rows="9"
+          :value="subject.props || ''"
+          placeholder="包、证件、平板、鞋、帽子、配饰。改完点生成资产图。"
+          @input="project.updateSubject(subject.id, { props: ($event.target as HTMLTextAreaElement).value })"
+        />
+      </template>
+
+      <template v-else-if="node.type === 'scene' && scene">
+        <label>地点描述</label>
+        <textarea
+          rows="6"
           :value="scene.description"
-          placeholder="地点、时间、天气、光线、材质。改完点重新生成。"
+          placeholder="人还没进来时这个地方：地面、光、门窗、材质。"
           @input="project.updateScene(scene.id, { description: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <label>主锚</label>
+        <input
+          :value="scene.mainAnchor || ''"
+          placeholder="电梯门、接待台、锅灶……摄像能对着的实物"
+          @change="project.updateScene(scene.id, { mainAnchor: ($event.target as HTMLInputElement).value })"
+        />
+        <label>四宫格锚点</label>
+        <textarea
+          rows="3"
+          :value="scene.anchors || ''"
+          placeholder="全景；主锚；地面站位；光源或次锚"
+          @input="project.updateScene(scene.id, { anchors: ($event.target as HTMLTextAreaElement).value })"
+        />
+      </template>
+
+      <template v-else-if="node.type === 'shotBoard' && shot">
+        <label>故事看板提示词</label>
+        <textarea
+          rows="9"
+          :value="shot.boardPrompt || shot.visualPrompt"
+          placeholder="这一镜的起始状态、动作过程、反应和结束状态。改完点生成六格线稿看板。"
+          @input="project.updateShot(shot.id, { boardPrompt: ($event.target as HTMLTextAreaElement).value })"
         />
       </template>
 
@@ -619,7 +695,7 @@ function resetVideoPrompt() {
           <option value="tilt">移</option>
           <option value="orbit">环绕</option>
         </select>
-        <p v-if="!shot.imageAssetId" class="err">这一镜还没有配图，先生成配图再出视频。</p>
+        <p v-if="!shot.boardAssetId" class="err">这一镜还没有六格故事看板，先生成看板再出视频。</p>
       </template>
 
       <template v-else-if="node.type === 'audio' && shot">
@@ -660,9 +736,28 @@ function resetVideoPrompt() {
       </div>
 
       <ImageModelSelect v-if="isImageNode" />
+      <template v-if="node.type === 'script' && isPlayReady(project.current?.script)">
+        <label>续写方向（可选）</label>
+        <textarea
+          rows="3"
+          :value="continueHint"
+          placeholder="例如：再写两场，写父亲回家之后。不填则顺着往下写 2–3 场。"
+          @input="continueHint = ($event.target as HTMLTextAreaElement).value"
+        />
+      </template>
+      <GradientButton
+        v-if="node.type === 'script' && isPlayReady(project.current?.script)"
+        block
+        :loading="running"
+        :disabled="running"
+        @click="runContinue"
+      >
+        续写剧本
+      </GradientButton>
       <GradientButton
         v-if="node.type === 'script'"
         block
+        :type="isPlayReady(project.current?.script) ? 'secondary' : undefined"
         :loading="running"
         :disabled="running"
         @click="run"
@@ -677,7 +772,7 @@ function resetVideoPrompt() {
         :disabled="running || !((project.current?.script?.content || '').trim())"
         @click="runExtract"
       >
-        {{ project.current?.shots.length ? '重新提炼节点' : '提炼节点' }}
+        {{ extractLabel }}
       </GradientButton>
       <GradientButton
         v-else

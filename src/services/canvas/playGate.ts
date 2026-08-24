@@ -1,7 +1,7 @@
 import type { Project } from '@/types'
 
 export const PLAY_GATE_MSG =
-  '请先查看左侧完整剧本并点「确认通过」。验收后才做人设、配图或视频。除非你明确说全流程。'
+  '请先查看左侧完整剧本并点「确认通过」。验收后才做人设、故事看板或视频。除非你明确说全流程。'
 
 export function isPlayApproved(p: Project | null | undefined): boolean {
   if (!p) return false
@@ -29,8 +29,12 @@ export function isApprovePlayRequest(text: string) {
 export const DOWNSTREAM_TOOLS = new Set([
   'generate_sheet',
   'generate_all_sheets',
+  'generate_all_prop_sheets',
+  'generate_prop_sheet',
   'generate_scene',
   'generate_all_scenes',
+  'generate_shot_board',
+  'generate_all_boards',
   'generate_shot_image',
   'generate_all_images',
   'generate_video',

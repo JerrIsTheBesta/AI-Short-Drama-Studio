@@ -11,7 +11,9 @@ import {
 } from '@/utils/scriptMarkdown'
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
+import { extractStageLabel } from '@/services/canvas/pipeline'
 import { isPlayReady } from '@/services/ai'
+import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 
 const props = defineProps<{
@@ -75,13 +77,12 @@ const waitingReview = computed(() => needsPlayReview(project.current))
 const approved = computed(() => Boolean(project.current?.shots.length) && !waitingReview.value)
 const playReady = computed(() => isPlayReady(project.current?.script))
 const playLabel = computed(() => (playReady.value ? '重新写剧本' : '写剧本'))
-const extractLabel = computed(() =>
-  project.current?.shots.length ? '重新提炼节点' : '提炼节点'
-)
+const extractLabel = computed(() => extractStageLabel(project.current))
 
 const editing = ref(false)
 const draft = ref('')
 const dirty = ref(false)
+const continueHint = ref('')
 
 const markdown = computed(() => {
   if (!project.current) return '# 剧本\n\n*还没有打开项目。*'
@@ -223,7 +224,7 @@ function dismissPanel() {
   if (n) removeSelectedNodes([n])
 }
 
-async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
+async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = 'play') {
   ev.stopPropagation()
   if (generating.value) return
   if (editing.value) {
@@ -234,11 +235,15 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
     toast.warn('请先写完整剧本，再提炼节点')
     return
   }
+  if (kind === 'continue' && !playReady.value) {
+    toast.warn('请先写好完整剧本，再续写')
+    return
+  }
   dismissPanel()
   try {
-    await runScriptNode(kind, undefined, undefined, llmModel.value)
-  } catch {
-    /* 节点上会显示失败 */
+    await runScriptNode(kind, undefined, undefined, llmModel.value, continueHint.value)
+  } catch (e) {
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e))
   }
 }
 </script>
@@ -259,6 +264,16 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
           </button>
         </template>
         <template v-else>
+          <button
+            v-if="playReady"
+            type="button"
+            class="sdoc-btn"
+            :disabled="generating"
+            @click="generateThis($event, 'continue')"
+            @mousedown.stop
+          >
+            续写
+          </button>
           <button type="button" class="sdoc-btn" @click="startEdit" @mousedown.stop>✎ 编辑</button>
         </template>
       </div>
@@ -275,17 +290,17 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
     <div v-else class="sdoc-md nowheel nodrag" :class="{ 'has-panel': selected && panelOpen }" v-html="html" />
 
     <div v-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
-      <span>完整剧本已写好，还没拆成节点。可先改字，再点「提炼节点」生成人物、场景、分镜。</span>
+      <span>按人物、场景、分镜分三步提炼；每一步完成就立即保存，下一步由你确认后再运行。</span>
       <button type="button" :disabled="generating" @click="generateThis($event, 'extract')" @mousedown.stop>
-        提炼节点
+        {{ extractLabel }}
       </button>
     </div>
     <div v-else-if="waitingReview && !editing" class="sdoc-gate nodrag">
-      <span>请先验收这份剧本。可点「编辑」修改后再确认。确认后才做人设、配图、视频。</span>
+      <span>请先验收这份剧本。可点「编辑」或「续写」后再确认。确认后才做人设、配图、视频。</span>
       <button type="button" @click="approvePlay" @mousedown.stop>确认通过</button>
     </div>
     <div v-else-if="approved && !editing" class="sdoc-ok nodrag">
-      剧本已确认。仍可点「编辑」继续改；改完需重新确认。
+      剧本已确认。仍可点「续写」往后加场，或点「编辑」改字；改完需重新确认。
     </div>
     <p v-if="nodeMeta?.error" class="sdoc-err">{{ nodeMeta.error }}</p>
     <NodeBusyOverlay v-if="generating" label="生成中" />
@@ -318,7 +333,16 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
             @input="patchDraftBrief(($event.target as HTMLTextAreaElement).value)"
           />
         </template>
-        <p v-else class="prompt-hint">会按主题和当前剧本重写。点「提炼节点」才拆人物 / 场景 / 分镜。</p>
+        <p v-else class="prompt-hint">续写会保留已有场次，只往后加。重新写剧本会整篇重来并清空节点。</p>
+        <template v-if="playReady">
+          <label>续写方向（可选）</label>
+          <textarea
+            rows="3"
+            :value="continueHint"
+            placeholder="例如：再写两场，写父亲回家之后怎么说。不填则顺着往下写 2–3 场。"
+            @input="continueHint = ($event.target as HTMLTextAreaElement).value"
+          />
+        </template>
         <div class="prompt-foot">
           <label class="model-pick">
             <span>LLM</span>
@@ -338,11 +362,21 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' = 'play') {
             {{ extractLabel }}
           </button>
           <button
+            v-if="playReady"
             type="button"
-            class="go"
+            class="ghost"
             :disabled="generating || !llmModel"
             :title="playLabel"
             @click="generateThis($event, 'play')"
+          >
+            重写
+          </button>
+          <button
+            type="button"
+            class="go"
+            :disabled="generating || !llmModel"
+            :title="playReady ? '续写剧本' : playLabel"
+            @click="generateThis($event, playReady ? 'continue' : 'play')"
           >
             ↑
           </button>

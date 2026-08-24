@@ -1,28 +1,38 @@
 import { useProjectStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
+import { topicFromBrief } from '@/utils/storyBrief'
+import { controlledSignal, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
 import {
   runCanvasNode,
   generateMissingSheets,
+  generateMissingPropSheets,
   generateMissingPlates,
+  generateMissingBoards,
   generateMissingImages,
   generateMissingVideos,
   generateMissingAudio
 } from './runner'
+import { nextExtractStage } from './pipeline'
 import { revealCanvas } from './canvasBridge'
 import type { AgentTaskGraph, AgentTaskGraphNode } from '@/types/pipeline'
 
 export type AgentToolName =
   | 'seed_script'
   | 'generate_play'
+  | 'continue_play'
   | 'generate_storyboard'
   | 'extract_cast'
   | 'approve_play'
   | 'revise_shot'
   | 'generate_sheet'
   | 'generate_all_sheets'
+  | 'generate_all_prop_sheets'
+  | 'generate_prop_sheet'
   | 'generate_scene'
   | 'generate_all_scenes'
+  | 'generate_shot_board'
+  | 'generate_all_boards'
   | 'generate_shot_image'
   | 'generate_all_images'
   | 'generate_video'
@@ -71,7 +81,7 @@ export class AgentToolError extends Error {
   constructor(
     message: string,
     readonly tool: string,
-    readonly code: 'invalid_action' | 'timeout' | 'cancelled' | 'execution_failed',
+    readonly code: 'invalid_action' | 'timeout' | 'cancelled' | 'execution_failed' | 'postcondition_failed',
     readonly recoverable = false
   ) {
     super(message)
@@ -84,28 +94,28 @@ function abortError(tool: string) {
 
 async function withControl<T>(
   tool: string,
-  promise: Promise<T>,
+  run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
-  signal?: AbortSignal
+  parent?: AbortSignal
 ): Promise<T> {
-  if (signal?.aborted) throw abortError(tool)
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let abortHandler: (() => void) | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new AgentToolError(`${tool} 超时，请检查服务状态后重试`, tool, 'timeout', true)),
-      timeoutMs
-    )
-  })
-  const aborted = new Promise<never>((_, reject) => {
-    abortHandler = () => reject(abortError(tool))
-    signal?.addEventListener('abort', abortHandler, { once: true })
-  })
+  const control = controlledSignal(parent, timeoutMs)
   try {
-    return await Promise.race([promise, timeout, aborted])
+    if (control.signal.aborted) throw abortError(tool)
+    return await run(control.signal)
+  } catch (error: any) {
+    if (error instanceof AgentToolError) throw error
+    if (isTimeoutAbort(error, control.signal) && control.signal.aborted) {
+      throw new AgentToolError(
+        `这一步超过 ${Math.round(timeoutMs / 1000)} 秒还没完成，请再试一次`,
+        tool,
+        'timeout',
+        true
+      )
+    }
+    if (isAbortError(error) || control.signal.aborted) throw abortError(tool)
+    throw error
   } finally {
-    if (timer) clearTimeout(timer)
-    if (abortHandler) signal?.removeEventListener('abort', abortHandler)
+    control.cleanup()
   }
 }
 
@@ -113,15 +123,200 @@ function counts() {
   const p = useProjectStore().current
   return {
     sheets: (p?.subjects ?? []).filter((s) => !s.designSheetAssetId).length,
+    props: (p?.subjects ?? []).filter((s) => !s.propSheetAssetId).length,
     scenes: (p?.scenes ?? []).filter((s) => !s.plateAssetId).length,
+    boards: (p?.shots ?? []).filter((s) => !s.boardAssetId).length,
     images: (p?.shots ?? []).filter((s) => !s.imageAssetId).length,
-    videos: (p?.shots ?? []).filter((s) => s.imageAssetId && !s.videoAssetId).length,
+    videos: (p?.shots ?? []).filter((s) => !s.videoAssetId).length,
     audio: (p?.shots ?? []).filter((s) => needsExternalTts(s) && !s.audioAssetId).length
   }
 }
 
+export interface ToolPreflight {
+  state: 'ready' | 'skip' | 'repair'
+  detail?: string
+  actions?: AgentToolAction[]
+}
+
+function shotFor(action: AgentToolAction) {
+  return useProjectStore().current?.shots.find((shot) => shot.id === action.shotId)
+}
+
+/** Deterministic dependency check. Repairs are ordinary registered tools and remain bounded by AgentLoop. */
+export function preflightRegisteredTool(raw: unknown): ToolPreflight {
+  const action = validateToolAction(raw)
+  const project = useProjectStore().current
+  if (!project) return { state: 'ready' }
+
+  if (action.tool === 'extract_cast' && !(project.script?.playReady && project.script.content?.trim())) {
+    return {
+      state: 'repair',
+      detail: '提炼节点前缺少完整剧本，先补写剧本',
+      actions: [{ tool: 'generate_play' }]
+    }
+  }
+
+  if (action.tool === 'generate_shot_image') {
+    const shot = shotFor(action)
+    if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
+    if (shot.imageAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜配图已经存在` }
+    if (!shot.boardAssetId) {
+      return {
+        state: 'repair',
+        detail: `第 ${shot.index + 1} 镜缺少故事看板，先补看板`,
+        actions: [{ tool: 'generate_shot_board', shotId: shot.id }]
+      }
+    }
+  }
+
+  if (action.tool === 'generate_shot_board' || action.tool === 'generate_video' || action.tool === 'generate_audio') {
+    const shot = shotFor(action)
+    if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
+
+    if (action.tool === 'generate_video') {
+      if (shot.videoAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜视频已经存在` }
+      if (!shot.boardAssetId) {
+        return {
+          state: 'repair',
+          detail: `第 ${shot.index + 1} 镜缺少故事看板，先补看板`,
+          actions: [{ tool: 'generate_shot_board', shotId: shot.id }]
+        }
+      }
+      const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
+      const missingSubjects = (project.subjects ?? []).filter(
+        (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
+      )
+      const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
+      const repairs: AgentToolAction[] = missingSubjects.map((subject) => ({ tool: 'generate_sheet', subjectId: subject.id }))
+      if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
+      if (repairs.length) {
+        return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少视频身份或场景参考，先补齐`, actions: repairs }
+      }
+    }
+
+    if (action.tool === 'generate_audio') {
+      if (!needsExternalTts(shot)) return { state: 'skip', detail: `第 ${shot.index + 1} 镜由 H3 负责声音，不需要独立 TTS` }
+      if (shot.audioAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜口播已经存在` }
+    }
+
+    if (action.tool === 'generate_shot_board') {
+      if (shot.boardAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜故事看板已经存在` }
+      const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
+      const missingFour = (project.subjects ?? []).filter(
+        (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
+      )
+      const missingProps = (project.subjects ?? []).filter(
+        (subject) => subjectIds.includes(subject.id) && !subject.propSheetAssetId
+      )
+      const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
+      const repairs: AgentToolAction[] = [
+        ...missingFour.map((subject) => ({ tool: 'generate_sheet' as const, subjectId: subject.id })),
+        ...missingProps.map((subject) => ({ tool: 'generate_prop_sheet' as const, subjectId: subject.id }))
+      ]
+      if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
+      if (repairs.length) {
+        return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少角色或场景参考，先补依赖`, actions: repairs }
+      }
+    }
+  }
+
+  if (action.tool === 'generate_all_sheets') {
+    if (!(project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) {
+      return { state: 'skip', detail: '四视图已经补齐' }
+    }
+  }
+  if (action.tool === 'generate_all_prop_sheets') {
+    if (!(project.subjects ?? []).some((subject) => !subject.propSheetAssetId)) {
+      return { state: 'skip', detail: '资产图已经补齐' }
+    }
+  }
+
+  if (action.tool === 'generate_all_boards') {
+    if (!(project.shots ?? []).some((shot) => !shot.boardAssetId)) return { state: 'skip', detail: '故事看板已经补齐' }
+    const repairs: AgentToolAction[] = []
+    if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
+    if ((project.subjects ?? []).some((subject) => !subject.propSheetAssetId)) repairs.push({ tool: 'generate_all_prop_sheets' })
+    if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
+    if (repairs.length) return { state: 'repair', detail: '批量看板缺少角色或场景参考，先补依赖', actions: repairs }
+  }
+
+  if (action.tool === 'generate_all_images') {
+    if (!(project.shots ?? []).some((shot) => !shot.imageAssetId)) return { state: 'skip', detail: '分镜配图已经补齐' }
+    if ((project.shots ?? []).some((shot) => !shot.boardAssetId)) {
+      return { state: 'repair', detail: '批量配图缺少故事看板，先补看板', actions: [{ tool: 'generate_all_boards' }] }
+    }
+  }
+
+  if (action.tool === 'generate_all_videos') {
+    if (!(project.shots ?? []).some((shot) => !shot.videoAssetId)) return { state: 'skip', detail: '分镜视频已经补齐' }
+    if ((project.shots ?? []).some((shot) => !shot.boardAssetId)) {
+      return { state: 'repair', detail: '批量视频缺少故事看板，先补看板', actions: [{ tool: 'generate_all_boards' }] }
+    }
+    const repairs: AgentToolAction[] = []
+    if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
+    if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
+    if (repairs.length) return { state: 'repair', detail: '批量视频缺少角色设计图或场景图，先补依赖', actions: repairs }
+  }
+
+  if (action.tool === 'generate_all_audio') {
+    if (!(project.shots ?? []).some((shot) => needsExternalTts(shot) && !shot.audioAssetId)) {
+      return { state: 'skip', detail: '没有需要补的独立 TTS' }
+    }
+  }
+
+  return { state: 'ready' }
+}
+
+/** Verify persisted project state instead of trusting a tool's success string. */
+export function verifyRegisteredTool(raw: unknown): string | null {
+  const action = validateToolAction(raw)
+  const project = useProjectStore().current
+  if (!project) return '项目状态不存在'
+  const shot = shotFor(action)
+  switch (action.tool) {
+    case 'generate_play':
+    case 'generate_storyboard':
+    case 'continue_play':
+      return project.script?.playReady && project.script.content?.trim() ? null : '完整剧本没有成功写入项目'
+    case 'extract_cast':
+      return (project.subjects ?? []).length ? null : '人物节点没有成功写入项目'
+    case 'generate_sheet': {
+      const subject = (project.subjects ?? []).find((item) => item.id === action.subjectId)
+      return subject?.designSheetAssetId ? null : '角色四视图没有落库'
+    }
+    case 'generate_prop_sheet':
+      return (project.subjects ?? []).find((item) => item.id === action.subjectId)?.propSheetAssetId ? null : '角色资产图没有落库'
+    case 'generate_scene':
+      return (project.scenes ?? []).find((item) => item.id === action.sceneId)?.plateAssetId ? null : '场景锚点图没有落库'
+    case 'generate_all_sheets':
+      return (project.subjects ?? []).every((item) => item.designSheetAssetId) ? null : '仍有角色四视图缺失'
+    case 'generate_all_prop_sheets':
+      return (project.subjects ?? []).every((item) => item.propSheetAssetId) ? null : '仍有角色资产图缺失'
+    case 'generate_all_scenes':
+      return (project.scenes ?? []).every((item) => item.plateAssetId) ? null : '仍有场景锚点图缺失'
+    case 'generate_shot_board':
+      return shot?.boardAssetId ? null : '故事看板没有落库'
+    case 'generate_shot_image':
+      return shot?.imageAssetId ? null : '分镜配图没有落库'
+    case 'generate_all_boards':
+      return project.shots.every((item) => item.boardAssetId) ? null : '仍有故事看板缺失'
+    case 'generate_all_images':
+      return project.shots.every((item) => item.imageAssetId) ? null : '仍有分镜配图缺失'
+    case 'generate_video':
+      return shot?.videoAssetId ? null : '分镜视频没有落库'
+    case 'generate_all_videos':
+      return project.shots.every((item) => item.videoAssetId) ? null : '仍有分镜视频缺失'
+    case 'generate_audio':
+      return !shot || !needsExternalTts(shot) || shot.audioAssetId ? null : '独立口播没有落库'
+    case 'generate_all_audio':
+      return project.shots.every((item) => !needsExternalTts(item) || item.audioAssetId) ? null : '仍有独立口播缺失'
+    default:
+      return null
+  }
+}
+
 const noCost = () => ({ calls: 0, seconds: 1 })
-const oneLlm = () => ({ calls: 1, seconds: 30 })
+const oneLlm = () => ({ calls: 1, seconds: 180 })
 const oneImage = () => ({ calls: 1, seconds: 45 })
 const oneVideo = () => ({ calls: 1, seconds: 180 })
 const oneAudio = () => ({ calls: 1, seconds: 20 })
@@ -141,9 +336,10 @@ const definitions: ToolDefinition[] = [
       const cur = project.current
       if (!cur) throw new Error('请先创建项目')
       const text = String(action.text || '').trim()
-      const topic = text.replace(/\s+/g, ' ').slice(0, 48) || cur.name
+      const topic = topicFromBrief(text) || cur.name
       const inferred = inferVisualStyleFromText(text)
       const style = inferred || cur.script?.style || 'cinematic'
+      cur.name = topic
       if (!cur.script) {
         project.setScript({
           id: `s_${Date.now().toString(36)}`, topic, content: text, keywords: [], style,
@@ -155,7 +351,7 @@ const definitions: ToolDefinition[] = [
       } else {
         project.setScript({
           ...cur.script,
-          topic: cur.script.topic || topic,
+          topic,
           content: text,
           style,
           playReady: false
@@ -166,21 +362,39 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'generate_play', phase: 0, timeoutMs: 120_000, estimate: oneLlm,
-    async execute(_action, ctx) {
+    name: 'generate_play', phase: 0, timeoutMs: 420_000, estimate: oneLlm,
+    async execute(action, ctx) {
       const { runGeneratePlay } = await import('./runner')
-      await runGeneratePlay(ctx.onLog, ctx.signal)
+      await runGeneratePlay(ctx.onLog, ctx.signal, undefined, {
+        mode: 'write',
+        brief: action.text
+      })
       revealCanvas('script')
-      return '完整剧本已写好，请先看左侧；确认后可提炼人物/场景/分镜节点'
+      return '完整剧本已写好。下一步只拆人物，不会同时拆场景和分镜。'
     }
   },
   {
-    name: 'generate_storyboard', phase: 0, timeoutMs: 180_000, estimate: oneLlm,
-    async execute(_action, ctx) {
+    name: 'continue_play', phase: 0, timeoutMs: 420_000, estimate: oneLlm,
+    async execute(action, ctx) {
       const { runGeneratePlay } = await import('./runner')
-      await runGeneratePlay(ctx.onLog, ctx.signal)
+      await runGeneratePlay(ctx.onLog, ctx.signal, undefined, {
+        mode: 'continue',
+        hint: action.text
+      })
       revealCanvas('script')
-      return '完整剧本已写好（第一步，未拆节点）。回「继续」再提炼人物/场景/分镜'
+      return '已按当前剧后续写（保留原场次）。若已提炼过节点，请再点「重新提炼节点」同步新场。'
+    }
+  },
+  {
+    name: 'generate_storyboard', phase: 0, timeoutMs: 420_000, estimate: oneLlm,
+    async execute(action, ctx) {
+      const { runGeneratePlay } = await import('./runner')
+      await runGeneratePlay(ctx.onLog, ctx.signal, undefined, {
+        mode: 'write',
+        brief: action.text
+      })
+      revealCanvas('script')
+      return '完整剧本已写好（第一步，未拆节点）。回「继续」只拆人物。'
     }
   },
   {
@@ -195,9 +409,19 @@ const definitions: ToolDefinition[] = [
         revealCanvas('script')
         return '还没有完整剧本，已先写好剧本（未拆节点）；请再点提炼节点'
       }
+      const start = nextExtractStage(project.current) ?? (project.current?.shots.length ? 'subjects' : 'subjects')
       await runExtractStoryboard(ctx.onLog, ctx.signal)
       revealCanvas('script')
-      return `已提炼人物 ${project.current?.subjects?.length ?? 0} / 场景 ${project.current?.scenes?.length ?? 0} / 分镜 ${project.current?.shots.length ?? 0}`
+      const after = project.current
+      const subjects = after?.subjects?.length ?? 0
+      const scenes = after?.scenes?.length ?? 0
+      const shots = after?.shots.length ?? 0
+      if (start === 'subjects' && !subjects) throw new Error('人物没有写入画布')
+      if (start === 'scenes' && !scenes) throw new Error('场景没有写入画布')
+      if (start === 'shots' && !shots) throw new Error('分镜没有写入画布')
+      if (start === 'subjects') return `第1步完成：已拆 ${subjects} 个角色。没有同时拆场景和分镜。`
+      if (start === 'scenes') return `第2步完成：已拆 ${scenes} 个场景。没有同时拆分镜。`
+      return `第3步完成：已拆 ${shots} 个分镜。`
     }
   },
   {
@@ -225,6 +449,7 @@ const definitions: ToolDefinition[] = [
       }
       if (!Object.keys(patch).length) throw new Error('revise_shot 没有提供任何修改字段')
       project.updateShot(shot.id, patch)
+      if (action.visualPrompt) project.updateShot(shot.id, { boardAssetId: undefined })
       if (action.visualPrompt || action.imagePrompt) project.invalidateShotAssets(shot.id, 'image')
       else if (action.videoPrompt || action.cameraMovement || action.duration) project.invalidateShotAssets(shot.id, 'video')
       if (action.voiceover !== undefined) {
@@ -244,13 +469,29 @@ const definitions: ToolDefinition[] = [
       if (!sub) throw new Error(`找不到主体 ${action.subjectId}`)
       await runCanvasNode(`subject:${sub.id}`, progress(ctx), ctx.signal)
       revealCanvas(`subject:${sub.id}`)
-      return `人设 ${sub.name} 完成`
+      return `四视图 ${sub.name} 完成`
     }
   },
   {
     name: 'generate_all_sheets', phase: 1, timeoutMs: 600_000,
-    estimate: () => ({ calls: counts().sheets, seconds: counts().sheets * 45 }),
-    async execute(_action, ctx) { await generateMissingSheets(ctx.onLog, ctx.signal); return '人设已补齐' }
+    estimate: () => ({ calls: counts().sheets, seconds: counts().sheets * 90 }),
+    async execute(_action, ctx) { await generateMissingSheets(ctx.onLog, ctx.signal); return '四视图已补齐' }
+  },
+  {
+    name: 'generate_all_prop_sheets', phase: 1, timeoutMs: 600_000,
+    estimate: () => ({ calls: counts().props, seconds: counts().props * 90 }),
+    async execute(_action, ctx) { await generateMissingPropSheets(ctx.onLog, ctx.signal); return '资产图已补齐' }
+  },
+  {
+    name: 'generate_prop_sheet', phase: 1, timeoutMs: 240_000, required: ['subjectId'], estimate: oneImage,
+    async execute(action, ctx) {
+      const p = useProjectStore().current!
+      const sub = (p.subjects ?? []).find((s) => s.id === action.subjectId)
+      if (!sub) throw new Error(`找不到主体 ${action.subjectId}`)
+      await runCanvasNode(`subjectProps:${sub.id}`, progress(ctx), ctx.signal)
+      revealCanvas(`subjectProps:${sub.id}`)
+      return `资产图 ${sub.name} 完成`
+    }
   },
   {
     name: 'generate_scene', phase: 1, timeoutMs: 240_000, required: ['sceneId'], estimate: oneImage,
@@ -259,16 +500,29 @@ const definitions: ToolDefinition[] = [
       const scene = (p.scenes ?? []).find((s) => s.id === action.sceneId)
       if (!scene) throw new Error(`找不到场景 ${action.sceneId}`)
       await runCanvasNode(`scene:${scene.id}`, progress(ctx), ctx.signal)
-      return `场景 ${scene.name} 完成`
+      return `场景锚点图 ${scene.name} 完成`
     }
   },
   {
     name: 'generate_all_scenes', phase: 1, timeoutMs: 600_000,
     estimate: () => ({ calls: counts().scenes, seconds: counts().scenes * 45 }),
-    async execute(_action, ctx) { await generateMissingPlates(ctx.onLog, ctx.signal); return '场景已补齐' }
+    async execute(_action, ctx) { await generateMissingPlates(ctx.onLog, ctx.signal); return '场景锚点图已补齐' }
   },
   {
-    name: 'generate_shot_image', phase: 2, timeoutMs: 240_000, required: ['shotId'], estimate: oneImage,
+    name: 'generate_shot_board', phase: 2, timeoutMs: 240_000, required: ['shotId'], estimate: oneImage,
+    async execute(action, ctx) {
+      await runCanvasNode(`shotBoard:${action.shotId}`, progress(ctx), ctx.signal)
+      revealCanvas(`shotBoard:${action.shotId}`)
+      return '故事看板完成'
+    }
+  },
+  {
+    name: 'generate_all_boards', phase: 2, timeoutMs: 900_000,
+    estimate: () => ({ calls: counts().boards, seconds: counts().boards * 45 }),
+    async execute(_action, ctx) { await generateMissingBoards(ctx.onLog, ctx.signal); return '故事看板已补齐' }
+  },
+  {
+    name: 'generate_shot_image', phase: 3, timeoutMs: 240_000, required: ['shotId'], estimate: oneImage,
     async execute(action, ctx) {
       await runCanvasNode(`shotImage:${action.shotId}`, progress(ctx), ctx.signal)
       revealCanvas(`shotImage:${action.shotId}`)
@@ -276,12 +530,12 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'generate_all_images', phase: 2, timeoutMs: 900_000,
+    name: 'generate_all_images', phase: 3, timeoutMs: 900_000,
     estimate: () => ({ calls: counts().images, seconds: counts().images * 45 }),
-    async execute(_action, ctx) { await generateMissingImages(ctx.onLog, ctx.signal); return '配图已补齐' }
+    async execute(_action, ctx) { await generateMissingImages(ctx.onLog, ctx.signal); return '分镜配图已补齐' }
   },
   {
-    name: 'generate_video', phase: 3, timeoutMs: 20 * 60_000, required: ['shotId'], estimate: oneVideo,
+    name: 'generate_video', phase: 4, timeoutMs: 20 * 60_000, required: ['shotId'], estimate: oneVideo,
     async execute(action, ctx) {
       await runCanvasNode(`shotVideo:${action.shotId}`, progress(ctx), ctx.signal)
       revealCanvas(`shotVideo:${action.shotId}`)
@@ -289,25 +543,25 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'generate_all_videos', phase: 3, timeoutMs: 60 * 60_000,
+    name: 'generate_all_videos', phase: 4, timeoutMs: 60 * 60_000,
     estimate: () => ({ calls: counts().videos, seconds: counts().videos * 180 }),
     async execute(_action, ctx) { await generateMissingVideos(ctx.onLog, ctx.signal); return '视频已补齐' }
   },
   {
-    name: 'generate_audio', phase: 4, timeoutMs: 180_000, required: ['shotId'], estimate: oneAudio,
+    name: 'generate_audio', phase: 5, timeoutMs: 180_000, required: ['shotId'], estimate: oneAudio,
     async execute(action, ctx) { await runCanvasNode(`audio:${action.shotId}`, progress(ctx), ctx.signal); return '口播完成' }
   },
   {
-    name: 'generate_all_audio', phase: 4, timeoutMs: 600_000,
+    name: 'generate_all_audio', phase: 5, timeoutMs: 600_000,
     estimate: () => ({ calls: counts().audio, seconds: counts().audio * 20 }),
     async execute(_action, ctx) { await generateMissingAudio(ctx.onLog, ctx.signal); return '口播已补齐' }
   },
   {
-    name: 'sync_canvas', phase: 5, timeoutMs: 5_000, estimate: noCost,
+    name: 'sync_canvas', phase: 6, timeoutMs: 5_000, estimate: noCost,
     async execute() { useProjectStore().syncCanvasFromProject(); revealCanvas(); return '画布已同步' }
   },
   {
-    name: 'focus_node', phase: 5, timeoutMs: 5_000, required: ['nodeId'], estimate: noCost,
+    name: 'focus_node', phase: 6, timeoutMs: 5_000, required: ['nodeId'], estimate: noCost,
     async execute(action) { revealCanvas(action.nodeId); return '已定位节点' }
   },
   {
@@ -386,17 +640,19 @@ export async function executeRegisteredTool(action: unknown, ctx: ToolExecutionC
   try {
     return await withControl(
       valid.tool,
-      definition.execute(valid, ctx),
+      (signal) => definition.execute(valid, { ...ctx, signal }),
       definition.timeoutMs,
       ctx.signal
     )
   } catch (error: any) {
     if (error instanceof AgentToolError) throw error
+    const message = error?.message ?? String(error)
+    const hardStop = /401|403|鉴权|密钥|API Key|余额不足|配额不足|内容安全|用户停止|用户取消/.test(message)
     throw new AgentToolError(
-      error?.message ?? String(error),
+      message,
       valid.tool,
       'execution_failed',
-      !/401|403|鉴权|密钥|API Key|找不到|没有口播/.test(error?.message ?? '')
+      !hardStop
     )
   }
 }
@@ -413,19 +669,22 @@ export function estimateRequestText(text: string): ToolEstimate {
   let calls = 0
   let seconds = 0
   if (/拆|剧本|分镜|脚本/.test(t)) { calls += 1; seconds += 30 }
-  if (/人设|角色图/.test(t)) { calls += Math.max(1, c.sheets); seconds += Math.max(1, c.sheets) * 45 }
+  if (/人设|角色图|四视图/.test(t)) { calls += Math.max(1, c.sheets); seconds += Math.max(1, c.sheets) * 45 }
+  if (/资产图/.test(t)) { calls += Math.max(1, c.props); seconds += Math.max(1, c.props) * 45 }
   if (/场景|底板/.test(t)) { calls += Math.max(1, c.scenes); seconds += Math.max(1, c.scenes) * 45 }
+  if (/看板|故事看板/.test(t)) { calls += Math.max(1, c.boards); seconds += Math.max(1, c.boards) * 45 }
   if (/配图|出图|关键帧/.test(t)) { calls += Math.max(1, c.images); seconds += Math.max(1, c.images) * 45 }
   if (/视频|成片/.test(t)) { calls += Math.max(1, c.videos || c.images); seconds += Math.max(1, c.videos || c.images) * 180 }
   if (/配音|口播|语音/.test(t)) { calls += Math.max(1, c.audio); seconds += Math.max(1, c.audio) * 20 }
   if (/全流程|完整流程|全部做完|从头到尾|全套/.test(t)) {
     const sheets = c.sheets || 1
     const scenes = c.scenes || 1
+    const boards = c.boards || plannedShots
     const images = c.images || plannedShots
     const videos = c.videos || plannedShots
     const audio = c.audio || plannedShots
-    calls = 1 + sheets + scenes + images + videos + audio
-    seconds = 30 + (sheets + scenes + images) * 45 + videos * 180 + audio * 20
+    calls = 1 + sheets + scenes + boards + images + videos + audio
+    seconds = 30 + (sheets + scenes + boards + images) * 45 + videos * 180 + audio * 20
   }
   return { calls, seconds }
 }

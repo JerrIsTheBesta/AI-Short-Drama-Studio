@@ -5,8 +5,10 @@ import {
   buildTaskGraph,
   estimateToolActions,
   executeRegisteredTool,
+  preflightRegisteredTool,
   toolPhase,
   validateToolAction,
+  verifyRegisteredTool,
   type AgentToolAction
 } from './toolRegistry'
 import { TOOL_LABEL } from './pipeline'
@@ -57,7 +59,10 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
   const completed: AgentToolAction[] = []
   const results: AgentToolResult[] = []
   let replanAttempt = 0
-  const maxReplans = options.autonomy === 'autopilot' ? 2 : options.autonomy === 'gated' ? 1 : 0
+  const maxReplans = options.autonomy === 'autopilot' ? 4 : options.autonomy === 'gated' ? 2 : 1
+  const dependencyAttempts = new Map<string, number>()
+  const failureFingerprints = new Map<string, number>()
+  const recoveringSteps = new Set<string>()
 
   try {
     while (actions.length) {
@@ -65,6 +70,69 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
       const action = actions.shift()!
       const stepKey = `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || ''}`
       const stepLabel = TOOL_LABEL[action.tool] || action.tool
+
+      let preflight
+      try {
+        preflight = preflightRegisteredTool(action)
+      } catch (error: any) {
+        const toolError = error instanceof AgentToolError
+          ? error
+          : new AgentToolError(error?.message ?? String(error), action.tool, 'invalid_action', false)
+        results.push({ tool: action.tool, ok: false, detail: toolError.message })
+        await patchAgentTask(task.id, {
+          status: 'failed', failedTool: action.tool, error: toolError.message, finishedAt: Date.now()
+        })
+        return { results, graph, stopped: true, error: toolError }
+      }
+      if (preflight.state === 'skip') {
+        completed.push(action)
+        results.push({ tool: action.tool, ok: true, detail: preflight.detail || '已满足，无需重复执行' })
+        options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'done' })
+        options.onEvent({ kind: 'log', label: `自检跳过：${preflight.detail || stepLabel}` })
+        continue
+      }
+      if (preflight.state === 'repair') {
+        const count = (dependencyAttempts.get(stepKey) || 0) + 1
+        dependencyAttempts.set(stepKey, count)
+        if (count > 3 || !preflight.actions?.length) {
+          const toolError = new AgentToolError(
+            `${preflight.detail || stepLabel}，自动补依赖后仍未满足`,
+            action.tool,
+            'postcondition_failed',
+            false
+          )
+          results.push({ tool: action.tool, ok: false, detail: toolError.message })
+          await patchAgentTask(task.id, {
+            status: 'failed', failedTool: action.tool, error: toolError.message, finishedAt: Date.now()
+          })
+          return { results, graph, stopped: true, error: toolError }
+        }
+        const candidate = dedupe([...preflight.actions, action, ...actions]).sort(
+          (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
+        )
+        const projected = estimateToolActions([...completed, ...candidate])
+        if (budget > 0 && projected.calls > budget) {
+          const toolError = new AgentToolError(
+            `发现缺失依赖，但补齐后预计需要 ${projected.calls} 次生成调用，超过预算 ${budget}`,
+            action.tool,
+            'postcondition_failed',
+            false
+          )
+          results.push({ tool: action.tool, ok: false, detail: toolError.message })
+          await patchAgentTask(task.id, {
+            status: 'failed', failedTool: action.tool, error: toolError.message, finishedAt: Date.now()
+          })
+          return { results, graph, stopped: true, error: toolError }
+        }
+        options.onEvent({ kind: 'log', label: `执行前自检：${preflight.detail}` })
+        await patchAgentTask(task.id, {
+          repairCount: (dependencyAttempts.get(stepKey) || 0) + replanAttempt,
+          lastRecovery: preflight.detail
+        })
+        actions = candidate
+        continue
+      }
+
       options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'running' })
       await patchAgentTask(task.id, { currentStep: action.tool })
       try {
@@ -72,8 +140,20 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
           signal: options.signal,
           onLog: (label) => options.onEvent({ kind: 'log', label, step: stepKey })
         })
+        const verificationIssue = verifyRegisteredTool(action)
+        if (verificationIssue) {
+          throw new AgentToolError(
+            `工具返回成功，但结果验收未通过：${verificationIssue}`,
+            action.tool,
+            'postcondition_failed',
+            true
+          )
+        }
         completed.push(action)
         results.push({ tool: action.tool, ok: true, detail })
+        if (recoveringSteps.delete(stepKey)) {
+          options.onEvent({ kind: 'log', label: `自动修复成功，继续后续任务：${stepLabel}` })
+        }
         options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'done' })
         await patchAgentTask(task.id, {
           completedTools: completed.map((item) => item.tool),
@@ -83,30 +163,39 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
         const toolError = error instanceof AgentToolError
           ? error
           : new AgentToolError(error?.message ?? String(error), action.tool, 'execution_failed')
-        results.push({ tool: action.tool, ok: false, detail: toolError.message })
         options.onEvent({ kind: 'step', step: stepKey, label: stepLabel, status: 'fail' })
-        options.onEvent({ kind: 'log', label: `已暂停：${toolError.message}` })
+        const fingerprint = `${stepKey}:${toolError.code}:${toolError.message.replace(/\d+/g, '#').slice(0, 180)}`
+        const sameFailureCount = (failureFingerprints.get(fingerprint) || 0) + 1
+        failureFingerprints.set(fingerprint, sameFailureCount)
 
         if (
           toolError.recoverable &&
           options.replan &&
           replanAttempt < maxReplans &&
+          sameFailureCount < 2 &&
           !options.signal?.aborted
         ) {
           replanAttempt++
-          options.onEvent({ kind: 'log', label: `分析失败原因并重新规划（${replanAttempt}/${maxReplans}）` })
+          recoveringSteps.add(stepKey)
+          options.onEvent({ kind: 'log', label: `结果未达标，正在诊断并重新规划（${replanAttempt}/${maxReplans}）：${toolError.message}` })
+          await patchAgentTask(task.id, {
+            repairCount: replanAttempt + [...dependencyAttempts.values()].reduce((sum, value) => sum + value, 0),
+            lastRecovery: `${toolError.code}：${toolError.message}`
+          })
           const replacement = await options.replan({
             error: toolError,
             completed,
             remaining: [action, ...actions],
             attempt: replanAttempt
           })
-          actions = dedupe(replacement.map(validateToolAction)).sort(
+          actions = dedupe([...replacement.map(validateToolAction), action, ...actions]).sort(
             (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
           )
           if (actions.length) continue
         }
 
+        results.push({ tool: action.tool, ok: false, detail: toolError.message })
+        options.onEvent({ kind: 'log', label: sameFailureCount >= 2 ? `同一错误重复出现，已停止盲目重试：${toolError.message}` : `已暂停：${toolError.message}` })
         await patchAgentTask(task.id, {
           status: toolError.code === 'cancelled' ? 'cancelled' : 'failed',
           failedTool: action.tool,
@@ -127,4 +216,3 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
     throw error
   }
 }
-

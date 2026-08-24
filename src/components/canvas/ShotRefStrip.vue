@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
-import { imageRefSlots, videoRefSlots, boundSubjectIds } from '@/utils/consistency'
+import { imageRefSlots, videoRefSlots, boardRefSlots, boundSubjectIds } from '@/utils/consistency'
 import { openLightbox } from '@/composables/useLightbox'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import type { ID, Shot } from '@/types'
 
 const props = defineProps<{
   shot: Shot
-  mode: 'image' | 'video'
+  mode: 'image' | 'video' | 'board'
 }>()
 
 const project = useProjectStore()
@@ -27,9 +27,9 @@ const unboundCast = computed(() => {
 
 const slots = computed(() => {
   if (!project.current) return []
-  return props.mode === 'video'
-    ? videoRefSlots(props.shot, project.current)
-    : imageRefSlots(props.shot, project.current)
+  if (props.mode === 'video') return videoRefSlots(props.shot, project.current)
+  if (props.mode === 'board') return boardRefSlots(props.shot, project.current)
+  return imageRefSlots(props.shot, project.current)
 })
 
 watch(
@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
     <p v-if="mode === 'image' && unboundCast" class="hint">
       这镜还没绑人物，人设图不会进配图。重新提炼节点，或在画面描述里写出角色名字。
     </p>
-    <p v-else-if="mode === 'video' && !shot.imageAssetId" class="hint">先生成配图，才会作为本镜参考帧。</p>
+    <p v-else-if="mode === 'video' && !slots.length" class="hint">出视频要传本镜角色设计图、场景图和故事看板。缺哪张就先补哪张，不要用人设+场景配图。</p>
     <AssetPicker
       :open="pickerOpen"
       kind="image"

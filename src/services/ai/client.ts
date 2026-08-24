@@ -111,8 +111,9 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     return mockLLM(req)
   }
 
-  const { controlledSignal } = await import('./abort')
-  const control = controlledSignal(req.signal, req.timeoutMs ?? 120_000)
+  const { controlledSignal, isAbortError, llmAbortError } = await import('./abort')
+  const timeoutMs = req.timeoutMs ?? 120_000
+  const control = controlledSignal(req.signal, timeoutMs)
   const { baseUrl, apiKey, model: cfgModel } =
     req.provider === 'vision' ? getVisionConfig() : getLlmConfig()
   const model = req.model?.trim() || cfgModel
@@ -189,6 +190,11 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
           }
         : undefined
     }
+  } catch (e) {
+    if (control.signal.aborted || isAbortError(e)) {
+      throw llmAbortError(e, control.signal, timeoutMs)
+    }
+    throw e
   } finally {
     control.cleanup()
   }

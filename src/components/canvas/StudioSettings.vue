@@ -29,7 +29,7 @@ function onVoice(v: string) {
 function createLlm(providerId: string) {
   const preset = findProvider(providerId, LLM_PROVIDERS)
   const applied = applyProviderPreset(
-    { baseUrl: '', apiKey: '', model: '', models: [] },
+    { baseUrl: '', model: '', models: [] },
     preset
   )
   const names = new Set((settings.config.llms ?? []).map((p) => p.name))
@@ -142,7 +142,7 @@ function removeActiveLlm() {
     <EndpointForm
       v-else-if="module === 'image'"
       title="生图"
-      hint="人设、空镜、分镜配图。选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。"
+      hint="角色设计、资产图、场景宫格和故事看板。选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。"
       :presets="IMAGE_PROVIDERS"
       :base-url="settings.config.image.baseUrl"
       :api-key="settings.config.image.apiKey"
@@ -186,7 +186,7 @@ function removeActiveLlm() {
             @click="settings.patchVideo({ promptStyle: 'scene-narrative' })"
           >
             <strong>场景叙事</strong>
-            <span>分镜配图里已经有人。从第一帧接着演：先按衣服、站位点名谁是谁，再连续写这一镜怎么演、怎么说、镜头怎么走。</span>
+            <span>按 H3 官方 I2VA 英文三段式出片。图槽传角色设计图、场景图和本镜故事看板，不传人物+场景配图。台词只进 &lt;d&gt; 标签；没有口播就写 No dialogue。</span>
           </button>
           <button
             type="button"
@@ -206,7 +206,7 @@ function removeActiveLlm() {
         <label>工作流 ID</label>
         <input
           :value="settings.config.video.workflowId"
-          placeholder="minimax_h3_light2v-1"
+          placeholder="U09-API-9图版"
           @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
         />
         <label>API Key（可空）</label>

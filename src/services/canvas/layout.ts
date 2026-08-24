@@ -72,17 +72,20 @@ function pos(
 
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
   const prevList = project.canvas?.nodes ?? []
+  const subjects = project.subjects ?? []
+  const scenes = project.scenes ?? []
+  const shots = project.shots
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
-  const layoutReady = hadGroups && prevList.some((n) => n.id === 'group-audio')
+  const layoutReady =
+    hadGroups &&
+    prevList.some((n) => n.id === 'group-audio') &&
+    (subjects.length === 0 || prevList.some((n) => n.type === 'subjectProps')) &&
+    (shots.length === 0 || prevList.some((n) => n.type === 'shotBoard'))
   const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
   const nodes: CanvasNode[] = []
   const edges: CanvasEdge[] = []
   const groups: CanvasGraph['groups'] = []
-
-  const subjects = project.subjects ?? []
-  const scenes = project.scenes ?? []
-  const shots = project.shots
   const shotH = pipelineNodeHeight(project.settings?.aspectRatio)
   const sheetH = pipelineNodeHeight('16:9')
 
@@ -107,8 +110,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     status: persistStatus(prevScript?.status, Boolean(project.script?.content))
   })
 
-  const subBox = groupBox(subjects.length, 1, sheetH)
-  const scnBox = groupBox(scenes.length, 1, shotH)
+  const subBox = groupBox(subjects.length, 2, sheetH)
+  const scnBox = groupBox(scenes.length, 1, sheetH)
   const shotBox = groupBox(shots.length, 2, shotH)
   const audBox = groupBox(shots.length, 1, AUDIO_NODE_H)
   const expBox = groupBox(1, 2, shotH)
@@ -134,7 +137,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   }
 
   pushGroup('group-subjects', '人物角色', 'subject', subBox)
-  pushGroup('group-scenes', '场景', 'scene', scnBox)
+  pushGroup('group-scenes', '场景锚点', 'scene', scnBox)
   pushGroup('group-shots', '分镜', 'shot', shotBox)
   pushGroup('group-audio', '口播', 'audio', audBox)
   pushGroup('group-export', '合成视频', 'export', expBox)
@@ -148,6 +151,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
 
   subjects.forEach((s, i) => {
     const id = `subject:${s.id}`
+    const propId = `subjectProps:${s.id}`
     attach('group-subjects', {
       id,
       type: 'subject',
@@ -156,10 +160,25 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       status: persistStatus(prev.get(id)?.status, Boolean(s.designSheetAssetId)),
       parentGroupId: 'group-subjects'
     })
+    attach('group-subjects', {
+      id: propId,
+      type: 'subjectProps',
+      position: cell(i, 1, sheetH),
+      data: { subjectId: s.id, label: `${s.name} 资产` },
+      status: persistStatus(prev.get(propId)?.status, Boolean(s.propSheetAssetId)),
+      parentGroupId: 'group-subjects'
+    })
     edges.push({
       id: `e-script-${id}`,
       source: 'script',
       target: id,
+      sourceHandle: 'out',
+      targetHandle: 'in'
+    })
+    edges.push({
+      id: `e-${id}-${propId}`,
+      source: id,
+      target: propId,
       sourceHandle: 'out',
       targetHandle: 'in'
     })
@@ -170,7 +189,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     attach('group-scenes', {
       id,
       type: 'scene',
-      position: cell(i, 0, shotH),
+      position: cell(i, 0, sheetH),
       data: { sceneId: s.id, label: s.name },
       status: persistStatus(prev.get(id)?.status, Boolean(s.plateAssetId)),
       parentGroupId: 'group-scenes'
@@ -185,15 +204,15 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   })
 
   shots.forEach((shot, i) => {
-    const imgId = `shotImage:${shot.id}`
+    const boardId = `shotBoard:${shot.id}`
     const vidId = `shotVideo:${shot.id}`
     const audId = `audio:${shot.id}`
     attach('group-shots', {
-      id: imgId,
-      type: 'shotImage',
+      id: boardId,
+      type: 'shotBoard',
       position: cell(i, 0, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
-      status: persistStatus(prev.get(imgId)?.status, Boolean(shot.imageAssetId)),
+      status: persistStatus(prev.get(boardId)?.status, Boolean(shot.boardAssetId)),
       parentGroupId: 'group-shots'
     })
     attach('group-shots', {
@@ -224,9 +243,9 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       const src = `subject:${sid}`
       if (!nodes.some((n) => n.id === src)) return
       edges.push({
-        id: `e-${src}-${imgId}-${idx}`,
+        id: `e-${src}-${boardId}-${idx}`,
         source: src,
-        target: imgId,
+        target: boardId,
         sourceHandle: 'out',
         targetHandle: idx === 0 ? 'char1' : 'char2'
       })
@@ -234,16 +253,16 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     const sceneId = shot.sceneId || scenes[0]?.id
     if (sceneId) {
       edges.push({
-        id: `e-scene-${sceneId}-${imgId}`,
+        id: `e-scene-${sceneId}-${boardId}`,
         source: `scene:${sceneId}`,
-        target: imgId,
+        target: boardId,
         sourceHandle: 'out',
         targetHandle: 'scene'
       })
     }
     edges.push({
-      id: `e-${imgId}-${vidId}`,
-      source: imgId,
+      id: `e-${boardId}-${vidId}`,
+      source: boardId,
       target: vidId,
       sourceHandle: 'out',
       targetHandle: 'image'
@@ -296,7 +315,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
 export function nodeByEntity(graph: CanvasGraph, type: CanvasNode['type'], entityId: string) {
   return graph.nodes.find((n) => {
     if (n.type !== type) return false
-    if (type === 'subject') return n.data.subjectId === entityId
+    if (type === 'subject' || type === 'subjectProps') return n.data.subjectId === entityId
     if (type === 'scene') return n.data.sceneId === entityId
     return n.data.shotId === entityId
   })

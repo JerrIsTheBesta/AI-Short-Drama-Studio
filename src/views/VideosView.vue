@@ -2,18 +2,19 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { generateVideo, composeVideoPrompt, h3IdentityLockFromFrame, enrichVideoPerformance } from '@/services/ai'
+import { composeVideoPrompt, spokenTextOnly } from '@/services/ai'
+import { collectShotVideoEntries, packVideoRefEntries, subjectsForShot } from '@/utils/consistency'
+import { generateShotVideo } from '@/services/canvas/runner'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
-import { effectiveShotAudioMode, editableVideoPrompt, h3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
-import { assembleShotVideoPrompt } from '@/utils/shotPrompt'
+import { effectiveShotAudioMode, editableVideoPrompt, resolveH3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
-import { sceneForShot, subjectsForShot, videoExtraRefIds, videoExtraRefLead } from '@/utils/consistency'
 import type { Shot, ID } from '@/types'
+import { openLightbox } from '@/composables/useLightbox'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -47,22 +48,15 @@ const aesthetic = computed(() => project.current?.script?.h3Aesthetic || project
 const videoPromptPlaceholder = computed(() =>
   getVideoPromptStyle() === 'formatted'
     ? '每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。'
-    : '从第一帧接着演。画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
+    : '画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
 )
 
-const shotsWithoutImage = computed(() =>
-  shots.value.filter((s) => !s.imageAssetId)
+const shotsWithoutBoard = computed(() =>
+  shots.value.filter((s) => !s.boardAssetId)
 )
 const shotsWithoutVideo = computed(() =>
-  shots.value.filter((s) => s.imageAssetId && !s.videoAssetId)
+  shots.value.filter((s) => !s.videoAssetId)
 )
-
-async function collectShotFrame(shot: Shot): Promise<Blob> {
-  if (!shot.imageAssetId) throw new Error('请先生成该镜头的配图')
-  const main = await assets.getBlob(shot.imageAssetId)
-  if (!main) throw new Error('图片读取失败')
-  return main
-}
 
 async function loadVideos() {
   for (const s of shots.value) {
@@ -75,8 +69,9 @@ async function loadVideos() {
 
 async function loadImages() {
   for (const s of shots.value) {
-    if (s.imageAssetId) {
-      const url = await assets.getUrl(s.imageAssetId)
+    const previewId = s.boardAssetId || s.imageAssetId
+    if (previewId) {
+      const url = await assets.getUrl(previewId)
       if (url) imageUrls.value[s.id] = url
     }
   }
@@ -91,10 +86,6 @@ async function loadHistory() {
     }
   }
   historyUrls.value = { ...historyUrls.value, ...next }
-}
-
-function promptOf(shot: Shot) {
-  return editableVideoPrompt(shot).trim() || synthesizeVideoPerformance(shot)
 }
 
 function updateVideoPrompt(shot: Shot, value: string) {
@@ -115,16 +106,23 @@ function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
 
 function composedPrompt(shot: Shot) {
   const promptStyle = getVideoPromptStyle()
+  const spoken = spokenTextOnly(shot.voiceover || '')
+  const packed = project.current
+    ? packVideoRefEntries(collectShotVideoEntries(shot, project.current))
+    : []
+  const onScreenNames = project.current ? subjectsForShot(shot, project.current).map((item) => item.name) : []
+  const speaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
   return composeVideoPrompt({
-    prompt: assembleShotVideoPrompt({
-      style: promptStyle,
-      performance: promptOf(shot)
-    }),
+    prompt: editableVideoPrompt(shot) || synthesizeVideoPerformance(shot),
     aesthetic: aesthetic.value,
     audioDescription: shot.audioDescription,
-    voiceover: shot.voiceover,
-    voiceMode: h3VoiceMode(shot),
+    voiceover: spoken,
+    voiceMode: spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none',
     speakerHint: shot.speakerHint,
+    speakerName: speaker,
+    onScreenNames,
+    shotTitle: shot.title,
+    imageAssignments: packed.map((entry) => entry.label),
     duration: shot.duration,
     width: width.value,
     height: height.value,
@@ -142,92 +140,11 @@ function toggleExpanded(id: string) {
 }
 
 async function generateOne(shot: Shot) {
-  if (!shot.imageAssetId) {
-    toast.warn('请先为该分镜生成图片，或从资源库选用一张')
-    return
-  }
   generating.value.add(shot.id)
   try {
-    progress.value[shot.id] = '读取图片...'
-    const main = await collectShotFrame(shot)
-
-    progress.value[shot.id] = '识别画面人物...'
-    const promptStyle = getVideoPromptStyle()
-    const identityLock = await h3IdentityLockFromFrame({
-      imageBlob: main,
-      subjects: project.current ? subjectsForShot(shot, project.current) : [],
-      promptStyle
+    const asset = await generateShotVideo(shot, (msg) => {
+      progress.value[shot.id] = msg
     })
-    progress.value[shot.id] = '写细视频内容表现...'
-    const performance = await enrichVideoPerformance({
-      shot,
-      subjects: project.current ? subjectsForShot(shot, project.current) : [],
-      scene: project.current ? sceneForShot(shot, project.current) : undefined
-    })
-    if (performance && performance !== shot.videoPrompt) {
-      project.updateShot(shot.id, { videoPrompt: performance })
-    }
-    const extraIds = promptStyle === 'formatted' ? videoExtraRefIds(shot).slice(0, 2) : []
-    const extras: Blob[] = []
-    for (const id of extraIds) {
-      const b = await assets.getBlob(id)
-      if (b) extras.push(b)
-    }
-    const lead = project.current && extras.length ? videoExtraRefLead(shot, project.current) : ''
-    const prompt = assembleShotVideoPrompt({
-      style: promptStyle,
-      identityLock,
-      performance,
-      extraLead: lead
-    })
-    progress.value[shot.id] = extras.length
-      ? `生成视频中（本镜配图 + ${extras.length} 张参考）...`
-      : '生成视频中（仅本镜配图）...'
-    const result = await generateVideo(
-      {
-        imageBlob: main,
-        referenceImages: extras.length ? extras : undefined,
-        prompt,
-        aesthetic: aesthetic.value,
-        audioDescription: shot.audioDescription,
-        voiceover: shot.voiceover,
-        voiceMode: h3VoiceMode(shot),
-        speakerHint: shot.speakerHint,
-        duration: shot.duration,
-        width: width.value,
-        height: height.value,
-        aspectRatio: aspectRatio.value,
-        cameraMovement: shot.cameraMovement,
-        promptStyle,
-        strength: 0.75
-      },
-      (msg) => {
-        progress.value[shot.id] = msg
-      }
-    )
-
-    progress.value[shot.id] = '保存到资源库...'
-    const asset = await assets.add(result.blob, 'video', 'ai-generated', {
-      filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
-      prompt: composeVideoPrompt({
-        prompt,
-        aesthetic: aesthetic.value,
-        audioDescription: shot.audioDescription,
-        voiceover: shot.voiceover,
-        voiceMode: h3VoiceMode(shot),
-        speakerHint: shot.speakerHint,
-        duration: shot.duration,
-        width: width.value,
-        height: height.value,
-        aspectRatio: aspectRatio.value,
-        cameraMovement: shot.cameraMovement,
-        promptStyle
-      }),
-      projectId: project.current?.id,
-      shotId: shot.id
-    })
-    project.assignShotVideo(shot.id, asset.id)
-    await project.save()
     const url = await assets.getUrl(asset.id)
     if (url) videoUrls.value[shot.id] = url
     await loadHistory()
@@ -284,7 +201,7 @@ function next() {
     <header class="page-head">
       <div>
         <h1>🎥 AI 视频生成</h1>
-        <p>每个片段都能查看并修改生成脚本。口播人声请到「字幕」步骤按台词生成。</p>
+        <p>出视频传角色设计图、场景图和本镜故事看板，不传人物+场景配图。口播人声请到「字幕」步骤按台词生成。</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/images')">← 上一步</GradientButton>
@@ -300,8 +217,8 @@ function next() {
       </div>
     </header>
 
-    <GlassCard v-if="shotsWithoutImage.length > 0" padding="md" class="warn-card">
-      ⚠️ 还有 {{ shotsWithoutImage.length }} 个分镜没有图片，需要先回去生成或从资源库选用
+    <GlassCard v-if="shotsWithoutBoard.length > 0" padding="md" class="warn-card">
+      ⚠️ 还有 {{ shotsWithoutBoard.length }} 个分镜没有故事看板。出视频会传角色设计图、场景图和本镜看板，不传人物+场景配图。
     </GlassCard>
 
     <EmptyState
@@ -323,7 +240,7 @@ function next() {
           <div class="shot-title">{{ shot.title }}</div>
           <Tag v-if="shot.videoAssetId" type="success" size="sm">已完成</Tag>
           <Tag v-else-if="generating.has(shot.id)" type="warning" size="sm">生成中</Tag>
-          <Tag v-else-if="!shot.imageAssetId" type="error" size="sm">缺图</Tag>
+          <Tag v-else-if="!shot.boardAssetId" type="error" size="sm">缺看板</Tag>
           <Tag v-else size="sm">待生成</Tag>
         </div>
 
@@ -426,7 +343,7 @@ function next() {
             <div class="prompt-tools">
               <button class="reset-btn" @click="resetVideoPrompt(shot)">按分镜动作重写</button>
               <button class="reset-btn" @click="toggleExpanded(shot.id)">
-                {{ expanded.has(shot.id) ? '收起完整提示词' : '看完整提示词' }}
+                {{ expanded.has(shot.id) ? '收起 H3 提交格式' : '看 H3 提交格式' }}
               </button>
             </div>
           </div>
@@ -446,7 +363,7 @@ function next() {
             size="sm"
             icon="✨"
             :loading="generating.has(shot.id)"
-            :disabled="!shot.imageAssetId"
+            :disabled="generating.has(shot.id)"
             @click="generateOne(shot)"
           >
             生成视频

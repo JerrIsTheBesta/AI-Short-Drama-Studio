@@ -87,8 +87,10 @@ const title = computed(() => {
 })
 
 const kindLabel = computed(() => {
-  if (type.value === 'subject') return '人设'
-  if (type.value === 'scene') return '场景'
+  if (type.value === 'subject') return '四视图'
+  if (type.value === 'subjectProps') return '资产图'
+  if (type.value === 'scene') return '锚点图'
+  if (type.value === 'shotBoard') return '看板'
   if (type.value === 'shotImage') return '配图'
   if (type.value === 'shotVideo') return '视频'
   if (type.value === 'audio') return '口播'
@@ -102,8 +104,10 @@ const assetId = computed(() => {
   if (!p) return undefined
   if (type.value === 'final') return p.finalVideoAssetId
   if (type.value === 'subject') return subject.value?.designSheetAssetId
+  if (type.value === 'subjectProps') return subject.value?.propSheetAssetId
   if (type.value === 'scene') return scene.value?.plateAssetId
   if (!shot.value) return undefined
+  if (type.value === 'shotBoard') return shot.value.boardAssetId
   if (type.value === 'shotImage') return shot.value.imageAssetId
   if (type.value === 'shotVideo') return shot.value.videoAssetId
   if (type.value === 'audio') return shot.value.audioAssetId
@@ -111,7 +115,9 @@ const assetId = computed(() => {
 })
 
 const mediaAspect = computed(() => {
-  if (type.value === 'subject') return cssAspectRatio('16:9')
+  if (type.value === 'subject' || type.value === 'subjectProps' || type.value === 'scene') {
+    return cssAspectRatio('16:9')
+  }
   if (type.value === 'audio' || type.value === 'export') return '16 / 10'
   return cssAspectRatio(project.current?.settings.aspectRatio)
 })
@@ -129,13 +135,20 @@ const gateBlocked = computed(
 
 const isVideoNode = computed(() => type.value === 'shotVideo' || type.value === 'final')
 const isImageNode = computed(
-  () => type.value === 'shotImage' || type.value === 'subject' || type.value === 'scene'
+  () =>
+    type.value === 'shotImage' ||
+    type.value === 'shotBoard' ||
+    type.value === 'subject' ||
+    type.value === 'subjectProps' ||
+    type.value === 'scene'
 )
 const showPrompt = computed(
   () =>
     type.value === 'shotImage' ||
+    type.value === 'shotBoard' ||
     type.value === 'shotVideo' ||
     type.value === 'subject' ||
+    type.value === 'subjectProps' ||
     type.value === 'scene' ||
     type.value === 'audio'
 )
@@ -143,7 +156,9 @@ const showPrompt = computed(
 const promptValue = computed({
   get() {
     if (type.value === 'subject') return subject.value?.description || ''
+    if (type.value === 'subjectProps') return subject.value?.props || ''
     if (type.value === 'scene') return scene.value?.description || ''
+    if (type.value === 'shotBoard' && shot.value) return shot.value.boardPrompt || shot.value.visualPrompt || ''
     if (type.value === 'shotImage' && shot.value) return effectiveImagePrompt(shot.value)
     if (type.value === 'shotVideo' && shot.value) return editableVideoPrompt(shot.value)
     if (type.value === 'audio') return shot.value?.voiceover || ''
@@ -151,7 +166,9 @@ const promptValue = computed({
   },
   set(v: string) {
     if (type.value === 'subject' && subject.value) project.updateSubject(subject.value.id, { description: v })
+    else if (type.value === 'subjectProps' && subject.value) project.updateSubject(subject.value.id, { props: v })
     else if (type.value === 'scene' && scene.value) project.updateScene(scene.value.id, { description: v })
+    else if (type.value === 'shotBoard' && shot.value) project.updateShot(shot.value.id, { boardPrompt: v })
     else if (type.value === 'shotImage' && shot.value) project.updateShot(shot.value.id, { imagePrompt: v })
     else if (type.value === 'shotVideo' && shot.value) project.updateShot(shot.value.id, { videoPrompt: v })
     else if (type.value === 'audio' && shot.value) project.updateShot(shot.value.id, { voiceover: v })
@@ -160,10 +177,12 @@ const promptValue = computed({
 
 const promptHint = computed(() => {
   if (type.value === 'shotImage') return '改提示词后点生成，只影响这一镜配图'
+  if (type.value === 'shotBoard') return '改这段后点生成，只影响这一镜故事看板'
   if (type.value === 'shotVideo')
-    return '直接改这段。清空不会自动填回；要点「按分镜动作重写」才会用场记再写。'
-  if (type.value === 'subject') return '改外貌描述后重新生成人设图'
-  if (type.value === 'scene') return '改场景描述后重新生成底板'
+    return '直接改这段。出视频传角色设计图、场景图和本镜看板，不传配图。清空不会自动填回。'
+  if (type.value === 'subject') return '改外貌描述后重新生成四视图'
+  if (type.value === 'subjectProps') return '写下身上的包、证件、平板、鞋等，再生成资产图'
+  if (type.value === 'scene') return '改地点和主锚后重新生成四宫格锚点图'
   if (type.value === 'audio') return '改口播后重新合成配音'
   return ''
 })
@@ -184,8 +203,10 @@ const metaLine = computed(() => {
 const genLabel = computed(() => {
   if (gateBlocked.value) return '先验收剧本'
   const again = hasAsset.value
-  if (type.value === 'subject') return again ? '重新生成' : '生成人设'
-  if (type.value === 'scene') return again ? '重新生成' : '生成场景'
+  if (type.value === 'subject') return again ? '重新生成' : '生成四视图'
+  if (type.value === 'subjectProps') return again ? '重新生成' : '生成资产图'
+  if (type.value === 'scene') return again ? '重新生成' : '生成锚点图'
+  if (type.value === 'shotBoard') return again ? '重新生成' : '生成看板'
   if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
   if (type.value === 'audio') {
@@ -478,6 +499,17 @@ async function replaceImage(blob: Blob, filename: string) {
     shotId: shot.value?.id
   })
   if (type.value === 'shotImage' && shot.value) project.assignShotImage(shot.value.id, asset.id)
+  else if (type.value === 'shotBoard' && shot.value) project.assignShotBoard(shot.value.id, asset.id)
+  else if (type.value === 'subjectProps' && subject.value) {
+    project.updateSubject(subject.value.id, {
+      propSheetAssetId: asset.id,
+      propSheetHistoryIds: pushHistory(
+        subject.value.propSheetAssetId,
+        asset.id,
+        subject.value.propSheetHistoryIds
+      )
+    })
+  }
   else if (type.value === 'subject' && subject.value) {
     project.updateSubject(subject.value.id, {
       designSheetAssetId: asset.id,
@@ -560,9 +592,10 @@ const cropStyle = computed(() => ({
 <template>
   <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating || !!toolBusy }]">
     <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
-    <Handle v-if="type === 'shotImage'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
-    <Handle v-if="type === 'shotImage'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
-    <Handle v-if="type === 'shotImage'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
+    <Handle v-if="type === 'shotImage'" id="board" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
     <Handle v-if="type === 'shotVideo'" id="image" type="target" :position="Position.Left" class="hndl" />
 
     <transition name="float-up">
@@ -691,9 +724,9 @@ const cropStyle = computed(() => ({
         @input="promptValue = ($event.target as HTMLTextAreaElement).value"
       />
       <ShotRefStrip
-        v-if="shot && (type === 'shotImage' || type === 'shotVideo')"
+        v-if="shot && (type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo')"
         :shot="shot"
-        :mode="type === 'shotVideo' ? 'video' : 'image'"
+        :mode="type === 'shotVideo' ? 'video' : type === 'shotBoard' ? 'board' : 'image'"
       />
       <div class="prompt-foot">
         <ImageModelSelect v-if="isImageNode" />
@@ -1130,12 +1163,16 @@ const cropStyle = computed(() => ({
   background: #a78bfa;
   border: 1px solid #fff;
 }
-.pnode.kind-subject { border-color: rgba(251, 191, 36, 0.35); }
+.pnode.kind-subject,
+.pnode.kind-subjectProps { border-color: rgba(251, 191, 36, 0.35); }
 .pnode.kind-scene { border-color: rgba(96, 165, 250, 0.35); }
+.pnode.kind-shotBoard { border-color: rgba(148, 163, 184, 0.45); }
 .pnode.kind-shotImage { border-color: rgba(167, 139, 250, 0.35); }
 .pnode.kind-shotVideo { border-color: rgba(244, 114, 182, 0.35); }
 .pnode.on.kind-subject,
+.pnode.on.kind-subjectProps,
 .pnode.on.kind-scene,
+.pnode.on.kind-shotBoard,
 .pnode.on.kind-shotImage,
 .pnode.on.kind-shotVideo {
   border-color: rgba(255, 255, 255, 0.55);

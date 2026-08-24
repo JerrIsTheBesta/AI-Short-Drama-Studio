@@ -28,6 +28,10 @@ export interface AgentTaskRecord {
   status: 'planned' | 'running' | 'success' | 'failed' | 'cancelled'
   currentStep?: string
   completedTools: string[]
+  /** 自动补依赖或失败重规划的累计次数，随项目持久化。 */
+  repairCount?: number
+  /** 最近一次自动恢复的诊断，供恢复任务和界面解释。 */
+  lastRecovery?: string
   failedTool?: string
   error?: string
   estimatedCalls?: number
@@ -96,6 +100,14 @@ export interface Shot {
   continuity?: string
   /** 本镜道具焦点与状态 */
   propFocus?: string
+  /**
+   * 故事看板图：同一镜头的六格黑白动作草图，用来锁起始状态、动作过程、
+   * 反应与结束状态。配图时锁构图，视频时作为动作时间线参考。
+   */
+  boardAssetId?: ID
+  boardHistoryIds?: ID[]
+  /** 看板专用提示词。为空时用 visualPrompt */
+  boardPrompt?: string
   /** 关联的素材 */
   imageAssetId?: ID
   videoAssetId?: ID
@@ -259,15 +271,20 @@ export interface Subject {
   role?: string
   /** 本片状态变体，如「外卖外套 / 西装揭示」 */
   stateVariants?: string
-  /** 多角度角色设计图（一张图里含正/侧/背等多种形态） */
+  /** 四视图：头像特写 + 全身正/侧/背，锁脸和体型 */
   designSheetAssetId?: ID
-  /** 历史人设图（不含当前） */
+  /** 历史四视图（不含当前） */
   designSheetHistoryIds?: ID[]
+  /** 身上穿戴/随身物件清单，供资产图使用 */
+  props?: string
+  /** 资产图：这个角色身上有哪些东西（包、证件、平板、鞋等） */
+  propSheetAssetId?: ID
+  propSheetHistoryIds?: ID[]
   /** 是否从用户参考图里识别出来 */
   fromReference?: boolean
 }
 
-/** 整片锁定的场景底板（空镜环境，不含人物） */
+/** 整片锁定的场景锚点图（四宫格：全景 / 主锚 / 地面 / 光线） */
 export interface Scene {
   id: ID
   name: string
@@ -275,11 +292,13 @@ export interface Scene {
   description: string
   /** 场景主锚（前台接待台 / 电梯门…），站位相对它描述 */
   mainAnchor?: string
+  /** 四宫格锚点清单，分号分隔，如「大厅全景；电梯门；大理石地面；天窗」 */
+  anchors?: string
   /** 时辰与光源 */
   lighting?: string
-  /** 场景空镜 / 底板图 */
+  /** 场景四宫格锚点图 */
   plateAssetId?: ID
-  /** 历史底板图（不含当前） */
+  /** 历史锚点图（不含当前） */
   plateHistoryIds?: ID[]
 }
 

@@ -40,7 +40,7 @@ export function envDefaults() {
     video: {
       baseUrl: envStr('VITE_VIDEO_BASE_URL'),
       apiKey: envStr('VITE_VIDEO_API_KEY'),
-      workflowId: envStr('VITE_VIDEO_WORKFLOW_ID', 'minimax_h3_light2v-1')
+      workflowId: envStr('VITE_VIDEO_WORKFLOW_ID', 'U09-API-9图版')
     },
     music: {
       baseUrl: envStr('VITE_MUSIC_BASE_URL', 'https://api.minimaxi.com/v1'),

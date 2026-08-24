@@ -35,6 +35,16 @@ export function h3VoiceMode(shot: Shot): 'dialogue' | 'voiceover' | 'none' {
   return 'none'
 }
 
+/** 说话者不在画面里时，即使标成对白也按画外音处理，避免把被叫的人当成开口者。 */
+export function resolveH3VoiceMode(shot: Shot, onScreenNames: string[] = []): 'dialogue' | 'voiceover' | 'none' {
+  const mode = h3VoiceMode(shot)
+  if (mode !== 'dialogue') return mode
+  const speaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  if (!speaker) return mode
+  const onScreen = onScreenNames.some((name) => name === speaker || speaker.includes(name) || name.includes(speaker))
+  return onScreen ? 'dialogue' : 'voiceover'
+}
+
 export function needsExternalTts(shot: Shot): boolean {
   return effectiveShotAudioMode(shot) === 'tts' && Boolean(shot.voiceover.trim())
 }

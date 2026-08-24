@@ -295,6 +295,16 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  function assignShotBoard(shotId: ID, assetId: ID) {
+    if (!current.value) return
+    const shot = current.value.shots.find((s) => s.id === shotId)
+    if (!shot) return
+    updateShot(shotId, {
+      boardAssetId: assetId,
+      boardHistoryIds: pushHistory(shot.boardAssetId, assetId, shot.boardHistoryIds)
+    })
+  }
+
   /** 把图片绑到分镜：旧图进历史，不从资源库删除 */
   function assignShotImage(shotId: ID, assetId: ID) {
     if (!current.value) return
@@ -556,6 +566,7 @@ export const useProjectStore = defineStore('project', () => {
     updateScene,
     updateShot,
     setShotAudioMode,
+    assignShotBoard,
     assignShotImage,
     assignShotVideo,
     assignShotAudio,

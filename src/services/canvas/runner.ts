@@ -8,10 +8,12 @@ import {
   storyboardToShots,
   isPlayReady,
   characterSheetPrompt,
+  characterPropSheetPrompt,
+  shotBoardPrompt,
   scenePlatePrompt,
   composeVideoPrompt,
+  compileH3OfficialPrompt,
   spokenTextOnly,
-  h3IdentityLockFromFrame,
   enrichVideoPerformance,
   reviewImageQuality,
   reviewVideoQuality,
@@ -21,16 +23,20 @@ import {
 } from '@/services/ai'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
-import { collectShotRefIds, composeShotImagePrompt, boundSubjectIds, sceneForShot, subjectsForShot, videoExtraRefIds, videoExtraRefLead } from '@/utils/consistency'
-import { assembleShotVideoPrompt } from '@/utils/shotPrompt'
+import { collectShotRefIds, collectShotBoardRefIds, collectShotVideoEntries, packVideoRefEntries, composeShotImagePrompt, boundSubjectIds, sceneForShot, subjectsForShot } from '@/utils/consistency'
+import { countAddedPlayScenes } from '@/utils/playContinue'
 import {
   effectiveImagePrompt,
-  h3VoiceMode,
   needsExternalTts,
-  pushHistory
+  pushHistory,
+  resolveH3VoiceMode
 } from '@/utils/shot'
 import { rebuildCanvasGraph } from './layout'
-import { lookFromScript, styleLabel } from '@/utils/visualStyle'
+import { emitCanvasActivity } from './canvasBridge'
+import { extractStageLabel } from './pipeline'
+import { friendlyAiError } from '@/services/ai/abort'
+import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
+import { topicFromBrief } from '@/utils/storyBrief'
 import { mapPool, withNodeJob } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
@@ -92,6 +98,72 @@ function resolveLlmModel(override?: string): string | undefined {
   return useSettingsStore().config.llm.model?.trim() || undefined
 }
 
+function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof useProjectStore>['current']>) {
+  const subjects = p.subjects ?? []
+  const scenes = p.scenes ?? []
+  const shots = p.shots ?? []
+  const shotNo = (id?: string) => {
+    const shot = shots.find((item) => item.id === id)
+    return shot ? `第${shot.index + 1}镜` : '分镜'
+  }
+  switch (node.type) {
+    case 'script':
+      return '写完整剧本'
+    case 'subject':
+      return `四视图「${subjects.find((s) => s.id === node.data.subjectId)?.name || '角色'}」`
+    case 'subjectProps':
+      return `资产图「${subjects.find((s) => s.id === node.data.subjectId)?.name || '角色'}」`
+    case 'scene':
+      return `场景锚点「${scenes.find((s) => s.id === node.data.sceneId)?.name || '场景'}」`
+    case 'shotBoard':
+      return `故事看板 ${shotNo(node.data.shotId)}`
+    case 'shotImage':
+      return `分镜配图 ${shotNo(node.data.shotId)}`
+    case 'shotVideo':
+      return `分镜视频 ${shotNo(node.data.shotId)}`
+    case 'audio':
+      return `口播 ${shotNo(node.data.shotId)}`
+    case 'export':
+    case 'final':
+      return '合成成片'
+    default:
+      return node.data.label || node.type
+  }
+}
+
+function scriptActivityLabel(kind: 'play' | 'extract' | 'continue') {
+  if (kind === 'extract') return extractStageLabel(useProjectStore().current)
+  if (kind === 'continue') return '续写剧本'
+  return '写完整剧本'
+}
+
+function trackActivity(
+  nodeId: string,
+  label: string,
+  source: 'canvas' | 'agent',
+  report?: (msg: string) => void
+) {
+  emitCanvasActivity({ kind: 'start', nodeId, label, source })
+  return {
+    progress(msg: string) {
+      report?.(msg)
+      emitCanvasActivity({ kind: 'progress', nodeId, label, message: msg, source })
+    },
+    done(message?: string) {
+      emitCanvasActivity({ kind: 'done', nodeId, label, message, source })
+    },
+    fail(e: unknown) {
+      emitCanvasActivity({
+        kind: 'error',
+        nodeId,
+        label,
+        message: friendlyAiError(e),
+        source
+      })
+    }
+  }
+}
+
 export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
@@ -102,7 +174,7 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
   const refs = await productRefBlobs()
   const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
   const prompt = characterSheetPrompt(sub, style, useRefs, look)
-  onProgress?.('生成人设图...')
+  onProgress?.('生成四视图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
     {
@@ -121,13 +193,13 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
     onProgress
   )
   const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `character_${sub.name}_${Date.now().toString(36)}`,
+    filename: `turnaround_${sub.name}_${Date.now().toString(36)}`,
     prompt,
     projectId: project.current.id
   })
   onProgress?.('校验人设图片文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
-  if (!quality.passed) throw new Error(`人设图文件无效：${quality.issues.join('；')}`)
+  if (!quality.passed) throw new Error(`四视图文件无效：${quality.issues.join('；')}`)
   project.updateSubject(sub.id, {
     designSheetAssetId: asset.id,
     designSheetHistoryIds: pushHistory(
@@ -135,6 +207,59 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
       asset.id,
       sub.designSheetHistoryIds
     )
+  })
+  await project.save()
+  return asset
+}
+
+export async function generateSubjectPropSheet(
+  sub: Subject,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const look = lookFromScript(project.current.script)
+  const style = look.style
+  const prompt = characterPropSheetPrompt(sub, style, look)
+  const refs: Blob[] = []
+  const labels: string[] = []
+  if (sub.designSheetAssetId) {
+    const four = await assets.getBlob(sub.designSheetAssetId)
+    if (four) {
+      refs.push(four)
+      labels.push(`四视图「${sub.name}」，资产图里的物件必须能戴在/拿在这个人身上`)
+    }
+  }
+  onProgress?.('生成资产图...')
+  const size = imageGenSize('sheet')
+  const result = await generateImage(
+    {
+      prompt,
+      style,
+      width: size.width,
+      height: size.height,
+      aspectRatio: '16:9',
+      referenceImages: refs.length ? refs : undefined,
+      referenceLabels: labels.length ? labels : undefined,
+      model: imageModelForProject(project.current.pipelineMode),
+      signal
+    },
+    onProgress
+  )
+  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+    filename: `props_${sub.name}_${Date.now().toString(36)}`,
+    prompt,
+    projectId: project.current.id
+  })
+  onProgress?.('校验资产图文件...')
+  const quality = await reviewImageQuality(result.blob, prompt, signal)
+  if (!quality.passed) throw new Error(`资产图文件无效：${quality.issues.join('；')}`)
+  project.updateSubject(sub.id, {
+    propSheetAssetId: asset.id,
+    propSheetHistoryIds: pushHistory(sub.propSheetAssetId, asset.id, sub.propSheetHistoryIds)
   })
   await project.save()
   return asset
@@ -148,8 +273,60 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
   const look = lookFromScript(project.current.script)
   const style = look.style
   const prompt = scenePlatePrompt(scn, style, look)
-  onProgress?.('生成场景底板...')
-  const size = imageGenSize('scene')
+  onProgress?.('生成场景锚点图...')
+  const size = imageGenSize('sheet')
+  const result = await generateImage(
+    {
+      prompt,
+      style,
+      width: size.width,
+      height: size.height,
+      aspectRatio: '16:9',
+      model: imageModelForProject(project.current.pipelineMode),
+      signal
+    },
+    onProgress
+  )
+  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+    filename: `anchors_${scn.name}_${Date.now().toString(36)}`,
+    prompt,
+    projectId: project.current.id
+  })
+  onProgress?.('校验场景图片文件...')
+  const quality = await reviewImageQuality(result.blob, prompt, signal)
+  if (!quality.passed) throw new Error(`场景锚点图文件无效：${quality.issues.join('；')}`)
+  project.updateScene(scn.id, {
+    plateAssetId: asset.id,
+    plateHistoryIds: pushHistory(scn.plateAssetId, asset.id, scn.plateHistoryIds)
+  })
+  await project.save()
+  return asset
+}
+
+export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const rebound = boundSubjectIds(shot, project.current.subjects ?? [])
+  if (rebound.length) {
+    project.updateShot(shot.id, { subjectIds: rebound })
+    shot = project.current.shots.find((s) => s.id === shot.id) || { ...shot, subjectIds: rebound }
+  }
+  const look = lookFromScript(project.current.script)
+  const style = look.style
+  const bundle = collectShotBoardRefIds(shot, project.current)
+  const blobs: Blob[] = []
+  const labels: string[] = []
+  for (let i = 0; i < bundle.ids.length; i++) {
+    const b = await assets.getBlob(bundle.ids[i])
+    if (!b) continue
+    blobs.push(b)
+    labels.push(bundle.labels[i])
+  }
+  const prompt = shotBoardPrompt(shot, style, look)
+  onProgress?.(blobs.length ? `画故事看板（${blobs.length} 张参考）...` : '画故事看板...')
+  const size = imageGenSize('shot')
   const result = await generateImage(
     {
       prompt,
@@ -157,23 +334,23 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
       width: size.width,
       height: size.height,
       aspectRatio: project.current.settings.aspectRatio,
+      referenceImages: blobs.length ? blobs : undefined,
+      referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
       signal
     },
     onProgress
   )
   const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `scene_${scn.name}_${Date.now().toString(36)}`,
+    filename: `board_${shot.index + 1}_${Date.now().toString(36)}`,
     prompt,
-    projectId: project.current.id
+    projectId: project.current.id,
+    shotId: shot.id
   })
-  onProgress?.('校验场景图片文件...')
+  onProgress?.('校验故事看板文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
-  if (!quality.passed) throw new Error(`场景图文件无效：${quality.issues.join('；')}`)
-  project.updateScene(scn.id, {
-    plateAssetId: asset.id,
-    plateHistoryIds: pushHistory(scn.plateAssetId, asset.id, scn.plateHistoryIds)
-  })
+  if (!quality.passed) throw new Error(`故事看板文件无效：${quality.issues.join('；')}`)
+  project.assignShotBoard(shot.id, asset.id)
   await project.save()
   return asset
 }
@@ -187,6 +364,10 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   if (rebound.length) {
     project.updateShot(shot.id, { subjectIds: rebound })
     shot = project.current.shots.find((s) => s.id === shot.id) || { ...shot, subjectIds: rebound }
+  }
+  if (!shot.boardAssetId) {
+    await generateShotBoard(shot, onProgress, signal)
+    shot = project.current.shots.find((s) => s.id === shot.id) || shot
   }
   const look = lookFromScript(project.current.script)
   const style = look.style
@@ -234,58 +415,127 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   return asset
 }
 
+function refreshShot(shotId: string): Shot {
+  const shot = useProjectStore().current?.shots.find((item) => item.id === shotId)
+  if (!shot) throw new Error('找不到分镜')
+  return shot
+}
+
+async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
+  const project = useProjectStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  for (const sub of subjectsForShot(shot, project.current)) {
+    const latest = (project.current.subjects ?? []).find((item) => item.id === sub.id) || sub
+    if (latest.designSheetAssetId) continue
+    onProgress?.(`先补「${latest.name}」角色设计图…`)
+    await generateSubjectSheet(latest, onProgress, signal)
+  }
+  const scene = sceneForShot(shot, project.current)
+  if (scene && !scene.plateAssetId) {
+    onProgress?.(`先补场景「${scene.name}」…`)
+    await generateScenePlate(scene, onProgress, signal)
+  }
+  shot = refreshShot(shot.id)
+  if (!shot.boardAssetId) {
+    onProgress?.('先补本镜故事看板…')
+    await generateShotBoard(shot, onProgress, signal)
+  }
+  return refreshShot(shot.id)
+}
+
 export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  if (!shot.imageAssetId) throw new Error('请先生成该分镜的配图')
-  const main = await assets.getBlob(shot.imageAssetId)
-  if (!main) throw new Error('配图读取失败')
-  onProgress?.('识别画面人物…')
+  shot = await ensureShotVideoRefs(shot, onProgress, signal)
+
+  const allEntries = collectShotVideoEntries(shot, project.current)
+  const packed = packVideoRefEntries(allEntries)
+  if (!packed.length) throw new Error('没有角色设计图、场景图或故事看板，无法出视频。不要用人物+场景配图出片。')
+  if (!packed.some((entry) => entry.kind === 'board')) {
+    throw new Error('没有本镜故事看板，无法出视频。看板是这一镜的整体故事架构。')
+  }
+  const blobs: Blob[] = []
+  for (const entry of packed) {
+    const blob = await assets.getBlob(entry.id)
+    if (!blob) throw new Error(`${entry.name || entry.kind} 参考图读取失败`)
+    blobs.push(blob)
+  }
+  const extraChars = allEntries.filter((entry) => entry.kind === 'character').length
+    - packed.filter((entry) => entry.kind === 'character').length
+  if (extraChars > 0) {
+    onProgress?.(`本镜角色太多，已按最多 9 张传：先角色设计图，再场景，再故事看板`)
+  }
+
   const promptStyle = getVideoPromptStyle()
-  const identityLock = await h3IdentityLockFromFrame({
-    imageBlob: main,
-    subjects: subjectsForShot(shot, project.current),
-    signal,
-    promptStyle
-  })
+  const cast = subjectsForShot(shot, project.current)
+  const scene = sceneForShot(shot, project.current)
   onProgress?.('写细视频内容表现…')
   const performance = await enrichVideoPerformance({
     shot,
-    subjects: subjectsForShot(shot, project.current),
-    scene: sceneForShot(shot, project.current),
+    subjects: cast,
+    scene,
     signal
   })
   if (performance && performance !== shot.videoPrompt) {
     project.updateShot(shot.id, { videoPrompt: performance })
   }
-  const extraIds = promptStyle === 'formatted' ? videoExtraRefIds(shot).slice(0, 2) : []
-  const extras: Blob[] = []
-  for (const id of extraIds) {
-    const b = await assets.getBlob(id)
-    if (b) extras.push(b)
-  }
-  const lead = extras.length ? videoExtraRefLead(shot, project.current) : ''
-  const prompt = assembleShotVideoPrompt({
-    style: promptStyle,
-    identityLock,
-    performance,
-    extraLead: lead
+  const spoken = spokenTextOnly(shot.voiceover || '')
+  const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  const onScreenNames = cast.map((subject) => subject.name)
+  const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
+  const imageAssignments = packed.map((entry) => entry.label)
+  onProgress?.('按 H3 多图参考格式编译提示词…')
+  const officialPrompt = await compileH3OfficialPrompt({
+    prompt: performance,
+    aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
+    audioDescription: shot.audioDescription,
+    voiceover: spoken,
+    voiceMode,
+    speakerHint: shot.speakerHint,
+    speakerName: visibleSpeaker,
+    onScreenNames,
+    sceneName: scene?.name,
+    sceneDescription: scene?.description,
+    sceneLighting: scene?.lighting,
+    sceneAnchor: scene?.mainAnchor,
+    shotTitle: shot.title,
+    imageAssignments,
+    duration: shot.duration,
+    width: project.current.settings.width,
+    height: project.current.settings.height,
+    aspectRatio: project.current.settings.aspectRatio,
+    cameraMovement: shot.cameraMovement,
+    promptStyle,
+    signal
   })
-  onProgress?.(
-    extras.length ? `生成视频（本镜配图 + ${extras.length} 张参考）…` : '生成视频（仅本镜配图）…'
+  const slotNames = packed.map((entry, index) =>
+    entry.kind === 'character'
+      ? `图${index + 1}「${entry.name}」人设`
+      : entry.kind === 'scene'
+        ? `图${index + 1}场景`
+        : `图${index + 1}故事看板`
   )
+  onProgress?.(`生成视频（${slotNames.join('、')}）…`)
   const result = await generateVideo(
     {
-      imageBlob: main,
-      referenceImages: extras.length ? extras : undefined,
-      prompt,
+      imageBlob: blobs[0],
+      referenceImages: blobs.slice(1),
+      prompt: officialPrompt,
       aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
       audioDescription: shot.audioDescription,
-      voiceover: shot.voiceover,
-      voiceMode: h3VoiceMode(shot),
+      voiceover: spoken,
+      voiceMode,
       speakerHint: shot.speakerHint,
+      speakerName: visibleSpeaker,
+      onScreenNames,
+      sceneName: scene?.name,
+      sceneDescription: scene?.description,
+      sceneLighting: scene?.lighting,
+      sceneAnchor: scene?.mainAnchor,
+      shotTitle: shot.title,
+      imageAssignments,
       duration: shot.duration,
       width: project.current.settings.width,
       height: project.current.settings.height,
@@ -297,17 +547,25 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     onProgress
   )
   onProgress?.('校验视频文件...')
-  const quality = await reviewVideoQuality(result.blob, prompt, signal)
+  const quality = await reviewVideoQuality(result.blob, result.prompt, signal)
   if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
   const asset = await assets.add(result.blob, 'video', 'ai-generated', {
     filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
     prompt: composeVideoPrompt({
-      prompt,
+      prompt: officialPrompt,
       aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
       audioDescription: shot.audioDescription,
-      voiceover: shot.voiceover,
-      voiceMode: h3VoiceMode(shot),
+      voiceover: spoken,
+      voiceMode,
       speakerHint: shot.speakerHint,
+      speakerName: visibleSpeaker,
+      onScreenNames,
+      sceneName: scene?.name,
+      sceneDescription: scene?.description,
+      sceneLighting: scene?.lighting,
+      sceneAnchor: scene?.mainAnchor,
+      shotTitle: shot.title,
+      imageAssignments,
       duration: shot.duration,
       width: project.current.settings.width,
       height: project.current.settings.height,
@@ -355,11 +613,30 @@ export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) =
 export async function runGeneratePlay(
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
-  model?: string
+  model?: string,
+  opts?: { mode?: 'write' | 'continue'; hint?: string; brief?: string }
 ) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
+  const continueMode = opts?.mode === 'continue'
+  const brief = opts?.brief?.trim()
+  if (continueMode && !isPlayReady(project.current?.script)) {
+    throw new Error('请先写好完整剧本，再续写')
+  }
+  if (brief && !continueMode && project.current?.script) {
+    const topic = topicFromBrief(brief) || project.current.script.topic
+    const inferred = inferVisualStyleFromText(brief)
+    project.current.name = topic
+    project.setScript({
+      ...project.current.script,
+      topic,
+      content: brief,
+      playReady: false,
+      ...(inferred ? { style: inferred } : {})
+    })
+  }
   if (
+    !continueMode &&
     project.current?.pipelineMode === 'remake' &&
     project.current.sourceVideoAssetId &&
     !isPlayReady(project.current.script)
@@ -385,7 +662,8 @@ export async function runGeneratePlay(
   } else if (!look.matched && look.userNamed) {
     onProgress?.(`已按你的原话锁定画风：${look.medium}`)
   }
-  onProgress?.('写完整剧本…')
+  const previousPlay = project.current.script.content || ''
+  onProgress?.(continueMode ? '续写剧本…' : '写完整剧本…')
   const run = await generatePlay(
     {
       topic: project.current.script.topic,
@@ -395,15 +673,18 @@ export async function runGeneratePlay(
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
-      model: resolveLlmModel(model)
+      model: resolveLlmModel(model),
+      playMode: continueMode ? 'continue' : 'write',
+      continueHint: opts?.hint
     },
     onProgress,
     signal
   )
-  // 只落剧本，清空旧节点，等第二步再提炼
-  project.setShots([])
-  project.setSubjects([])
-  project.setScenes([])
+  if (!continueMode) {
+    project.setShots([])
+    project.setSubjects([])
+    project.setScenes([])
+  }
   project.setScript({
     ...project.current.script,
     topic: run.result.topic || project.current.script.topic,
@@ -415,9 +696,19 @@ export async function runGeneratePlay(
     ...(run.result.colorPalette ? { colorPalette: run.result.colorPalette } : {}),
     ...(run.result.lightingNote ? { lightingNote: run.result.lightingNote } : {})
   })
-  project.setCanvas(rebuildCanvasGraph(project.current, false))
+  if (!continueMode) {
+    project.setCanvas(rebuildCanvasGraph(project.current, false))
+  }
   project.setPlayApproved(false)
   await project.save()
+  if (continueMode) {
+    const added = countAddedPlayScenes(previousPlay, run.result.playMarkdown)
+    onProgress?.(
+      added > 0
+        ? `已续写 ${added} 场。已有节点未动，要同步请点「重新提炼节点」。`
+        : '剧本已更新。已有节点未动，要同步请点「重新提炼节点」。'
+    )
+  }
   return run
 }
 
@@ -445,7 +736,58 @@ export async function runExtractStoryboard(
     }
   }
   const look = lookFromScript(project.current.script)
-  onProgress?.('从剧本提炼节点…')
+  const hasShots = project.current.shots.length > 0
+  const existingSubjects = project.current.subjects ?? []
+  const existingScenes = project.current.scenes ?? []
+  const extractStartAt: 'subjects' | 'scenes' | 'shots' = hasShots
+    ? 'subjects'
+    : !existingSubjects.length
+      ? 'subjects'
+      : !existingScenes.length
+        ? 'scenes'
+        : 'shots'
+  onProgress?.(
+    extractStartAt === 'subjects'
+      ? '先拆人物；完成后立即保存到画布…'
+      : extractStartAt === 'scenes'
+        ? '人物已保存；继续拆场景…'
+        : '人物和场景已保存；继续拆分镜…'
+  )
+  let finalStagePersisted = false
+  const persistStage = async (
+    stage: 'subjects' | 'scenes' | 'shots',
+    partial: import('@/services/ai/storyboard').StoryboardResult
+  ) => {
+    if (!project.current) return
+    if (stage === 'subjects') {
+      project.setSubjects(partial.subjects ?? [])
+      if (hasShots) {
+        project.setScenes([])
+        project.setShots([])
+      }
+    } else if (stage === 'scenes') {
+      project.setSubjects(partial.subjects ?? project.current.subjects ?? [])
+      project.setScenes(partial.scenes ?? [])
+    } else {
+      finalStagePersisted = true
+      const stageShots = storyboardToShots(partial)
+      if (project.current.pipelineMode === 'remake') {
+        for (const shot of stageShots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
+      }
+      project.setSubjects(partial.subjects ?? project.current.subjects ?? [])
+      project.setScenes(partial.scenes ?? project.current.scenes ?? [])
+      project.setShots(stageShots)
+    }
+    project.setCanvas(rebuildCanvasGraph(project.current, false))
+    await project.save()
+    onProgress?.(
+      stage === 'subjects'
+        ? `人物已写入画布（${project.current.subjects?.length || 0} 个）`
+        : stage === 'scenes'
+          ? `场景已写入画布（${project.current.scenes?.length || 0} 个）`
+          : `分镜已写入画布（${project.current.shots.length} 镜）`
+    )
+  }
   const run = await generateStoryboard(
     {
       topic: project.current.script.topic,
@@ -456,20 +798,32 @@ export async function runExtractStoryboard(
       productImages,
       keywords: project.current.script.keywords,
       mode: 'extract',
-      model: resolveLlmModel(model)
+      model: resolveLlmModel(model),
+      extractStartAt,
+      extractStopAfter: extractStartAt,
+      existingSubjects,
+      existingScenes,
+      onExtractStage: persistStage
     },
     onProgress,
     signal
   )
+  if (extractStartAt !== 'shots') {
+    project.setPlayApproved(false)
+    await project.save()
+    return run
+  }
   const shots = storyboardToShots(run.result)
   if (project.current.pipelineMode === 'remake') {
     for (const shot of shots) {
       shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
     }
   }
-  project.setShots(shots)
-  project.setSubjects(run.result.subjects ?? [])
-  project.setScenes(run.result.scenes ?? [])
+  if (!finalStagePersisted) {
+    project.setShots(shots)
+    project.setSubjects(run.result.subjects ?? [])
+    project.setScenes(run.result.scenes ?? [])
+  }
   if (project.current.script) {
     project.setScript({
       ...project.current.script,
@@ -490,25 +844,38 @@ export async function runExtractStoryboard(
 
 /** 剧本节点动作：默认只写剧本，提炼必须显式传入 extract */
 export async function runScriptNode(
-  kind: 'play' | 'extract' = 'play',
+  kind: 'play' | 'extract' | 'continue' = 'play',
   onProgress?: RunProgress,
   signal?: AbortSignal,
-  model?: string
+  model?: string,
+  continueHint?: string
 ) {
   return withNodeJob('script', async () => {
     ensureNotCancelled(signal)
     const project = useProjectStore()
-    const report = (msg: string) => onProgress?.('script', msg)
+    const source = onProgress ? 'agent' : 'canvas'
+    const label = scriptActivityLabel(kind)
+    const activity = trackActivity('script', label, source, (msg) => onProgress?.('script', msg))
     patchNode(project, 'script', 'running')
     try {
       if (kind === 'extract') {
-        await runExtractStoryboard(report, signal, model)
+        await runExtractStoryboard(activity.progress, signal, model)
+      } else if (kind === 'continue') {
+        await runGeneratePlay(activity.progress, signal, model, { mode: 'continue', hint: continueHint })
       } else {
-        await runGeneratePlay(report, signal, model)
+        await runGeneratePlay(activity.progress, signal, model)
       }
       patchNode(project, 'script', 'success')
+      activity.done(
+        kind === 'extract'
+          ? `${label}已写入画布`
+          : kind === 'continue'
+            ? '续写已保存到左侧剧本'
+            : '完整剧本已写到画布左侧'
+      )
     } catch (e: any) {
       patchNode(project, 'script', 'failed', e?.message ?? String(e))
+      activity.fail(e)
       throw e
     }
   })
@@ -650,7 +1017,10 @@ export async function runCanvasNode(
     if (!p?.canvas) throw new Error('画布为空')
     const node = p.canvas.nodes.find((n) => n.id === nodeId)
     if (!node) throw new Error('找不到节点')
-    const report = (msg: string) => onProgress?.(nodeId, msg)
+    const source = onProgress ? 'agent' : 'canvas'
+    const label = nodeActivityLabel(node, p)
+    const activity = trackActivity(nodeId, label, source, (msg) => onProgress?.(nodeId, msg))
+    const report = activity.progress
     if (
       node.type !== 'script' &&
       node.type !== 'export' &&
@@ -670,6 +1040,14 @@ export async function runCanvasNode(
         const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
         if (!sub) throw new Error('找不到主体')
         await generateSubjectSheet(sub, report, signal)
+      } else if (node.type === 'subjectProps' && node.data.subjectId) {
+        const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
+        if (!sub) throw new Error('找不到主体')
+        await generateSubjectPropSheet(sub, report, signal)
+      } else if (node.type === 'shotBoard' && node.data.shotId) {
+        const shot = p.shots.find((s) => s.id === node.data.shotId)
+        if (!shot) throw new Error('找不到分镜')
+        await generateShotBoard(shot, report, signal)
       } else if (node.type === 'scene' && node.data.sceneId) {
         const scn = (p.scenes ?? []).find((s) => s.id === node.data.sceneId)
         if (!scn) throw new Error('找不到场景')
@@ -694,10 +1072,12 @@ export async function runCanvasNode(
       patchNode(project, nodeId, 'success')
       if (node.type === 'export') patchNode(project, 'final', 'success')
       if (node.type === 'final') patchNode(project, 'export', 'success')
+      activity.done(`${label}已完成`)
     } catch (e: any) {
       patchNode(project, nodeId, 'failed', e?.message ?? String(e))
       if (node.type === 'export') patchNode(project, 'final', 'failed', e?.message ?? String(e))
       if (node.type === 'final') patchNode(project, 'export', 'failed', e?.message ?? String(e))
+      activity.fail(e)
       throw e
     } finally {
       pendingRun = {}
@@ -708,9 +1088,25 @@ export async function runCanvasNode(
 export async function generateMissingSheets(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
-  const ids = (p.subjects ?? [])
+  const four = (p.subjects ?? [])
     .filter((s) => !s.designSheetAssetId)
     .map((s) => `subject:${s.id}`)
+  await mapPool(four, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
+}
+
+export async function generateMissingPropSheets(onProgress?: (msg: string) => void, signal?: AbortSignal) {
+  const p = useProjectStore().current
+  if (!p) return
+  const props = (p.subjects ?? [])
+    .filter((s) => !s.propSheetAssetId)
+    .map((s) => `subjectProps:${s.id}`)
+  await mapPool(props, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
+}
+
+export async function generateMissingBoards(onProgress?: (msg: string) => void, signal?: AbortSignal) {
+  const p = useProjectStore().current
+  if (!p) return
+  const ids = p.shots.filter((s) => !s.boardAssetId).map((s) => `shotBoard:${s.id}`)
   await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }
 
@@ -732,7 +1128,7 @@ export async function generateMissingVideos(onProgress?: (msg: string) => void, 
   const p = useProjectStore().current
   if (!p) return
   const ids = p.shots
-    .filter((s) => s.imageAssetId && !s.videoAssetId)
+    .filter((s) => !s.videoAssetId)
     .map((s) => `shotVideo:${s.id}`)
   await mapPool(ids, 2, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }

@@ -4,12 +4,14 @@ import { getVideoPromptStyle } from './runtime'
 import {
   composeVideoPerformance,
   isVideoPerformanceThin,
+  stripFrameLead,
   videoPerformanceSpec
 } from '@/utils/shotPrompt'
 
 function stripJsonFence(text: string): string {
   return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
 }
+
 
 /**
  * 出视频前的内容表现：你写过的原文原样用，不再自动改写。
@@ -21,7 +23,7 @@ export async function enrichVideoPerformance(opts: {
   scene?: Pick<Scene, 'name' | 'description' | 'lighting' | 'mainAnchor'>
   signal?: AbortSignal
 }): Promise<string> {
-  const own = (opts.shot.videoPrompt || '').trim()
+  const own = stripFrameLead((opts.shot.videoPrompt || '').trim())
   if (own) return own
 
   const current = composeVideoPerformance(opts.shot)
@@ -42,7 +44,7 @@ export async function enrichVideoPerformance(opts: {
           role: 'system',
           content: `你给图生视频写「视频内容表现」。${videoPerformanceSpec(getVideoPromptStyle())}
 只输出 JSON：{"videoPrompt":"..."}
-配图静帧词只当布景参考，不要抄成视频词。台词必须用下面给的原词。`
+配图静帧词只当布景参考，不要抄成视频词。整段最多一对中文引号，且必须是下面给的原词；没有原词就不要用引号。禁止把景别、站位、动作或运镜写成要念的话。`
         },
         {
           role: 'user',
@@ -73,7 +75,7 @@ ${(opts.shot.visualPrompt || '').slice(0, 400)}`
       signal: opts.signal
     })
     const parsed = JSON.parse(stripJsonFence(resp.content)) as { videoPrompt?: string }
-    const rich = String(parsed.videoPrompt || '').trim()
+    const rich = stripFrameLead(String(parsed.videoPrompt || ''))
     if (!rich || rich === (opts.shot.visualPrompt || '').trim()) return current
     return rich
   } catch {

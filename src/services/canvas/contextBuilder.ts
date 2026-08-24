@@ -26,6 +26,7 @@ function shotContext(shot: Shot) {
     subjectIds: shot.subjectIds ?? [],
     sceneId: shot.sceneId,
     assets: {
+      board: shot.boardAssetId ?? null,
       image: shot.imageAssetId ?? null,
       video: shot.videoAssetId ?? null,
       audio: shot.audioAssetId ?? null
@@ -81,21 +82,25 @@ export function buildProjectContext(userText: string) {
         description: s.description,
         role: s.role,
         stateVariants: s.stateVariants,
-        hasDesignSheet: Boolean(s.designSheetAssetId)
+        hasFourView: Boolean(s.designSheetAssetId),
+        hasPropSheet: Boolean(s.propSheetAssetId),
+        props: s.props
       })),
       scenes: (p.scenes ?? []).map((s) => ({
         id: s.id,
         name: s.name,
         description: s.description,
         mainAnchor: s.mainAnchor,
+        anchors: s.anchors,
         lighting: s.lighting,
-        hasPlate: Boolean(s.plateAssetId)
+        hasAnchorSheet: Boolean(s.plateAssetId)
       })),
       shots: relevantShots(p, userText).map(shotContext),
       totals: {
         shots: p.shots.length,
         timelineClips: p.timeline.length,
-        missingImages: p.shots.filter((s) => !s.imageAssetId).length,
+        missingBoards: p.shots.filter((s) => !s.boardAssetId).length,
+        missingImages: 0,
         missingVideos: p.shots.filter((s) => !s.videoAssetId).length,
         missingAudio: p.shots.filter((s) => needsExternalTts(s) && !s.audioAssetId).length
       }
