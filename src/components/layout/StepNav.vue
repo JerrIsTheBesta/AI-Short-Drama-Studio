@@ -84,7 +84,7 @@ function goStep(index: number) {
 <style scoped>
 .stepnav {
   width: 220px;
-  background: rgba(18, 18, 31, 0.5);
+  background: var(--color-bg-1);
   border-right: 1px solid var(--color-border);
   padding: var(--space-5) var(--space-3);
   flex-shrink: 0;
@@ -112,7 +112,7 @@ function goStep(index: number) {
   opacity: 0.4;
 }
 .step:not(:disabled):hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 .step.active {
@@ -123,7 +123,6 @@ function goStep(index: number) {
   background: var(--grad-primary);
   color: white;
   border-color: transparent;
-  box-shadow: 0 0 12px rgba(124, 58, 237, 0.4);
 }
 .step.done .indicator {
   background: rgba(16, 185, 129, 0.2);

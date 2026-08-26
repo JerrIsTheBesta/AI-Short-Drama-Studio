@@ -17,7 +17,11 @@ export async function probeMedia(blob: Blob): Promise<MediaInfo> {
       const img = await loadImage(url)
       return { width: img.naturalWidth, height: img.naturalHeight }
     } else if (typed.type.startsWith('video/')) {
-      return await probeVideo(url)
+      try {
+        return await probeVideo(url)
+      } catch {
+        return { width: 0, height: 0, duration: undefined, hasAudio: false }
+      }
     } else if (typed.type.startsWith('audio/')) {
       return await probeAudio(url)
     }
@@ -45,15 +49,31 @@ function probeVideo(url: string): Promise<MediaInfo> {
     const v = document.createElement('video')
     v.preload = 'metadata'
     v.muted = true
+    const timer = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('无法读取视频元数据'))
+    }, 8000)
+    const cleanup = () => {
+      window.clearTimeout(timer)
+      v.onloadedmetadata = null
+      v.onerror = null
+      v.removeAttribute('src')
+      v.load()
+    }
     v.onloadedmetadata = () => {
-      resolve({
+      const info = {
         width: v.videoWidth,
         height: v.videoHeight,
         duration: v.duration,
-        hasAudio: false // 浏览器无 API 检测音轨，做粗略判断
-      })
+        hasAudio: false
+      }
+      cleanup()
+      resolve(info)
     }
-    v.onerror = () => reject(new Error('无法读取视频元数据'))
+    v.onerror = () => {
+      cleanup()
+      reject(new Error('无法读取视频元数据'))
+    }
     v.src = url
   })
 }

@@ -21,6 +21,13 @@ export function topicFromBrief(text: string): string {
   return first.slice(0, 32)
 }
 
+/** 完整剧本写出后的项目标题：优先剧本短标题，其次正文一级标题 */
+export function playTitleOf(source: { topic?: string; content?: string } | null | undefined): string {
+  const heading = (source?.content || '').match(/^#\s+(.+)\s*$/m)?.[1]?.trim() || ''
+  const topic = (source?.topic || '').replace(/\s+/g, ' ').trim()
+  return (topic || heading).replace(/\s+/g, ' ').trim().slice(0, 48)
+}
+
 function contentTokens(text: string): string[] {
   const raw = [...(text || '').matchAll(/[\u4e00-\u9fff]{2,6}/g)].map((m) => m[0])
   const out: string[] = []

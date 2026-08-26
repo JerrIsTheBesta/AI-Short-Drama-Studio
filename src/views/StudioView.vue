@@ -9,12 +9,13 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
-import { setCanvasReveal, setCanvasInspect } from '@/services/canvas/canvasBridge'
+import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
 import { isDesktop, desktop } from '@/services/desktop'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
 import AudioNode from '@/components/canvas/AudioNode.vue'
 import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
+import FreeformGenNode from '@/components/canvas/FreeformGenNode.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
 import type { CanvasNode } from '@/types'
@@ -25,6 +26,7 @@ const toast = useToastStore()
 const router = useRouter()
 const agentOpen = ref(true)
 const rightOpen = ref(false)
+const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
 
 const nodeTypes = {
   script: ScriptDocNode,
@@ -37,10 +39,19 @@ const nodeTypes = {
   audio: AudioNode,
   export: PipelineNode,
   final: PipelineNode,
-  groupFrame: GroupFrame
+  groupFrame: GroupFrame,
+  imageGen: FreeformGenNode,
+  videoGen: FreeformGenNode
 }
 
-const { onConnect, onNodeDragStop, onMoveEnd, fitView } = useVueFlow()
+const { onConnect, onNodeDragStop, onMoveEnd, fitView, screenToFlowCoordinate } = useVueFlow()
+
+const ctxMenu = ref<{
+  x: number
+  y: number
+  flow: { x: number; y: number }
+  nodeId?: string
+} | null>(null)
 
 const flowNodes = computed<Node[]>(() => {
   const graph = project.current?.canvas
@@ -100,7 +111,7 @@ const flowEdges = computed<Edge[]>(() => {
     animated: false,
     interactionWidth: 28,
     class: 'pipe-edge',
-    style: { stroke: 'rgba(167, 139, 250, 0.22)', strokeWidth: 1.1 }
+    style: { stroke: 'rgba(126, 180, 255, 0.42)', strokeWidth: 1.1 }
   }))
 })
 
@@ -117,12 +128,16 @@ onMounted(async () => {
     router.push('/')
     return
   }
-  if (!project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')) {
+  agentOpen.value = project.current.pipelineMode !== 'img2video'
+  if (project.current.pipelineMode === 'img2video') {
+    /* 空白画布，右键添加节点 */
+  } else if (!project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')) {
     project.setCanvas(rebuildCanvasGraph(project.current, false))
   } else {
     project.setCanvas(rebuildCanvasGraph(project.current, true))
   }
   await assets.refresh()
+  document.querySelectorAll('body > input[type="file"]').forEach((el) => el.remove())
   setCanvasReveal((nodeId) => {
     setTimeout(() => {
       if (nodeId) fitView({ nodes: [nodeId], padding: 0.28, duration: 450 })
@@ -133,12 +148,18 @@ onMounted(async () => {
     selectedId.value = nodeId
     rightOpen.value = true
   })
+  setCanvasSelect((nodeId) => {
+    selectedId.value = nodeId
+  })
   setTimeout(() => fitView({ padding: 0.2 }), 80)
+  window.addEventListener('keydown', onDupKey)
 })
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', onDupKey)
   setCanvasReveal(null)
   setCanvasInspect(null)
+  setCanvasSelect(null)
 })
 
 onConnect((c: Connection) => {
@@ -186,8 +207,98 @@ function openSettings() {
 
 async function relayout() {
   if (!project.current) return
+  if (project.current.pipelineMode === 'img2video') {
+    setTimeout(() => fitView({ padding: 0.2 }), 40)
+    return
+  }
   project.setCanvas(rebuildCanvasGraph(project.current, false))
   setTimeout(() => fitView({ padding: 0.2 }), 40)
+}
+
+function eventFromCtx(ev: MouseEvent | { event: MouseEvent }): MouseEvent | null {
+  if (ev instanceof MouseEvent) return ev
+  if (ev && typeof ev === 'object' && ev.event instanceof MouseEvent) return ev.event
+  return null
+}
+
+function canDuplicate(id: string | null | undefined): boolean {
+  if (!id) return false
+  const n = project.current?.canvas?.nodes.find((x) => x.id === id)
+  return n?.type === 'imageGen' || n?.type === 'videoGen'
+}
+
+function duplicateNode(id: string | null | undefined) {
+  if (!id) {
+    toast.warn('请先选中要复制的图片或视频节点')
+    return
+  }
+  const nid = project.duplicateCanvasNode(id)
+  closeCtxMenu()
+  if (!nid) {
+    toast.warn('只能复制图片或视频节点')
+    return
+  }
+  selectedId.value = nid
+  toast.success('已复制节点')
+}
+
+function onDupKey(e: KeyboardEvent) {
+  if (!isImg2Video.value) return
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+    e.preventDefault()
+    duplicateNode(selectedId.value)
+  }
+}
+
+function openCtxMenu(ev: MouseEvent | { event: MouseEvent; node?: Node }) {
+  if (!isImg2Video.value) return
+  const event = eventFromCtx(ev)
+  if (!event) return
+  event.preventDefault()
+  event.stopPropagation()
+  const flow = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
+  const clickedId =
+    ev && typeof ev === 'object' && 'node' in ev && ev.node && ev.node.type !== 'groupFrame'
+      ? String(ev.node.id)
+      : undefined
+  if (clickedId) selectedId.value = clickedId
+  const nodeId = clickedId || selectedId.value || undefined
+  const extra = canDuplicate(nodeId) ? 36 : 0
+  const w = 188
+  const h = 92 + extra
+  ctxMenu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - w - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - h - 8)),
+    flow,
+    nodeId
+  }
+}
+
+function closeCtxMenu() {
+  ctxMenu.value = null
+}
+
+function addFreeform(type: 'imageGen' | 'videoGen') {
+  if (!project.current) return
+  const count = (project.current.canvas?.nodes ?? []).filter((n) => n.type === type).length + 1
+  const id = `${type}_${Date.now().toString(36)}`
+  const pos = ctxMenu.value?.flow ?? { x: 120, y: 120 }
+  project.addCanvasNode({
+    id,
+    type,
+    position: { x: pos.x, y: pos.y },
+    data: {
+      label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
+      prompt: '',
+      referenceAssetIds: [],
+      duration: 8,
+      ...(type === 'videoGen' ? { videoModel: 'h3' as const } : {})
+    },
+    status: 'idle'
+  })
+  closeCtxMenu()
 }
 
 async function openFolder() {
@@ -209,12 +320,15 @@ function goClassic() {
         </svg>
       </button>
       <strong>{{ project.current?.name || '画布' }}</strong>
-      <span class="dim">{{ project.current?.shots.length || 0 }} 个分镜</span>
+      <span class="dim">{{
+        isImg2Video ? '一图生视频' : `${project.current?.shots.length || 0} 个分镜`
+      }}</span>
       <span v-if="project.current?.folderPath" class="dim path" :title="project.current.folderPath">
         {{ project.current.folderPath }}
       </span>
       <div class="spacer" />
       <button
+        v-if="!isImg2Video"
         class="icon-btn"
         :class="{ on: agentOpen }"
         :title="agentOpen ? '收起对话' : '打开智能体'"
@@ -241,7 +355,7 @@ function goClassic() {
           <path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H10l2 2h6.5A1.5 1.5 0 0 1 20 9.5v8A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-10Z" />
         </svg>
       </button>
-      <button class="icon-btn" title="经典步骤" @click="goClassic">
+      <button v-if="!isImg2Video" class="icon-btn" title="经典步骤" @click="goClassic">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M8 7h12M8 12h12M8 17h12" />
           <circle cx="4.5" cy="7" r="1.2" />
@@ -268,7 +382,7 @@ function goClassic() {
       </button>
     </header>
     <div class="body">
-      <AgentChat v-if="agentOpen" />
+      <AgentChat v-if="agentOpen && !isImg2Video" />
       <div class="flow-wrap">
         <VueFlow
           :nodes="flowNodes"
@@ -279,11 +393,43 @@ function goClassic() {
           :max-zoom="2"
           fit-view-on-init
           @node-click="onNodeClick"
+          @pane-context-menu="openCtxMenu"
+          @node-context-menu="openCtxMenu"
         >
-          <Background :gap="22" color="rgba(255,255,255,0.06)" />
+          <Background :gap="22" color="rgba(255,255,255,0.08)" />
           <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
+        <div
+          v-if="isImg2Video && !(project.current?.canvas?.nodes.length)"
+          class="empty-hint"
+        >
+          在空白处右键，添加图片或视频节点
+        </div>
       </div>
+      <Teleport to="body">
+        <div
+          v-if="ctxMenu"
+          class="ctx-mask"
+          @click="closeCtxMenu"
+          @contextmenu.prevent="openCtxMenu"
+        />
+        <div
+          v-if="ctxMenu"
+          class="ctx-menu"
+          :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }"
+          @mousedown.stop
+        >
+          <button type="button" @mousedown.prevent.stop="addFreeform('imageGen')">图片生成</button>
+          <button type="button" @mousedown.prevent.stop="addFreeform('videoGen')">视频生成</button>
+          <button
+            v-if="canDuplicate(ctxMenu.nodeId)"
+            type="button"
+            @mousedown.prevent.stop="duplicateNode(ctxMenu.nodeId)"
+          >
+            复制节点
+          </button>
+        </div>
+      </Teleport>
       <aside v-if="rightOpen" class="dock">
         <div class="dock-title">节点</div>
         <NodeInspector :node="selected" />
@@ -363,6 +509,48 @@ function goClassic() {
   background: var(--color-bg-3);
   color: var(--color-accent);
 }
+.empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--color-text-4);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+.ctx-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 9001;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  box-shadow: var(--shadow-lg);
+}
+.ctx-menu button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-1);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-menu button:hover {
+  background: var(--color-fill);
+}
 .dock {
   width: 300px;
   flex-shrink: 0;
@@ -394,9 +582,10 @@ function goClassic() {
 .flow-wrap {
   flex: 1;
   min-width: 0;
+  position: relative;
 }
 .flow-wrap :deep(.vue-flow) {
-  background: radial-gradient(ellipse at top, rgba(124, 58, 237, 0.08), transparent 50%), #0a0a14;
+  background: var(--color-canvas);
 }
 .flow-wrap :deep(.vue-flow__controls) {
   display: flex;
@@ -405,10 +594,9 @@ function goClassic() {
   margin: 12px;
   padding: 4px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(18, 18, 31, 0.9);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  box-shadow: var(--shadow-md);
 }
 .flow-wrap :deep(.vue-flow__controls-button) {
   width: 30px;
@@ -426,52 +614,46 @@ function goClassic() {
   fill: var(--color-text-2);
 }
 .flow-wrap :deep(.vue-flow__controls-button:hover) {
-  background: rgba(124, 58, 237, 0.32);
+  background: var(--color-fill-hover);
 }
 .flow-wrap :deep(.vue-flow__controls-button:hover svg) {
-  fill: #fff;
+  fill: var(--color-text-1);
 }
 .flow-wrap :deep(.vue-flow__controls-button:disabled) {
   opacity: 0.35;
 }
 .flow-wrap :deep(.vue-flow__node) {
   overflow: visible !important;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 .flow-wrap :deep(.vue-flow__node.selected) {
   z-index: 12 !important;
 }
 .flow-wrap :deep(.vue-flow__node-groupFrame) {
   overflow: visible !important;
-  padding: 0;
   margin: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
   width: auto;
   height: auto;
 }
-.flow-wrap :deep(.vue-flow__node-script) {
-  padding: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-}
 .flow-wrap :deep(.vue-flow__node-subject),
+.flow-wrap :deep(.vue-flow__node-subjectProps),
 .flow-wrap :deep(.vue-flow__node-scene),
+.flow-wrap :deep(.vue-flow__node-shotBoard),
 .flow-wrap :deep(.vue-flow__node-shotImage),
 .flow-wrap :deep(.vue-flow__node-shotVideo),
 .flow-wrap :deep(.vue-flow__node-audio),
 .flow-wrap :deep(.vue-flow__node-export),
-.flow-wrap :deep(.vue-flow__node-final) {
-  padding: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
+.flow-wrap :deep(.vue-flow__node-final),
+.flow-wrap :deep(.vue-flow__node-imageGen),
+.flow-wrap :deep(.vue-flow__node-videoGen) {
   width: auto;
   height: auto;
 }
 .flow-wrap :deep(.vue-flow__edge-path) {
-  stroke: rgba(167, 139, 250, 0.2) !important;
+  stroke: rgba(126, 180, 255, 0.42) !important;
   stroke-width: 1.1 !important;
   transition: stroke 0.16s ease, stroke-width 0.16s ease, filter 0.16s ease;
 }
@@ -480,9 +662,9 @@ function goClassic() {
   z-index: 20;
 }
 .flow-wrap :deep(.vue-flow__edge:hover .vue-flow__edge-path) {
-  stroke: #c4b5fd !important;
+  stroke: #9cc4ff !important;
   stroke-width: 2.4 !important;
-  filter: drop-shadow(0 0 7px rgba(167, 139, 250, 0.55));
+  filter: none;
 }
 .flow-wrap :deep(.vue-flow__edge .vue-flow__edgeupdater),
 .flow-wrap :deep(.vue-flow__edge-interaction) {
@@ -490,7 +672,7 @@ function goClassic() {
   stroke: transparent;
 }
 .flow-wrap :deep(.vue-flow__connection-line) {
-  stroke: rgba(196, 181, 253, 0.55) !important;
+  stroke: rgba(126, 180, 255, 0.55) !important;
   stroke-width: 1.4 !important;
 }
 </style>

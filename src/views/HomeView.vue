@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useToastStore } from '@/stores'
+import { useProjectStore, useToastStore, useLibraryStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -9,6 +9,7 @@ import Tag from '@/components/common/Tag.vue'
 import { isDesktop, desktop } from '@/services/desktop'
 import { projectCoverUrl } from '@/services/storage'
 import { runVideoRemake } from '@/services/canvas/runner'
+import { openLightbox } from '@/composables/useLightbox'
 import type { AspectRatio } from '@/types'
 
 const router = useRouter()
@@ -21,7 +22,7 @@ const newName = ref('')
 const newTopic = ref('')
 const newStyle = ref<'cinematic' | 'anime' | 'photorealistic' | '3d-render'>('cinematic')
 const newAspectRatio = ref<AspectRatio>('16:9')
-const pipelineMode = ref<'standard' | 'remake'>('standard')
+const pipelineMode = ref<'standard' | 'remake' | 'img2video'>('standard')
 const remakeVideo = ref<File | null>(null)
 const remakeVideoUrl = ref('')
 const remakeProducts = ref<File[]>([])
@@ -40,10 +41,23 @@ const aspectPresets: { value: AspectRatio; label: string; desc: string; w: numbe
 ]
 
 const covers = ref<Record<string, string>>({})
+const library = useLibraryStore()
+const libUrls = ref<Record<string, string>>({})
+const libUploading = ref(false)
+const homeTab = ref<'projects' | 'library'>('projects')
 
 onMounted(async () => {
   await project.refreshList()
+  await library.refresh()
+  await loadLibraryThumbs()
 })
+
+watch(
+  () => library.all.map((a) => a.id).join(','),
+  () => {
+    loadLibraryThumbs()
+  }
+)
 
 watch(
   () => project.allProjects.map((p) => p.id).join(','),
@@ -180,6 +194,9 @@ async function createProject() {
     p.settings.aspectRatio = newAspectRatio.value
     p.settings.width = preset.w
     p.settings.height = preset.h
+    if (pipelineMode.value === 'img2video') {
+      p.playApproved = true
+    }
     project.setScript(p.script)
     project.setSettings(p.settings)
     await project.save()
@@ -234,6 +251,42 @@ function fmtDuration(sec: number) {
   const s = Math.floor(sec % 60)
   return `${m}:${String(s).padStart(2, '0')}`
 }
+
+async function loadLibraryThumbs() {
+  const next: Record<string, string> = { ...libUrls.value }
+  for (const a of library.all) {
+    if (next[a.id]) continue
+    const url = await library.getUrl(a.id)
+    if (url) next[a.id] = url
+  }
+  libUrls.value = next
+}
+
+async function uploadLibraryImages(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith('image/'))
+  input.value = ''
+  if (!files.length) return
+  libUploading.value = true
+  try {
+    for (const file of files) {
+      await library.add(file, 'uploaded', { filename: file.name })
+    }
+    await loadLibraryThumbs()
+    toast.success(`已上传 ${files.length} 张到公共资产库`)
+  } catch (err: any) {
+    toast.error(err?.message || '上传失败')
+  } finally {
+    libUploading.value = false
+  }
+}
+
+async function removeLibraryItem(id: string) {
+  if (!confirm('从公共资产库删除这张图？')) return
+  await library.remove(id)
+  delete libUrls.value[id]
+  toast.success('已删除')
+}
 </script>
 
 <template>
@@ -284,16 +337,42 @@ function fmtDuration(sec: number) {
 
     <div class="container">
       <div class="section-header">
-        <h2>我的项目</h2>
-        <div class="filter">
+        <div class="home-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            :class="{ on: homeTab === 'projects' }"
+            :aria-selected="homeTab === 'projects'"
+            @click="homeTab = 'projects'"
+          >
+            我的项目
+            <em>{{ project.allProjects.length }}</em>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :class="{ on: homeTab === 'library' }"
+            :aria-selected="homeTab === 'library'"
+            @click="homeTab = 'library'"
+          >
+            资产库
+            <em>{{ library.all.length }}</em>
+          </button>
+        </div>
+        <div v-if="homeTab === 'projects'" class="filter">
           <input
             v-model="search"
             class="search"
             placeholder="🔍 搜索项目..."
           />
         </div>
+        <label v-else class="lib-upload">
+          {{ libUploading ? '上传中…' : '＋ 上传图片' }}
+          <input type="file" accept="image/*" multiple hidden :disabled="libUploading" @change="uploadLibraryImages" />
+        </label>
       </div>
 
+      <div v-if="homeTab === 'projects'">
       <EmptyState
         v-if="filteredProjects.length === 0"
         icon="🎬"
@@ -322,6 +401,7 @@ function fmtDuration(sec: number) {
             </div>
             <div class="proj-meta-top">
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
+              <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">一图生视频</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
                 🎬 {{ p.shots.length }} 个分镜
               </Tag>
@@ -361,6 +441,29 @@ function fmtDuration(sec: number) {
           </div>
         </GlassCard>
       </div>
+      </div>
+
+      <div v-else>
+      <p class="lib-hint">各项目图片节点可入库。一图生视频也可从这里选参考图。</p>
+      <EmptyState
+        v-if="library.all.length === 0"
+        icon="🖼"
+        title="资产库还是空的"
+        description="上传图片，或在项目画布里把生成图加入公共库"
+      />
+      <div v-else class="lib-grid">
+        <div v-for="a in library.all" :key="a.id" class="lib-card">
+          <button type="button" class="lib-thumb" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
+            <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
+            <span v-else>🖼</span>
+          </button>
+          <div class="lib-meta">
+            <span>{{ a.filename }}</span>
+            <button type="button" title="删除" @click="removeLibraryItem(a.id)">🗑</button>
+          </div>
+        </div>
+      </div>
+      </div>
     </div>
 
     <!-- 创建项目弹窗 -->
@@ -374,7 +477,9 @@ function fmtDuration(sec: number) {
                 ? createProgress
                 : pipelineMode === 'remake'
                   ? '上传参考视频和产品图，AI 会按镜头复刻脚本；配音后期合成，视频里不出口播。'
-                  : '起个好名字，下一步可以填具体文案'
+                  : pipelineMode === 'img2video'
+                    ? '自由画布：添加图片生成节点和图生视频节点，参考图可用来自本页或公共资产库。'
+                    : '起个好名字，下一步可以填具体文案'
             }}
           </p>
 
@@ -403,6 +508,14 @@ function fmtDuration(sec: number) {
                   <div class="mode-title">视频复刻</div>
                   <div class="mode-desc">按参考视频镜头换上你的产品</div>
                 </button>
+                <button
+                  class="mode-pick"
+                  :class="{ active: pipelineMode === 'img2video' }"
+                  @click="pipelineMode = 'img2video'"
+                >
+                  <div class="mode-title">一图生视频</div>
+                  <div class="mode-desc">画布上自由加图片节点和视频节点</div>
+                </button>
               </div>
             </label>
 
@@ -411,7 +524,7 @@ function fmtDuration(sec: number) {
               <input v-model="newName" placeholder="例如：夏日旅行 vlog" class="input" />
             </label>
 
-            <label class="field">
+            <label v-if="pipelineMode !== 'img2video'" class="field">
               <span>主题（可选）</span>
               <input v-model="newTopic" placeholder="一句话描述视频主题" class="input" />
             </label>
@@ -530,10 +643,7 @@ function fmtDuration(sec: number) {
 .hero-bg {
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(ellipse at 20% 0%, rgba(124, 58, 237, 0.4) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 100%, rgba(236, 72, 153, 0.3) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(245, 158, 11, 0.2) 0%, transparent 70%);
+  background: var(--color-bg-0);
   z-index: 0;
 }
 .hero-content {
@@ -559,15 +669,12 @@ function fmtDuration(sec: number) {
   background: var(--grad-primary);
   color: white;
   font-size: 16px;
-  box-shadow: 0 0 24px rgba(124, 58, 237, 0.6);
+  box-shadow: none;
 }
 .brand-name {
   font-size: 20px;
   font-weight: 700;
-  background: var(--grad-primary);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--color-text-1);
   letter-spacing: 0.5px;
 }
 .title {
@@ -629,6 +736,43 @@ function fmtDuration(sec: number) {
   font-weight: 700;
   margin: 0;
 }
+.home-tabs {
+  display: flex;
+  gap: 6px;
+}
+.home-tabs button {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-3);
+  font-size: 15px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.home-tabs button em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--color-fill);
+  color: var(--color-text-4);
+}
+.home-tabs button.on {
+  background: var(--color-bg-2);
+  border-color: var(--color-border);
+  color: var(--color-text-1);
+}
+.home-tabs button.on em {
+  background: var(--color-fill-strong);
+  color: var(--color-text-2);
+}
 .search {
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
@@ -676,29 +820,15 @@ function fmtDuration(sec: number) {
   inset: 0;
   opacity: 0.6;
 }
-.proj-thumb-grad[data-style='cinematic'] {
-  background: linear-gradient(135deg, #1e293b 0%, #7c3aed 50%, #ec4899 100%);
-}
-.proj-thumb-grad[data-style='anime'] {
-  background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 50%, #c084fc 100%);
-}
-.proj-thumb-grad[data-style='photorealistic'] {
-  background: linear-gradient(135deg, #0f172a 0%, #1e40af 50%, #0891b2 100%);
-}
-.proj-thumb-grad[data-style='3d-render'] {
-  background: linear-gradient(135deg, #fbbf24 0%, #ec4899 50%, #7c3aed 100%);
-}
-.proj-thumb-grad[data-style='oil-painting'] {
-  background: linear-gradient(135deg, #92400e 0%, #d97706 50%, #fde68a 100%);
-}
-.proj-thumb-grad[data-style='watercolor'] {
-  background: linear-gradient(135deg, #dbeafe 0%, #a7f3d0 50%, #fde68a 100%);
-}
-.proj-thumb-grad[data-style='pixel-art'] {
-  background: linear-gradient(135deg, #f97316 0%, #84cc16 50%, #06b6d4 100%);
-}
+.proj-thumb-grad[data-style='cinematic'],
+.proj-thumb-grad[data-style='anime'],
+.proj-thumb-grad[data-style='photorealistic'],
+.proj-thumb-grad[data-style='3d-render'],
+.proj-thumb-grad[data-style='oil-painting'],
+.proj-thumb-grad[data-style='watercolor'],
+.proj-thumb-grad[data-style='pixel-art'],
 .proj-thumb-grad[data-style='ink-wash'] {
-  background: linear-gradient(135deg, #1f2937 0%, #4b5563 50%, #d1d5db 100%);
+  background: linear-gradient(135deg, #ececec 0%, #d4d4d4 50%, #bdbdbd 100%);
 }
 .proj-thumb-overlay {
   position: absolute;
@@ -775,12 +905,12 @@ function fmtDuration(sec: number) {
 }
 .modal {
   width: 90%;
-  max-width: 460px;
+  max-width: 620px;
   max-height: 88vh;
   overflow-y: auto;
 }
 .modal.remake {
-  max-width: 560px;
+  max-width: 620px;
 }
 .modal h3 {
   margin: 0 0 var(--space-1);
@@ -874,7 +1004,7 @@ function fmtDuration(sec: number) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-fill);
   border-radius: 4px;
 }
 .aspect-box {
@@ -916,7 +1046,7 @@ function fmtDuration(sec: number) {
 }
 .mode-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: var(--space-2);
 }
 .mode-pick {
@@ -1071,5 +1201,74 @@ function fmtDuration(sec: number) {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+.lib-upload {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lib-hint {
+  margin: 0 0 var(--space-4);
+  font-size: 12px;
+  color: var(--color-text-4);
+}
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-3);
+  padding-bottom: var(--space-8);
+}
+.lib-card {
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.lib-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: var(--color-bg-2);
+  cursor: pointer;
+}
+.lib-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.lib-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--color-text-3);
+}
+.lib-meta span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-meta button {
+  margin: 0;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-4);
+}
+.lib-meta button:hover {
+  color: var(--color-error);
 }
 </style>

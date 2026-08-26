@@ -2,9 +2,11 @@
 
 type RevealFn = (nodeId?: string) => void
 type InspectFn = (nodeId: string) => void
+type SelectFn = (nodeId: string) => void
 
 let revealFn: RevealFn | null = null
 let inspectFn: InspectFn | null = null
+let selectFn: SelectFn | null = null
 
 export function setCanvasReveal(fn: RevealFn | null) {
   revealFn = fn
@@ -20,6 +22,14 @@ export function setCanvasInspect(fn: InspectFn | null) {
 
 export function inspectCanvasNode(nodeId: string) {
   inspectFn?.(nodeId)
+}
+
+export function setCanvasSelect(fn: SelectFn | null) {
+  selectFn = fn
+}
+
+export function selectCanvasNode(nodeId: string) {
+  selectFn?.(nodeId)
 }
 
 export type CanvasActivity = {

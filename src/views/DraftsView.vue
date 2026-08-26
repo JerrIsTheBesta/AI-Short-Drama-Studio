@@ -713,7 +713,7 @@ function downloadProjectJson() {
 .progress-bar {
   display: flex;
   height: 8px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   border-radius: var(--radius-full);
   overflow: hidden;
   margin-bottom: 6px;

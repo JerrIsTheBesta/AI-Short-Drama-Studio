@@ -82,7 +82,13 @@ export const useAssetsStore = defineStore('assets', () => {
           '生成结果是图片而不是视频（常见于工作流只输出了预览帧）。请检查图生视频节点是否输出 mp4。'
         )
       }
-      if (info.duration != null && Number.isFinite(info.duration) && info.duration < 0.2) {
+      // 元数据偶尔读成 0 秒，不能因此把已经下好的 mp4 扔掉
+      if (
+        typed.size < 80_000 &&
+        info.duration != null &&
+        Number.isFinite(info.duration) &&
+        info.duration < 0.2
+      ) {
         throw new Error(
           `视频时长异常（${info.duration.toFixed(2)}s），可能只是一张静态帧被标成了视频`
         )

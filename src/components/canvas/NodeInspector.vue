@@ -98,6 +98,7 @@ const currentAssetId = computed(() => {
   if (t === 'shotImage') return shot.value?.imageAssetId
   if (t === 'shotVideo') return shot.value?.videoAssetId
   if (t === 'audio') return shot.value?.audioAssetId
+  if (t === 'imageGen' || t === 'videoGen') return props.node?.data.outputAssetId
   return undefined
 })
 
@@ -106,7 +107,13 @@ const waitingReview = computed(() => needsPlayReview(project.current))
 const gateBlocked = computed(() => {
   const t = props.node?.type
   return Boolean(
-    t && t !== 'script' && t !== 'export' && t !== 'final' && waitingReview.value
+    t &&
+      t !== 'script' &&
+      t !== 'export' &&
+      t !== 'final' &&
+      t !== 'imageGen' &&
+      t !== 'videoGen' &&
+      waitingReview.value
   )
 })
 
@@ -176,6 +183,8 @@ const kindLabel = computed(() => {
   if (t === 'audio') return '分镜 · 口播'
   if (t === 'export') return '视频 · 合成'
   if (t === 'final') return '视频 · 预览'
+  if (t === 'imageGen') return '图片生成'
+  if (t === 'videoGen') return '图生视频'
   return t || ''
 })
 
@@ -429,6 +438,7 @@ const llmModel = computed(() => settings.config.llm.model)
 function patchScript(field: 'topic' | 'content', value: string) {
   if (!project.current?.script) return
   project.setScript({ ...project.current.script, [field]: value })
+  if (field === 'topic') project.applyPlayTitle(value)
 }
 
 function resetImagePrompt() {
@@ -872,7 +882,7 @@ textarea {
 .prev-frame {
   position: relative;
   width: 100%;
-  background: #0b0b14;
+  background: var(--color-bg-2);
 }
 .prev img,
 .prev video {

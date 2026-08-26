@@ -1,25 +1,22 @@
 /**
- * AI 视频生成服务（图生视频 / 文生视频）
+ * AI 视频生成（AutoDL.art ComfyUI 工作流 API）
  *
- * 真实接口（ComfyUI workflow 包装）：
- *   POST {baseUrl}/api/workflow/generate
- *     body: { workflow_id, input_values: {...} }
- *     resp: { prompt_id }
- *   GET  {baseUrl}/api/workflow/result?prompt_id={id}   轮询
- *   GET  {baseUrl}/api/comfy/proxy/history?prompt_id={id}  兼容旧
+ *   POST {base}/api/v1/comfyui/comfyui_workflow/{workflow_id}
+ *   GET  {base}/api/v1/comfyui/comfyui_workflow/result/{task_id}
  *
- * input_values 字段（按 workflow_id 变）：
- *   U09-API-9图版：137/139/146/147/148/149/150/151/170:image，最多 9 张
- *   旧 3 槽：137/139/141:image
+ * 入参：prompt、duration、resolution（768p横/768p竖）、ref_image_0..8
+ * 工作流：minimax_h3_image_audio_to_video_v2_15s（H3 图+音频生视频，最长 15 秒）
  */
 
 import { getAIMode } from './client'
-import { getVideoConfig, getVideoPromptStyle } from './runtime'
+import { getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { assertValidH3Prompt, composeH3VideoPrompt } from './h3Prompt'
-import type { Shot, AspectRatio } from '@/types'
-import { abortableDelay, throwIfAborted } from './abort'
+import { VIDEO_AUTODL_ROOT, VIDEO_DEFAULT_WORKFLOW_ID, migrateVideoBaseUrl, migrateVideoWorkflowId } from './env'
+import type { Shot, AspectRatio, VideoGenModel } from '@/types'
+import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
+import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
 
 export interface VideoGenInput {
   /** 第一张参考图：角色设计图 / 场景图 / 故事看板之一，不是人物+场景配图 */
@@ -63,10 +60,12 @@ export interface VideoGenInput {
   /** 比例标签（写到 prompt 最前面 [16:9] 这种） */
   aspectRatio?: AspectRatio
   cameraMovement?: Shot['cameraMovement']
-  /** 0-1，154:strength_model */
+  /** 0-1，仅 mock 使用 */
   strength?: number
   signal?: AbortSignal
   promptStyle?: VideoPromptStyle
+  /** 图生视频节点模型。默认 H3 */
+  videoModel?: VideoGenModel
 }
 
 export interface VideoGenOutput {
@@ -81,68 +80,15 @@ const log = (msg: string) =>
 
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|avi|mkv)(?:$|[?#])/i
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|[?#])/i
-
-const NINE_SLOT_IMAGE_KEYS = [
-  '137:image',
-  '139:image',
-  '146:image',
-  '147:image',
-  '148:image',
-  '149:image',
-  '150:image',
-  '151:image',
-  '170:image'
-]
-
-function isNineSlotWorkflow(workflowId: string): boolean {
-  return /9图|U09-API|U06-API/i.test(workflowId)
-}
-
-function resolveWorkflowId(workflowId: string): string {
-  if (!workflowId || workflowId === 'minimax_h3_light2v-1' || workflowId === 'minimax_h3_light2v') {
-    return 'U09-API-9图版'
-  }
-  return workflowId
-}
-
-function workflowBindings(workflowId: string) {
-  if (isNineSlotWorkflow(workflowId)) {
-    return {
-      imageKeys: NINE_SLOT_IMAGE_KEYS,
-      promptKey: '138:value',
-      durationKey: '132:value',
-      extras: (width: number, height: number, prefix: string, strength: number) => ({
-        '168:filename_prefix': prefix,
-        '168:format': 'video/h264-mp4',
-        '205:strength_model': strength,
-        '300:预设分辨率': '自定义',
-        '300:自定义宽': width,
-        '300:自定义高': height,
-        '301:预设分辨率': '自定义',
-        '301:自定义宽': width,
-        '301:自定义高': height
-      })
-    }
-  }
-  return {
-    imageKeys: ['137:image', '139:image', '141:image'],
-    promptKey: '146:prompt',
-    durationKey: '147:value',
-    extras: (width: number, height: number, prefix: string, strength: number) => ({
-      '92:filename_prefix': prefix,
-      '92:format': 'auto',
-      '92:codec': 'auto',
-      '145:预设分辨率': '自定义',
-      '145:批量大小': 1,
-      '145:自定义宽': width,
-      '145:自定义高': height,
-      '154:strength_model': strength
-    })
-  }
-}
+const MAX_REF_IMAGES = 9
 
 function resultUrl(r: any): string {
-  return String(r?.url ?? r?.video_url ?? r?.videoUrl ?? r?.filename ?? '').trim()
+  const candidates = [r?.url, r?.video_url, r?.videoUrl, r?.file_url, r?.filename]
+  for (const c of candidates) {
+    const s = String(c ?? '').trim()
+    if (/^https?:\/\//i.test(s)) return s
+  }
+  return ''
 }
 
 /** 从 workflow results 里挑真正的视频，绝不回落到预览图 */
@@ -167,7 +113,7 @@ function pickWorkflowVideoResult(
 
   scored.sort((a, b) => b.score - a.score)
   const best = scored[0]
-  if (!best || best.score < 50) return null
+  if (!best || best.score < 50 || !/^https?:\/\//i.test(best.url)) return null
   return { url: best.url, type: best.type }
 }
 
@@ -292,267 +238,618 @@ async function blobToVideoImageDataUrl(blob: Blob): Promise<string> {
   }
 }
 
-/** 提交到 ComfyUI workflow 服务并轮询结果 */
+function workflowApiRoot(baseUrl: string): string {
+  const raw = migrateVideoBaseUrl(baseUrl).replace(/\/+$/, '')
+  if (/\/api\/v1\/comfyui$/i.test(raw)) return raw
+  return `${raw}/api/v1/comfyui`
+}
+
+function authHeaders(apiKey: string, jsonBody = true): Record<string, string> {
+  const token = apiKey.trim()
+  const headers: Record<string, string> = {}
+  if (jsonBody) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = token
+  return headers
+}
+
+type AutodlHttpResult = {
+  ok: boolean
+  status: number
+  text: () => Promise<string>
+}
+
+/** 桌面端走主进程 net.fetch，绕开渲染进程 CORS；浏览器仍用 fetch */
+async function autodlRequest(
+  url: string,
+  init: {
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    signal?: AbortSignal
+  },
+  timeoutMs = 120_000
+): Promise<AutodlHttpResult> {
+  throwIfAborted(init.signal)
+  if (isDesktop()) {
+    const api = desktop()
+    if (typeof api.autodlFetch !== 'function') {
+      throw new Error('请完全退出并重启剧流 Studio（桌面端需要新的 AutoDL 通道）')
+    }
+    const headers = init.headers || {}
+    const res = await api.autodlFetch({
+      url,
+      method: init.method || 'GET',
+      authorization: headers.Authorization || '',
+      body: init.body,
+      timeoutMs
+    })
+    throwIfAborted(init.signal)
+    return {
+      ok: res.ok,
+      status: res.status,
+      text: async () => res.text
+    }
+  }
+  const resp = await fetch(url, {
+    method: init.method,
+    headers: init.headers,
+    body: init.body,
+    signal: init.signal
+  })
+  return {
+    ok: resp.ok,
+    status: resp.status,
+    text: () => resp.text()
+  }
+}
+
+const WAN_PRIME_MODEL = 'wan3.0-video-prime'
+
+function dashscopeApiRoot(baseUrl: string): string {
+  let u = (baseUrl || '').replace(/\/+$/, '')
+  u = u.replace(/\/compatible-mode\/v1$/i, '/api/v1')
+  if (/\/api\/v1$/i.test(u)) return u
+  if (/^https?:\/\//i.test(u) && !/\/api\//i.test(u)) return `${u}/api/v1`
+  return u || 'https://dashscope.aliyuncs.com/api/v1'
+}
+
+function wanRatio(ar?: AspectRatio): string {
+  if (ar === '16:9' || ar === '9:16' || ar === '1:1' || ar === '4:3') return ar
+  return 'adaptive'
+}
+
+async function dashscopeRequest(
+  url: string,
+  init: {
+    method?: string
+    extraHeaders?: Record<string, string>
+    body?: string
+    signal?: AbortSignal
+    authorization: string
+  },
+  timeoutMs = 120_000
+): Promise<AutodlHttpResult> {
+  throwIfAborted(init.signal)
+  if (isDesktop()) {
+    const api = desktop()
+    if (typeof api.dashscopeFetch !== 'function') {
+      throw new Error('请完全退出并重启剧流 Studio（桌面端需要新的百炼通道）')
+    }
+    const res = await api.dashscopeFetch({
+      url,
+      method: init.method || 'GET',
+      authorization: init.authorization,
+      extraHeaders: init.extraHeaders,
+      body: init.body,
+      timeoutMs
+    })
+    throwIfAborted(init.signal)
+    return {
+      ok: res.ok,
+      status: res.status,
+      text: async () => res.text
+    }
+  }
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    Authorization: init.authorization,
+    ...(init.extraHeaders || {})
+  }
+  if ((init.method || 'GET').toUpperCase() === 'POST') headers['Content-Type'] = 'application/json'
+  const resp = await fetch(url, {
+    method: init.method,
+    headers,
+    body: init.body,
+    signal: init.signal
+  })
+  return {
+    ok: resp.ok,
+    status: resp.status,
+    text: () => resp.text()
+  }
+}
+
+function autodlResolution(input: VideoGenInput): string {
+  const ratio = String(input.aspectRatio || '')
+  const landscape = ratio === '16:9' || ratio === '4:3' || (input.width || 0) >= (input.height || 0)
+  return landscape ? '768p横' : '768p竖'
+}
+
+function unwrapTaskPayload(json: any): any {
+  // data 有时直接就是 results 数组；数组也是 object，不能当任务对象拆。
+  if (json?.data && typeof json.data === 'object' && !Array.isArray(json.data)) return json.data
+  return json
+}
+
+function taskIdOf(json: any): string {
+  const data = unwrapTaskPayload(json)
+  return String(data?.task_id ?? data?.taskId ?? json?.task_id ?? '').trim()
+}
+
+function taskStatusOf(json: any): string {
+  const data = unwrapTaskPayload(json)
+  return String(data?.status ?? data?.state ?? json?.status ?? json?.state ?? '').trim().toUpperCase()
+}
+
+function taskErrorOf(json: any): string {
+  const data = unwrapTaskPayload(json)
+  return String(data?.message ?? data?.error ?? json?.msg ?? json?.message ?? '').trim()
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const text = value.trim()
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return value
+  try {
+    return JSON.parse(text)
+  } catch {
+    return value
+  }
+}
+
+function harvestMediaItems(value: unknown, out: any[] = [], depth = 0): any[] {
+  if (value == null || depth > 8) return out
+  const parsed = parseMaybeJson(value)
+  if (typeof parsed === 'string') {
+    const url = parsed.trim()
+    if (/^https?:\/\//i.test(url)) out.push({ url })
+    return out
+  }
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) harvestMediaItems(item, out, depth + 1)
+    return out
+  }
+  if (typeof parsed === 'object') {
+    const rec = parsed as Record<string, unknown>
+    if (rec.url || rec.video_url || rec.videoUrl || rec.filename || rec.file_url) out.push(rec)
+    for (const nested of Object.values(rec)) harvestMediaItems(nested, out, depth + 1)
+  }
+  return out
+}
+
+function collectWorkflowResults(json: any): any[] {
+  const data = unwrapTaskPayload(json)
+  const buckets = [data?.results, json?.results, json?.data, data, json]
+  const seen = new Set<string>()
+  const out: any[] = []
+  for (const bucket of buckets) {
+    for (const item of harvestMediaItems(bucket)) {
+      const url = resultUrl(item)
+      const key = url || JSON.stringify(item)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      out.push(item)
+    }
+  }
+  return out
+}
+
+function classifyTaskStatus(raw: string): 'queued' | 'running' | 'success' | 'failed' | 'unknown' {
+  const s = String(raw || '').trim().toUpperCase()
+  if (/^(QUEUED|PENDING|WAITING|QUEUE|WAIT)$/.test(s)) return 'queued'
+  if (/^(RUNNING|PROCESSING|IN_PROGRESS|STARTED|EXECUTING)$/.test(s)) return 'running'
+  if (/^(SUCCESS|COMPLETED|SUCCEEDED|DONE|FINISH|FINISHED|OK)$/.test(s)) return 'success'
+  if (/^(FAILED|ERROR|CANCELLED|CANCELED|FAIL)$/.test(s)) return 'failed'
+  return 'unknown'
+}
+
+async function fetchVideoBytes(
+  videoUrl: string,
+  signal?: AbortSignal
+): Promise<{ blob: Blob; mime: string }> {
+  const fallbackMime = guessVideoMimeFromUrl(videoUrl) || 'video/mp4'
+  throwIfAborted(signal)
+
+  if (isDesktop() && typeof desktop().downloadToTemp === 'function') {
+    const dest = await desktop().downloadToTemp(videoUrl)
+    try {
+      const blob = await blobFromPath(dest)
+      return { blob, mime: blob.type || fallbackMime }
+    } finally {
+      try {
+        await desktop().remove(dest)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const vResp = await fetch(videoUrl, { signal })
+  if (!vResp.ok) throw new Error(`下载视频失败 ${vResp.status} ${videoUrl}`)
+  return {
+    blob: await vResp.blob(),
+    mime: vResp.headers.get('content-type') || fallbackMime
+  }
+}
+
+async function downloadGeneratedVideo(
+  videoUrl: string,
+  signal: AbortSignal | undefined,
+  prompt: string,
+  duration: number,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  log(`→ 下载视频: ${videoUrl}`)
+  onProgress?.('下载视频...')
+  const dl = controlledSignal(signal, 120_000)
+  try {
+    const { blob: rawBlob, mime: mimeHint } = await fetchVideoBytes(videoUrl, dl.signal)
+    onProgress?.('校验视频文件...')
+    const blob = await assertVideoBlob(rawBlob, mimeHint)
+    log(`✓ 视频下载完成 (${(blob.size / 1024 / 1024).toFixed(2)} MB, ${blob.type})`)
+    return {
+      blob,
+      mimeType: blob.type || 'video/mp4',
+      prompt,
+      duration
+    }
+  } catch (error: any) {
+    if (isTimeoutAbort(error, dl.signal)) {
+      throw new Error(`[video] 下载超时：${videoUrl}`)
+    }
+    throw error instanceof Error ? error : new Error(String(error))
+  } finally {
+    dl.cleanup()
+  }
+}
+
+/** 提交到 AutoDL.art ComfyUI 工作流并轮询结果 */
 async function realWorkflowVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const { baseUrl, apiKey, workflowId: rawWorkflowId } = getVideoConfig()
-  const workflowId = resolveWorkflowId(rawWorkflowId)
-  const bindings = workflowBindings(workflowId)
+  const cfg = getVideoConfig()
+  const baseUrl = migrateVideoBaseUrl(cfg.baseUrl || VIDEO_AUTODL_ROOT)
+  const apiKey = cfg.apiKey
+  const workflowId = migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
+  const root = workflowApiRoot(baseUrl)
   throwIfAborted(input.signal)
 
-  if (!baseUrl) {
-    throw new Error('[video] 没配图生视频地址，请到设置页填写 ComfyUI 地址')
+  if (!apiKey) {
+    throw new Error('[video] 没配 AutoDL Token，请到设置页填写图生视频令牌')
   }
 
   const allBlobs = [input.imageBlob, ...(input.referenceImages ?? [])]
     .filter((b): b is Blob => !!b)
-    .slice(0, bindings.imageKeys.length)
+    .slice(0, MAX_REF_IMAGES)
 
   if (allBlobs.length === 0) {
     throw new Error('[video] 没有可用图片')
   }
 
-  onProgress?.(`准备参考图...`)
+  onProgress?.('准备参考图...')
   const dataUrls: string[] = []
   for (const blob of allBlobs) {
     dataUrls.push(await blobToVideoImageDataUrl(blob))
   }
   const referencePayloadMb = dataUrls.reduce((sum, value) => sum + value.length, 0) / 1024 / 1024
   onProgress?.(`参考图已准备：${dataUrls.length} 张 / 约 ${referencePayloadMb.toFixed(1)} MB`)
-  const imageValues: Record<string, string | null> = {}
-  bindings.imageKeys.forEach((key, index) => {
-    imageValues[key] = dataUrls[index] ?? null
-  })
 
-  // 3) 尺寸 clamp：宽高都不能超过 2048（workflow 限制）
-  const MAX_DIM = 2048
-  let width = input.width
-  let height = input.height
-  if (width > MAX_DIM || height > MAX_DIM) {
-    const ratio = Math.min(MAX_DIM / width, MAX_DIM / height)
-    width = Math.floor(width * ratio)
-    height = Math.floor(height * ratio)
-    // 保证偶数（FFmpeg/H.264 要求）
-    if (width % 2 !== 0) width--
-    if (height % 2 !== 0) height--
-    onProgress?.(`尺寸超过 2048，已缩放到 ${width}×${height}`)
-  }
-
-  // 4) 时长 clamp：ComfyUI workflow 只支持 5-10 秒
-  const MIN_DUR = 5
-  const MAX_DUR = 10
-  const targetDuration = Math.max(MIN_DUR, Math.min(MAX_DUR, Math.round(input.duration)))
+  const MIN_DUR = 1
+  const MAX_DUR = 15
+  const targetDuration = Math.max(MIN_DUR, Math.min(MAX_DUR, Math.round(input.duration) || 5))
   if (targetDuration !== input.duration) {
-    onProgress?.(
-      `视频时长 clamp 到 ${targetDuration} 秒（workflow 限制 ${MIN_DUR}-${MAX_DUR}s）`
-    )
+    onProgress?.(`视频时长 clamp 到 ${targetDuration} 秒（接口限制 ${MIN_DUR}-${MAX_DUR}s）`)
   }
 
-  // 付费请求前做确定性检查：制作说明不得混入中文引号，只有清洗后的原词可被朗读。
-  const finalPrompt = buildPrompt(input)
+  let finalPrompt = buildPrompt(input)
+  if (finalPrompt.length > 10000) {
+    finalPrompt = finalPrompt.slice(0, 10000)
+    onProgress?.('提示词超过 10000 字，已截断')
+  }
   const expectedDialogue = input.voiceMode === 'none' ? '' : input.voiceover
   assertValidH3Prompt(finalPrompt, expectedDialogue)
   onProgress?.('H3 提示词自检通过')
 
-  // 2) 提交任务
-  onProgress?.('提交生成任务...')
-  let submitResp: Response
+  const resolution = autodlResolution(input)
+  const body: Record<string, string | number> = {
+    prompt: finalPrompt,
+    duration: targetDuration,
+    resolution
+  }
+  dataUrls.forEach((url, index) => {
+    body[`ref_image_${index}`] = url
+  })
+  onProgress?.(`提交生成任务（${resolution}，${dataUrls.length} 张参考图）...`)
+  const submitCtl = controlledSignal(input.signal, 120_000)
+  let submitResp: AutodlHttpResult
   try {
-    submitResp = await fetch(`${baseUrl}/api/workflow/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+    submitResp = await autodlRequest(
+      `${root}/comfyui_workflow/${encodeURIComponent(workflowId)}`,
+      {
+        method: 'POST',
+        headers: authHeaders(apiKey),
+        body: JSON.stringify(body),
+        signal: submitCtl.signal
       },
-      body: JSON.stringify({
-        workflow_id: workflowId,
-        input_values: {
-          ...imageValues,
-          [bindings.promptKey]: finalPrompt,
-          [bindings.durationKey]: targetDuration,
-          ...bindings.extras(width, height, 'ai-cut', input.strength ?? 0.75)
-        }
-      }),
-      signal: input.signal
-    })
+      120_000
+    )
   } catch (error: any) {
-    throw new Error(`[video] 无法连接生成服务：${error?.message || String(error)}（参考图约 ${referencePayloadMb.toFixed(1)} MB）`)
+    if (isTimeoutAbort(error, submitCtl.signal)) {
+      throw new Error(
+        `[video] 提交超时（120 秒），参考图约 ${referencePayloadMb.toFixed(1)} MB。请检查网络或减小参考图。`
+      )
+    }
+    throw new Error(
+      `[video] 无法连接 AutoDL：${error?.message || String(error)}（参考图约 ${referencePayloadMb.toFixed(1)} MB）`
+    )
+  } finally {
+    submitCtl.cleanup()
   }
 
+  const submitText = await submitResp.text()
+  let submitData: any = null
+  try {
+    submitData = submitText ? JSON.parse(submitText) : null
+  } catch {
+    submitData = null
+  }
   if (!submitResp.ok) {
-    const body = await submitResp.text()
-    const hint = submitResp.status === 413 ? '；请求体过大，请降低参考图尺寸或检查代理上传限制' : ''
-    throw new Error(
-      `[video] 任务提交失败 ${submitResp.status}${hint}：${body.slice(0, 1200)}`
-    )
+    const hint = submitResp.status === 413 ? '；请求体过大，请降低参考图尺寸' : ''
+    throw new Error(`[video] 任务提交失败 ${submitResp.status}${hint}：${submitText.slice(0, 1200)}`)
   }
-  const submitData = await submitResp.json()
-  const promptId = submitData.prompt_id ?? submitData.id
-  if (!promptId) {
-    throw new Error(
-      `[video] 提交响应无 prompt_id\n原始：${JSON.stringify(submitData).slice(0, 200)}`
-    )
+  const submitCode = String(submitData?.code ?? '')
+  const taskId = taskIdOf(submitData)
+  if (submitCode && !/^success$/i.test(submitCode) && !taskId) {
+    throw new Error(`[video] 任务提交失败：${submitData?.msg || submitCode}\n${submitText.slice(0, 400)}`)
   }
-  onProgress?.(`任务已提交 (${promptId})`)
-  log(`✓ 任务已提交: ${promptId}`)
+  if (!taskId) {
+    throw new Error(`[video] 提交响应无 task_id\n原始：${submitText.slice(0, 400)}`)
+  }
+  onProgress?.(`任务已提交 (${taskId})`)
+  log(`✓ 任务已提交: ${taskId}`)
 
-  // 3) 轮询结果
   const start = Date.now()
-  const deadline = start + 15 * 60 * 1000 // 15 分钟超时
+  const deadline = start + 15 * 60 * 1000
   let attempt = 0
   while (Date.now() < deadline) {
     attempt++
-    await abortableDelay(5000, input.signal)
+    await abortableDelay(1000, input.signal)
     throwIfAborted(input.signal)
     const elapsed = Math.round((Date.now() - start) / 1000)
-    onProgress?.(`生成中... ${elapsed}s (第 ${attempt} 次查询)`)
+    onProgress?.(`排队/生成中 ${elapsed}s`)
 
-    // 优先用新接口
-    const pollUrl = `${baseUrl}/api/workflow/result?prompt_id=${promptId}`
-    let pollResp = await fetch(pollUrl, { signal: input.signal })
-    let pollData: any = null
-    if (pollResp.ok) {
-      pollData = await pollResp.json()
-    } else {
-      // fallback 旧接口
-      const fallback = await fetch(
-        `${baseUrl}/api/comfy/proxy/history?prompt_id=${promptId}`,
-        { signal: input.signal }
+    let pollResp: AutodlHttpResult
+    try {
+      pollResp = await autodlRequest(
+        `${root}/comfyui_workflow/result/${encodeURIComponent(taskId)}`,
+        {
+          method: 'GET',
+          headers: authHeaders(apiKey, false),
+          signal: input.signal
+        },
+        30_000
       )
-      if (fallback.ok) pollData = await fallback.json()
-    }
-
-    if (attempt === 1 || attempt % 4 === 0) {
-      log(`轮询 #${attempt} (${elapsed}s): ${JSON.stringify(pollData).slice(0, 200)}`)
-    }
-
-    if (!pollData) continue
-
-    // === 真实结果格式 ===
-    // 成功（pending: false）：
-    //   { "success": true, "pending": false, "prompt_id": "...", "results": [
-    //       { "type": "image", "url": "/output/ai-cut_00002_.mp4", "raw": {...} }
-    //   ]}
-    // 进行中（pending: true）：
-    //   { "success": true, "pending": true, "prompt_id": "..." }
-    // 失败：
-    //   { "success": false, "error": "..." }
-
-    // 1) 失败
-    if (pollData.success === false) {
-      throw new Error(
-        `[video] 任务失败: ${pollData.error ?? pollData.message ?? 'unknown'}`
-      )
-    }
-
-    // 2) 还在进行中
-    if (pollData.pending === true) {
-      // 继续轮询
-      onProgress?.(`生成中... ${elapsed}s`)
+    } catch (error: any) {
+      onProgress?.(`查询中断，重试中… ${elapsed}s`)
+      log(`轮询网络错误 #${attempt}: ${error?.message || error}`)
       continue
     }
-
-    // 3) 完成（pending === false 且有 results）
-    if (
-      pollData.pending === false &&
-      Array.isArray(pollData.results) &&
-      pollData.results.length > 0
-    ) {
-      const picked = pickWorkflowVideoResult(pollData.results)
-      if (!picked) {
-        const sample = JSON.stringify(pollData.results).slice(0, 500)
-        throw new Error(
-          `[video] 任务完成但结果里没有视频文件（可能只返回了预览图）\n${sample}`
-        )
-      }
-
-      let videoUrl: string = picked.url
-      // url 是相对路径（/output/xxx.mp4），拼成完整 URL
-      if (videoUrl.startsWith('/')) {
-        videoUrl = `${baseUrl}${videoUrl}`
-      } else if (!/^https?:\/\//i.test(videoUrl)) {
-        videoUrl = `${baseUrl}/${videoUrl}`
-      }
-
-      log(`→ 下载视频: ${videoUrl}（候选 type=${picked.type || '?'}）`)
+    if (pollResp.status === 401 || pollResp.status === 403) {
+      throw new Error(`[video] 轮询被拒绝 ${pollResp.status}，请到设置页检查 AutoDL Token`)
+    }
+    const pollText = await pollResp.text()
+    let pollData: any = null
+    try {
+      pollData = pollText ? JSON.parse(pollText) : null
+    } catch {
+      onProgress?.(`生成中… ${elapsed}s（响应还不是 JSON）`)
+      continue
+    }
+    if (!pollData) {
+      onProgress?.(`生成中… ${elapsed}s`)
+      continue
+    }
+    const status = taskStatusOf(pollData)
+    const phase = classifyTaskStatus(status)
+    const data = unwrapTaskPayload(pollData)
+    const durationSec = Number(data?.duration) || elapsed
+    const results = collectWorkflowResults(pollData)
+    const picked = pickWorkflowVideoResult(results)
+    if (attempt === 1 || attempt % 5 === 0) {
+      log(`轮询 #${attempt} (${elapsed}s) status=${status || '-'} results=${results.length}: ${pollText.slice(0, 280)}`)
+    }
+    if (picked) {
+      log(`✓ 已拿到视频地址 (${phase || 'no-status'}): ${picked.url}`)
       onProgress?.('下载视频...')
-      const vResp = await fetch(videoUrl, { signal: input.signal })
-      if (!vResp.ok) {
-        throw new Error(`下载视频失败 ${vResp.status} ${videoUrl}`)
-      }
-      const rawBlob = await vResp.blob()
-      const mimeHint =
-        vResp.headers.get('content-type') ||
-        guessVideoMimeFromUrl(videoUrl) ||
-        rawBlob.type
-      const blob = await assertVideoBlob(rawBlob, mimeHint)
-      log(`✓ 视频下载完成 (${(blob.size / 1024 / 1024).toFixed(2)} MB, ${blob.type})`)
-      return {
-        blob,
-        mimeType: blob.type || 'video/mp4',
-        prompt: finalPrompt,
-        duration: input.duration
-      }
+      return await downloadGeneratedVideo(picked.url, input.signal, finalPrompt, targetDuration, onProgress)
     }
-
-    // 4) 老格式兼容（如果将来服务端又换协议）
-    const status = String(
-      pollData.status ??
-        pollData.state ??
-        pollData?.outputs?.[promptId]?.status ??
-        ''
-    ).toLowerCase()
-
-    if (status === 'success' || status === 'completed' || status === 'succeeded' || status === 'done') {
-      const videoUrl =
-        pollData.video_url ??
-        pollData.url ??
-        pollData.videoUrl ??
-        pollData?.outputs?.[promptId]?.video_url ??
-        pollData?.outputs?.[promptId]?.url ??
-        pollData?.outputs?.[0]?.url ??
-        pollData?.outputs?.[0]?.video_url ??
-        pollData?.data?.video_url
-
-      if (!videoUrl) {
-        throw new Error(
-          `[video] 任务完成但找不到视频 URL（老格式）\n原始：${JSON.stringify(pollData).slice(0, 300)}`
-        )
-      }
-      onProgress?.('下载视频...')
-      const vResp = await fetch(videoUrl, { signal: input.signal })
-      if (!vResp.ok) throw new Error(`下载视频失败 ${vResp.status}`)
-      const rawBlob = await vResp.blob()
-      const mimeHint =
-        vResp.headers.get('content-type') ||
-        guessVideoMimeFromUrl(String(videoUrl)) ||
-        rawBlob.type
-      const blob = await assertVideoBlob(rawBlob, mimeHint)
-      return {
-        blob,
-        mimeType: blob.type || 'video/mp4',
-        prompt: finalPrompt,
-        duration: input.duration
-      }
+    if (phase === 'queued') {
+      onProgress?.(`排队中… ${elapsed}s`)
+      continue
     }
-
-    if (
-      status === 'failed' ||
-      status === 'error' ||
-      status === 'cancelled' ||
-      status === 'canceled'
-    ) {
-      throw new Error(
-        `[video] 生成失败: ${pollData.error ?? pollData.message ?? status}`
-      )
+    if (phase === 'running') {
+      onProgress?.(`生成中… ${durationSec}s`)
+      continue
     }
-
-    // 否则继续轮询（status 是 pending / running / queued 等）
+    if (phase === 'failed') {
+      throw new Error(`[video] 生成失败：${taskErrorOf(pollData) || status}`)
+    }
+    if (phase === 'success') {
+      throw new Error(`[video] 任务完成但没有视频地址\n${pollText.slice(0, 800)}`)
+    }
+    onProgress?.(`生成中… ${elapsed}s${status ? `（${status}）` : ''}`)
   }
 
-  throw new Error(`[video] 生成超时（15 分钟未完成），prompt_id=${promptId}`)
+  throw new Error(`[video] 生成超时（15 分钟未完成），task_id=${taskId}`)
+}
+
+/** 百炼 wan3.0-video-prime：单张首帧，多张走全能参考（reference_image），固定 720P */
+async function realWanVideo(
+  input: VideoGenInput,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  const tts = getTtsConfig()
+  const apiRoot = dashscopeApiRoot(tts.baseUrl)
+  const apiKey = tts.apiKey.trim()
+  throwIfAborted(input.signal)
+  if (!apiKey) {
+    throw new Error('[video] 没配百炼 Token，请到设置页填写口播 TTS 的 DashScope Key')
+  }
+
+  const allBlobs = [input.imageBlob, ...(input.referenceImages ?? [])]
+    .filter((b): b is Blob => !!b)
+    .slice(0, 10)
+  if (!allBlobs.length) {
+    throw new Error('[video] 没有可用图片')
+  }
+
+  onProgress?.('准备参考图...')
+  const urls: string[] = []
+  for (const blob of allBlobs) {
+    urls.push(await blobToVideoImageDataUrl(blob))
+  }
+  // 单张：严格首帧生视频。两张及以上：全能参考（不能和 first_frame/last_frame 混用）
+  const media =
+    urls.length === 1
+      ? [{ type: 'first_frame', url: urls[0] }]
+      : urls.map((url) => ({ type: 'reference_image', url }))
+
+  const targetDuration = Math.max(2, Math.min(30, Math.round(input.duration) || 5))
+  let prompt = String(input.prompt || '').trim()
+  if (!prompt) throw new Error('[video] 请先写提示词')
+  if (prompt.length > 20000) prompt = prompt.slice(0, 20000)
+
+  const body = {
+    model: WAN_PRIME_MODEL,
+    input: { prompt, media },
+    parameters: {
+      resolution: '720P',
+      ratio: wanRatio(input.aspectRatio),
+      duration: targetDuration,
+      prompt_extend: true,
+      watermark: false,
+      audio: true
+    }
+  }
+
+  const modeLabel = media[0]?.type === 'first_frame' ? '首帧' : `全能参考 ${media.length} 张`
+  onProgress?.(`提交万相任务（720P，${modeLabel}，${targetDuration}s）...`)
+  const auth = `Bearer ${apiKey}`
+  const submitCtl = controlledSignal(input.signal, 120_000)
+  let submitResp: AutodlHttpResult
+  try {
+    submitResp = await dashscopeRequest(
+      `${apiRoot}/services/aigc/video-generation/video-synthesis`,
+      {
+        method: 'POST',
+        authorization: auth,
+        extraHeaders: { 'X-DashScope-Async': 'enable' },
+        body: JSON.stringify(body),
+        signal: submitCtl.signal
+      },
+      120_000
+    )
+  } catch (error: any) {
+    if (isTimeoutAbort(error, submitCtl.signal)) {
+      throw new Error('[video] 万相提交超时（120 秒），请检查网络或减小参考图')
+    }
+    throw new Error(`[video] 无法连接百炼：${error?.message || String(error)}`)
+  } finally {
+    submitCtl.cleanup()
+  }
+
+  const submitText = await submitResp.text()
+  let submitData: any = null
+  try {
+    submitData = submitText ? JSON.parse(submitText) : null
+  } catch {
+    submitData = null
+  }
+  if (!submitResp.ok || submitData?.code) {
+    throw new Error(
+      `[video] 万相提交失败 ${submitData?.code || submitResp.status}：${
+        submitData?.message || submitText.slice(0, 800)
+      }`
+    )
+  }
+  const taskId = String(submitData?.output?.task_id || submitData?.task_id || '').trim()
+  if (!taskId) {
+    throw new Error(`[video] 万相提交无 task_id\n${submitText.slice(0, 400)}`)
+  }
+  onProgress?.(`任务已提交 (${taskId})`)
+  log(`✓ 万相任务已提交: ${taskId}`)
+
+  const start = Date.now()
+  const deadline = start + 15 * 60 * 1000
+  let attempt = 0
+  while (Date.now() < deadline) {
+    attempt++
+    await abortableDelay(3000, input.signal)
+    throwIfAborted(input.signal)
+    const elapsed = Math.round((Date.now() - start) / 1000)
+    onProgress?.(`万相生成中 ${elapsed}s`)
+
+    let pollResp: AutodlHttpResult
+    try {
+      pollResp = await dashscopeRequest(
+        `${apiRoot}/tasks/${encodeURIComponent(taskId)}`,
+        { method: 'GET', authorization: auth, signal: input.signal },
+        30_000
+      )
+    } catch (error: any) {
+      onProgress?.(`查询中断，重试中… ${elapsed}s`)
+      log(`万相轮询网络错误 #${attempt}: ${error?.message || error}`)
+      continue
+    }
+    const pollText = await pollResp.text()
+    let pollData: any = null
+    try {
+      pollData = pollText ? JSON.parse(pollText) : null
+    } catch {
+      continue
+    }
+    const status = String(pollData?.output?.task_status || pollData?.task_status || '').toUpperCase()
+    const videoUrl = String(pollData?.output?.video_url || pollData?.video_url || '').trim()
+    if (attempt === 1 || attempt % 5 === 0) {
+      log(`万相轮询 #${attempt} (${elapsed}s) status=${status || '-'} ${pollText.slice(0, 240)}`)
+    }
+    if (videoUrl) {
+      log(`✓ 万相已拿到视频: ${videoUrl}`)
+      return await downloadGeneratedVideo(videoUrl, input.signal, prompt, targetDuration, onProgress)
+    }
+    if (status === 'PENDING') {
+      onProgress?.(`排队中… ${elapsed}s`)
+      continue
+    }
+    if (status === 'RUNNING') {
+      onProgress?.(`生成中… ${elapsed}s`)
+      continue
+    }
+    if (status === 'FAILED' || status === 'CANCELED') {
+      throw new Error(
+        `[video] 万相失败：${pollData?.output?.message || pollData?.message || status}`
+      )
+    }
+    if (status === 'UNKNOWN') {
+      throw new Error('[video] 万相任务已过期，请重新生成')
+    }
+    if (status === 'SUCCEEDED' && !videoUrl) {
+      throw new Error(`[video] 万相完成但没有视频地址\n${pollText.slice(0, 800)}`)
+    }
+  }
+
+  throw new Error(`[video] 万相生成超时（15 分钟未完成），task_id=${taskId}`)
 }
 
 /** 拼最终喂给 ComfyUI / MiniMax H3 的视频提示词（页面预览 / 实际生成共用）
@@ -600,6 +897,9 @@ export async function generateVideo(
       throw new Error('[video] 真实模式需要角色设计图、场景图和故事看板作为参考输入')
     }
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
+    if (input.videoModel === 'wan-prime') {
+      return await realWanVideo(input, onProgress)
+    }
     return await realWorkflowVideo(input, onProgress)
   }
 

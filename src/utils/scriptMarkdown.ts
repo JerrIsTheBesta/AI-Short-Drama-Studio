@@ -289,6 +289,7 @@ export function applyProjectPlayMarkdown(p: Project, markdown: string): void {
       aesthetic: aesthetic || p.script.aesthetic
     }
   }
+  if (topic) p.name = topic.slice(0, 48)
 
   const peopleSec = byTitle('人物')
   if (peopleSec && (p.subjects?.length || peopleSec.body)) {

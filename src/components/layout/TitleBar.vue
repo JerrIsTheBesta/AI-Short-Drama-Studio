@@ -71,8 +71,8 @@ function run(fn: () => void) {
   display: flex;
   align-items: stretch;
   justify-content: space-between;
-  background: #161625;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-bg-1);
+  border-bottom: 1px solid var(--color-border);
   user-select: none;
   position: relative;
   z-index: 1000;
@@ -101,7 +101,7 @@ function run(fn: () => void) {
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.3px;
-  color: #e8e8f2;
+  color: var(--color-text-1);
 }
 .controls {
   display: flex;
@@ -114,7 +114,7 @@ function run(fn: () => void) {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #d4d4e4;
+  color: var(--color-text-2);
   background: transparent;
   border-radius: 0;
   -webkit-app-region: no-drag;
@@ -130,8 +130,8 @@ function run(fn: () => void) {
   stroke-linejoin: round;
 }
 .ctrl:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: var(--color-fill-hover);
+  color: var(--color-text-1);
 }
 .ctrl.close:hover {
   background: #e81123;

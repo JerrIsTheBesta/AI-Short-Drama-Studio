@@ -19,6 +19,9 @@ export async function withNodeJob<T>(id: string, fn: () => Promise<T>): Promise<
   }
 }
 
+/** AutoDL 出视频支持并发；批量出片按这个上限同时提交 */
+export const VIDEO_GEN_CONCURRENCY = 8
+
 export async function mapPool<T>(
   items: T[],
   limit: number,

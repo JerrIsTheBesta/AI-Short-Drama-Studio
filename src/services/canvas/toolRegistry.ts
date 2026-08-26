@@ -3,6 +3,7 @@ import { needsExternalTts } from '@/utils/shot'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { topicFromBrief } from '@/utils/storyBrief'
 import { controlledSignal, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
+import { VIDEO_GEN_CONCURRENCY } from './jobs'
 import {
   runCanvasNode,
   generateMissingSheets,
@@ -544,7 +545,10 @@ const definitions: ToolDefinition[] = [
   },
   {
     name: 'generate_all_videos', phase: 4, timeoutMs: 60 * 60_000,
-    estimate: () => ({ calls: counts().videos, seconds: counts().videos * 180 }),
+    estimate: () => {
+      const n = counts().videos
+      return { calls: n, seconds: n ? Math.ceil(n / VIDEO_GEN_CONCURRENCY) * 180 : 0 }
+    },
     async execute(_action, ctx) { await generateMissingVideos(ctx.onLog, ctx.signal); return '视频已补齐' }
   },
   {

@@ -18,8 +18,8 @@ defineProps<{
   width: 100%;
   height: 100%;
   border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--color-canvas-group);
   pointer-events: none;
 }
 .gframe-h {
@@ -32,28 +32,13 @@ defineProps<{
   letter-spacing: 0.04em;
   color: var(--color-text-2);
 }
-.tint-script {
-  background: rgba(124, 58, 237, 0.07);
-  border-color: rgba(167, 139, 250, 0.28);
-}
-.tint-subject {
-  background: rgba(245, 158, 11, 0.07);
-  border-color: rgba(251, 191, 36, 0.32);
-}
-.tint-scene {
-  background: rgba(59, 130, 246, 0.07);
-  border-color: rgba(96, 165, 250, 0.32);
-}
-.tint-shot {
-  background: rgba(236, 72, 153, 0.06);
-  border-color: rgba(244, 114, 182, 0.28);
-}
-.tint-audio {
-  background: rgba(16, 185, 129, 0.06);
-  border-color: rgba(52, 211, 153, 0.28);
-}
+.tint-script,
+.tint-subject,
+.tint-scene,
+.tint-shot,
+.tint-audio,
 .tint-export {
-  background: rgba(16, 185, 129, 0.06);
-  border-color: rgba(52, 211, 153, 0.28);
+  background: var(--color-canvas-group);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 </style>

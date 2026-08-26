@@ -13,6 +13,22 @@ export type DesktopAPI = {
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
+  autodlFetch: (opts: {
+    url: string
+    method?: string
+    authorization?: string
+    body?: string
+    timeoutMs?: number
+  }) => Promise<{ status: number; ok: boolean; text: string }>
+  dashscopeFetch: (opts: {
+    url: string
+    method?: string
+    authorization?: string
+    extraHeaders?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }) => Promise<{ status: number; ok: boolean; text: string }>
+  downloadToTemp: (url: string) => Promise<string>
   minimize: () => Promise<void>
   toggleMaximize: () => Promise<boolean>
   closeWindow: () => Promise<void>
@@ -27,7 +43,7 @@ declare global {
 }
 
 export function isDesktop(): boolean {
-  return Boolean(window.desktop?.isDesktop) || /electron/i.test(navigator.userAgent)
+  return Boolean(window.desktop?.isDesktop)
 }
 
 export function desktop(): DesktopAPI {

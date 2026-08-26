@@ -12,6 +12,17 @@ export type CanvasNodeType =
   | 'export'
   | 'final'
   | 'groupFrame'
+  | 'imageGen'
+  | 'videoGen'
+
+/** 图生视频节点模型。默认 H3（AutoDL）；万相走百炼 TTS 同一套 Key。 */
+export type VideoGenModel = 'h3' | 'wan-prime'
+
+export const DEFAULT_VIDEO_GEN_MODEL: VideoGenModel = 'h3'
+
+export function normalizeVideoGenModel(value: unknown): VideoGenModel {
+  return value === 'wan-prime' ? 'wan-prime' : 'h3'
+}
 
 export interface CanvasNode {
   id: string
@@ -25,6 +36,11 @@ export interface CanvasNode {
     width?: number
     height?: number
     kind?: string
+    prompt?: string
+    referenceAssetIds?: string[]
+    outputAssetId?: string
+    duration?: number
+    videoModel?: VideoGenModel
   }
   status?: TaskStatus
   error?: string

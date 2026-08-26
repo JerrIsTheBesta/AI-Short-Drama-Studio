@@ -25,14 +25,21 @@ defineProps<{
   gap: 10px;
   overflow: hidden;
   border-radius: inherit;
-  background: rgba(10, 8, 22, 0.72);
-  backdrop-filter: blur(3px);
+  background: rgba(18, 18, 22, 0.88);
   pointer-events: none;
-  color: #f5f3ff;
-  font-size: 13px;
+  color: var(--color-text-1);
+  font-size: 12px;
   font-weight: 750;
-  letter-spacing: 0.06em;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.55);
+  letter-spacing: 0.04em;
+}
+.busy-ov > span {
+  position: relative;
+  z-index: 1;
+  max-width: 92%;
+  padding: 0 8px;
+  text-align: center;
+  line-height: 1.35;
+  word-break: break-word;
 }
 .bar {
   position: absolute;
@@ -40,7 +47,7 @@ defineProps<{
   left: 0;
   right: 0;
   height: 3px;
-  background: rgba(167, 139, 250, 0.28);
+  background: rgba(255, 255, 255, 0.12);
 }
 .bar::after {
   content: '';
@@ -49,7 +56,7 @@ defineProps<{
   left: -40%;
   width: 40%;
   height: 100%;
-  background: linear-gradient(90deg, transparent, #ddd6fe, transparent);
+  background: linear-gradient(90deg, transparent, #7eb4ff, transparent);
   animation: bar 1.05s ease-in-out infinite;
 }
 .scan {
@@ -57,15 +64,15 @@ defineProps<{
   left: 0;
   right: 0;
   height: 38%;
-  background: linear-gradient(180deg, transparent, rgba(196, 181, 253, 0.22), transparent);
+  background: linear-gradient(180deg, transparent, rgba(126, 180, 255, 0.12), transparent);
   animation: scan 1.7s ease-in-out infinite;
 }
 .ring {
   position: relative;
   width: 34px;
   height: 34px;
-  border: 3px solid rgba(196, 181, 253, 0.22);
-  border-top-color: #ede9fe;
+  border: 3px solid rgba(255, 255, 255, 0.16);
+  border-top-color: #7eb4ff;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }

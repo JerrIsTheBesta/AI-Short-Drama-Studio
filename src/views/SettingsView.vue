@@ -535,7 +535,7 @@ h2 {
   border-radius: var(--radius-sm);
 }
 .link-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 

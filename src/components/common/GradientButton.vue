@@ -69,26 +69,25 @@ const emit = defineEmits<{
 }
 
 .type-primary {
-  background: var(--grad-primary);
-  color: white;
-  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.3);
+  background: var(--color-accent);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
 }
 .type-primary:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(124, 58, 237, 0.45);
+  background: #9cc4ff;
 }
 .type-primary:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(1px);
 }
 
 .type-secondary {
-  background: var(--color-bg-3);
+  background: var(--color-bg-1);
   color: var(--color-text-1);
   border: 1px solid var(--color-border-strong);
 }
 .type-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--color-accent);
+  background: var(--color-fill-hover);
+  border-color: var(--color-text-1);
 }
 
 .type-ghost {
@@ -97,7 +96,7 @@ const emit = defineEmits<{
   border: 1px solid var(--color-border);
 }
 .type-ghost:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-fill);
   color: var(--color-text-1);
   border-color: var(--color-border-strong);
 }
@@ -119,9 +118,15 @@ const emit = defineEmits<{
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
   border-radius: 50%;
+}
+.type-secondary .spinner,
+.type-ghost .spinner,
+.type-danger .spinner {
+  border-color: var(--color-fill-strong);
+  border-top-color: var(--color-text-1);
 }
 
 .loading .content {

@@ -32,6 +32,8 @@ export interface AssetBase {
   shotId?: ID
   /** 桌面端相对项目目录的路径，如 assets/images/xxx.png */
   fileRelPath?: string
+  /** 公共资产库（跨项目可选用） */
+  library?: boolean
 }
 
 export interface ImageAsset extends AssetBase {

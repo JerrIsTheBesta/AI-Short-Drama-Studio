@@ -15,6 +15,22 @@ export type DesktopAPI = {
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
+  autodlFetch: (opts: {
+    url: string
+    method?: string
+    authorization?: string
+    body?: string
+    timeoutMs?: number
+  }) => Promise<{ status: number; ok: boolean; text: string }>
+  dashscopeFetch: (opts: {
+    url: string
+    method?: string
+    authorization?: string
+    extraHeaders?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }) => Promise<{ status: number; ok: boolean; text: string }>
+  downloadToTemp: (url: string) => Promise<string>
   minimize: () => Promise<void>
   toggleMaximize: () => Promise<boolean>
   closeWindow: () => Promise<void>
@@ -37,6 +53,9 @@ const api: DesktopAPI = {
   pickFiles: (filters) => ipcRenderer.invoke('desktop:pickFiles', filters),
   pickDirectory: () => ipcRenderer.invoke('desktop:pickDirectory'),
   openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath),
+  autodlFetch: (opts) => ipcRenderer.invoke('desktop:autodlFetch', opts),
+  dashscopeFetch: (opts) => ipcRenderer.invoke('desktop:dashscopeFetch', opts),
+  downloadToTemp: (url) => ipcRenderer.invoke('desktop:downloadToTemp', url),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),

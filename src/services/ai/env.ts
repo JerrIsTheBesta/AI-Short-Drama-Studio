@@ -6,6 +6,24 @@ function envStr(key: string, fallback = ''): string {
   return s || fallback
 }
 
+export const VIDEO_AUTODL_ROOT = 'https://autodl.art'
+export const VIDEO_DEFAULT_WORKFLOW_ID = 'minimax_h3_image_audio_to_video_v2_15s'
+
+export function isLegacyVideoConfig(value: string): boolean {
+  return /seetacloud|:8443|\/api\/workflow|U09-API|U06-API|9图版|light2v-1|lightx2v_no_pic|lightx2v_v5/i.test(value)
+}
+
+export function migrateVideoBaseUrl(url: string): string {
+  const raw = (url || '').trim().replace(/\/+$/, '')
+  if (!raw || isLegacyVideoConfig(raw)) return VIDEO_AUTODL_ROOT
+  return raw
+}
+
+export function migrateVideoWorkflowId(id: string): string {
+  if (!id || isLegacyVideoConfig(id)) return VIDEO_DEFAULT_WORKFLOW_ID
+  return id
+}
+
 export function envRealMode(): boolean {
   const flag = envStr('VITE_AI_REAL_MODE', 'false').toLowerCase()
   return flag === 'true' || flag === '1'
@@ -38,9 +56,9 @@ export function envDefaults() {
       voice: envStr('VITE_TTS_VOICE', 'longanhuan_v3.6')
     },
     video: {
-      baseUrl: envStr('VITE_VIDEO_BASE_URL'),
+      baseUrl: migrateVideoBaseUrl(envStr('VITE_VIDEO_BASE_URL', VIDEO_AUTODL_ROOT)),
       apiKey: envStr('VITE_VIDEO_API_KEY'),
-      workflowId: envStr('VITE_VIDEO_WORKFLOW_ID', 'U09-API-9图版')
+      workflowId: migrateVideoWorkflowId(envStr('VITE_VIDEO_WORKFLOW_ID', VIDEO_DEFAULT_WORKFLOW_ID))
     },
     music: {
       baseUrl: envStr('VITE_MUSIC_BASE_URL', 'https://api.minimaxi.com/v1'),

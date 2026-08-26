@@ -1,43 +1,51 @@
 /* ============================================
-   AI Cut · 主题样式
-   暗色系 + 渐变 + 玻璃拟态 + 流畅动画
+   剧流 Studio · 暗色
+   近黑画布 + 炭灰分层 + 浅字，连线淡蓝
    ============================================ */
 
 :root {
+  color-scheme: dark;
+
   /* 主色板 */
-  --color-bg-0: #0a0a14;
-  --color-bg-1: #12121f;
-  --color-bg-2: #1a1a2e;
-  --color-bg-3: #232336;
-  --color-bg-card: rgba(26, 26, 46, 0.65);
+  --color-bg-0: #101012;
+  --color-bg-1: #18181c;
+  --color-bg-2: #222228;
+  --color-bg-3: #2c2c34;
+  --color-bg-card: #1c1c22;
+  --color-canvas: #0e0e10;
+  --color-canvas-group: #16161a;
+  --color-node-well: #2a2a32;
+  --color-node-border: rgba(255, 255, 255, 0.12);
+  --shadow-node: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.35);
   --color-border: rgba(255, 255, 255, 0.08);
   --color-border-strong: rgba(255, 255, 255, 0.16);
+  --color-fill: rgba(255, 255, 255, 0.05);
+  --color-fill-hover: rgba(255, 255, 255, 0.08);
+  --color-fill-strong: rgba(255, 255, 255, 0.14);
 
-  --color-text-1: #f5f5fa;
-  --color-text-2: #c4c4d4;
-  --color-text-3: #8b8ba0;
-  --color-text-4: #5a5a72;
+  --color-text-1: #ececef;
+  --color-text-2: #c4c4cc;
+  --color-text-3: #8e8e98;
+  --color-text-4: #6a6a74;
 
-  /* 强调色 */
-  --color-accent: #7c3aed;
-  --color-accent-2: #ec4899;
-  --color-accent-3: #f59e0b;
-  --color-success: #10b981;
-  --color-warning: #f59e0b;
-  --color-error: #ef4444;
-  --color-info: #3b82f6;
+  --color-accent: #7eb4ff;
+  --color-accent-2: #7eb4ff;
+  --color-accent-3: #7eb4ff;
+  --color-on-accent: #0b1220;
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-error: #f87171;
+  --color-info: #7eb4ff;
 
-  /* 渐变 */
-  --grad-primary: linear-gradient(135deg, #7c3aed 0%, #ec4899 50%, #f59e0b 100%);
-  --grad-primary-soft: linear-gradient(135deg, rgba(124, 58, 237, 0.15) 0%, rgba(236, 72, 153, 0.15) 50%, rgba(245, 158, 11, 0.15) 100%);
-  --grad-card: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.02) 100%);
-  --grad-glow: radial-gradient(ellipse at top, rgba(124, 58, 237, 0.15) 0%, transparent 60%);
+  --grad-primary: #7eb4ff;
+  --grad-primary-soft: rgba(126, 180, 255, 0.14);
+  --grad-card: #1c1c22;
+  --grad-glow: none;
 
-  /* 阴影 */
-  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
-  --shadow-glow: 0 0 24px rgba(124, 58, 237, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --shadow-glow: none;
 
   /* 圆角 */
   --radius-sm: 6px;
@@ -93,8 +101,6 @@ body,
 
 body {
   background: var(--color-bg-0);
-  background-image: var(--grad-glow);
-  background-attachment: fixed;
 }
 
 ::-webkit-scrollbar {
@@ -105,11 +111,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--color-fill-strong);
   border-radius: var(--radius-full);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.28);
 }
 
 button,
@@ -128,8 +134,14 @@ button {
 }
 
 a {
-  color: var(--color-accent-2);
+  color: var(--color-text-1);
   text-decoration: none;
+}
+
+input,
+select,
+textarea {
+  color-scheme: dark;
 }
 
 /* ============================================
@@ -181,10 +193,10 @@ a {
 
 @keyframes pulse-glow {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.5);
+    box-shadow: 0 0 0 0 rgba(126, 180, 255, 0.28);
   }
   50% {
-    box-shadow: 0 0 0 16px rgba(124, 58, 237, 0);
+    box-shadow: 0 0 0 16px rgba(126, 180, 255, 0);
   }
 }
 
@@ -197,7 +209,7 @@ a {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0.06) 50%,
     transparent 100%
   );
   background-size: 200% 100%;

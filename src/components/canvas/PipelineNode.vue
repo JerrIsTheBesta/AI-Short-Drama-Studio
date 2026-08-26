@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
-import { useAssetsStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
+import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
@@ -32,6 +32,7 @@ const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 
 const project = useProjectStore()
 const assets = useAssetsStore()
+const library = useLibraryStore()
 const settings = useSettingsStore()
 const toast = useToastStore()
 const mediaUrl = ref('')
@@ -252,6 +253,21 @@ function dismissPanel() {
   if (n) removeSelectedNodes([n])
 }
 
+async function publishToLibrary() {
+  if (!assetId.value || !isImageNode.value) return
+  moreOpen.value = false
+  try {
+    const meta = assets.getMeta(assetId.value)
+    await library.publishFrom(assetId.value, {
+      filename: meta?.filename || title.value,
+      prompt: promptValue.value
+    })
+    toast.success('已加入公共资产库')
+  } catch (e: any) {
+    toast.error(e?.message || '入库失败')
+  }
+}
+
 async function loadMedia() {
   const id = assetId.value
   playing.value = false
@@ -282,11 +298,20 @@ async function generateThis(ev?: Event, hd = false) {
   moreOpen.value = false
   dismissPanel()
   try {
-    await runCanvasNode(props.id, undefined, undefined, hd ? { hd: true } : undefined)
+    await runCanvasNode(
+      props.id,
+      (_id, msg) => {
+        toolBusy.value = msg
+      },
+      undefined,
+      hd ? { hd: true } : undefined
+    )
     await loadMedia()
     if (hd) toast.success('已按更高分辨率重新生成')
   } catch {
     /* 节点上会显示失败 */
+  } finally {
+    toolBusy.value = ''
   }
 }
 
@@ -620,6 +645,13 @@ const cropStyle = computed(() => ({
           <button v-if="hasAsset" type="button" class="icon" title="全屏" @click="previewFull">⛶</button>
           <div v-if="moreOpen" class="more">
             <button v-if="showPrompt" type="button" @click="copyPrompt(); moreOpen = false">复制提示词</button>
+            <button
+              v-if="isImageNode && hasAsset"
+              type="button"
+              @click="publishToLibrary"
+            >
+              加入公共资产库
+            </button>
             <button type="button" @click="openDetail(); moreOpen = false">打开右侧详情</button>
           </div>
         </div>
@@ -761,33 +793,33 @@ const cropStyle = computed(() => ({
 .pnode {
   position: relative;
   width: 240px;
-  background: #11111a;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-node-border);
   border-radius: 12px;
   overflow: visible;
   color: var(--color-text-1);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-node);
   transition: border-color 0.2s ease, box-shadow 0.22s ease;
 }
 .pnode.on {
-  border-color: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
+  border-color: var(--color-text-1);
+  box-shadow: 0 0 0 1px var(--color-text-1), var(--shadow-md);
   z-index: 4;
 }
 .pnode.st-running,
 .pnode.busy {
-  border-color: #c4b5fd;
-  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.28);
   animation: node-busy 1.35s ease-in-out infinite;
   z-index: 5;
 }
 @keyframes node-busy {
   0%,
   100% {
-    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+    box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.22);
   }
   50% {
-    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+    box-shadow: 0 0 0 3px rgba(126, 180, 255, 0.4);
   }
 }
 .pnode.st-failed {
@@ -808,9 +840,10 @@ const cropStyle = computed(() => ({
   gap: 2px;
   padding: 4px;
   border-radius: 10px;
-  background: #fff;
-  color: #1a1a1a;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  background: #2a2a32;
+  color: var(--color-text-1);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   white-space: nowrap;
 }
 .toolbar > button {
@@ -822,7 +855,7 @@ const cropStyle = computed(() => ({
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #222;
+  color: var(--color-text-1);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -832,7 +865,7 @@ const cropStyle = computed(() => ({
   opacity: 0.7;
 }
 .toolbar > button:hover:not(:disabled) {
-  background: #f2f2f4;
+  background: var(--color-fill-hover);
 }
 .toolbar > button:disabled {
   opacity: 0.35;
@@ -850,8 +883,9 @@ const cropStyle = computed(() => ({
   min-width: 132px;
   padding: 4px;
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
 }
 .more button {
   display: block;
@@ -863,15 +897,15 @@ const cropStyle = computed(() => ({
   background: transparent;
   text-align: left;
   font-size: 12px;
-  color: #222;
+  color: var(--color-text-1);
 }
 .more button:hover {
-  background: #f2f2f4;
+  background: var(--color-fill-hover);
 }
 .pnode-media {
   position: relative;
   width: 100%;
-  background: #0b0b14;
+  background: var(--color-node-well);
   overflow: hidden;
   border-radius: 12px 12px 0 0;
 }
@@ -884,7 +918,7 @@ const cropStyle = computed(() => ({
   object-fit: contain;
   object-position: center;
   display: block;
-  background: #0b0b14;
+  background: var(--color-node-well);
 }
 .pnode-media video {
   cursor: pointer;
@@ -908,7 +942,7 @@ const cropStyle = computed(() => ({
   cursor: pointer;
 }
 .play-btn:hover {
-  background: rgba(124, 58, 237, 0.9);
+  background: var(--color-accent);
 }
 .dur {
   position: absolute;
@@ -970,7 +1004,7 @@ const cropStyle = computed(() => ({
   padding: 0 0 1px 1px;
   border: none;
   border-radius: 50%;
-  background: rgba(124, 58, 237, 0.85);
+  background: var(--color-accent);
   color: #fff;
   font-size: 12px;
   cursor: pointer;
@@ -981,7 +1015,7 @@ const cropStyle = computed(() => ({
   gap: 6px;
   min-height: 32px;
   padding: 0 10px;
-  background: #16161f;
+  background: var(--color-bg-1);
   border-radius: 0 0 11px 11px;
 }
 .pnode-name .kind {
@@ -1016,8 +1050,8 @@ const cropStyle = computed(() => ({
   min-width: 400px;
   transform: translateX(-50%);
   transform-origin: 50% 0;
-  background: #16161f;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px 12px;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
@@ -1053,14 +1087,14 @@ const cropStyle = computed(() => ({
   height: 28px;
   min-width: 72px;
   padding: 0 26px 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
-  background-color: #2a2a38;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-color: var(--color-bg-1);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23ececef' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23ececef' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;
   background-position: right 8px center;
   background-size: 10px;
-  color: #f5f5fa;
+  color: var(--color-text-1);
   font-size: 12px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
@@ -1071,16 +1105,16 @@ const cropStyle = computed(() => ({
   color-scheme: dark;
 }
 .dur-edit select option {
-  background: #1c1c28;
-  color: #f5f5fa;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
 }
 .go {
   width: 28px;
   height: 28px;
   margin: 0;
   border: none;
-  border-radius: 7px;
-  background: #fff;
+  border-radius: 50%;
+  background: #ececef;
   color: #111;
   font-size: 14px;
   font-weight: 700;
@@ -1160,22 +1194,22 @@ const cropStyle = computed(() => ({
 .hndl {
   width: 8px;
   height: 8px;
-  background: #a78bfa;
+  background: var(--color-accent);
   border: 1px solid #fff;
 }
 .pnode.kind-subject,
-.pnode.kind-subjectProps { border-color: rgba(251, 191, 36, 0.35); }
-.pnode.kind-scene { border-color: rgba(96, 165, 250, 0.35); }
-.pnode.kind-shotBoard { border-color: rgba(148, 163, 184, 0.45); }
-.pnode.kind-shotImage { border-color: rgba(167, 139, 250, 0.35); }
-.pnode.kind-shotVideo { border-color: rgba(244, 114, 182, 0.35); }
+.pnode.kind-subjectProps,
+.pnode.kind-scene,
+.pnode.kind-shotBoard,
+.pnode.kind-shotImage,
+.pnode.kind-shotVideo { border-color: var(--color-node-border); }
 .pnode.on.kind-subject,
 .pnode.on.kind-subjectProps,
 .pnode.on.kind-scene,
 .pnode.on.kind-shotBoard,
 .pnode.on.kind-shotImage,
 .pnode.on.kind-shotVideo {
-  border-color: rgba(255, 255, 255, 0.55);
+  border-color: var(--color-text-1);
 }
 
 .float-up-enter-active,

@@ -24,5 +24,5 @@ triggers: 视频,出片,图生视频,运镜,动起来,生成视频
 ## 运动与队列
 
 - 每镜只采用分镜指定的一种主要运镜，动作在时长内完整结束。
-- 指定镜头使用 `generate_video + shotId`；全部镜头使用 `generate_all_videos`。
+- 指定镜头使用 `generate_video + shotId`；全部镜头使用 `generate_all_videos`（AutoDL 支持并发，缺视频的镜头会同时提交）。
 - 任一步自检或生成失败都暂停后续流水线并报告具体镜头。

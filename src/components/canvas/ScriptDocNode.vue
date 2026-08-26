@@ -61,6 +61,7 @@ const llmModel = computed(() => settings.config.llm.model)
 function patchTopic(v: string) {
   if (!project.current?.script) return
   project.setScript({ ...project.current.script, topic: v })
+  project.applyPlayTitle(v)
 }
 
 function patchDraftBrief(v: string) {
@@ -406,33 +407,33 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-2);
-  border: 1px solid rgba(167, 139, 250, 0.4);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-node-border);
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-node);
   position: relative;
 }
 .sdoc.editing .sdoc-card {
   border-color: var(--color-accent);
 }
 .sdoc.on .sdoc-card {
-  border-color: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
+  border-color: var(--color-text-1);
+  box-shadow: 0 0 0 1px var(--color-text-1), var(--shadow-md);
 }
 .sdoc.st-running .sdoc-card,
 .sdoc.busy .sdoc-card {
-  border-color: #c4b5fd;
-  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.28);
   animation: node-busy 1.35s ease-in-out infinite;
 }
 @keyframes node-busy {
   0%,
   100% {
-    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+    box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.22);
   }
   50% {
-    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+    box-shadow: 0 0 0 3px rgba(126, 180, 255, 0.4);
   }
 }
 .sdoc.st-failed .sdoc-card {
@@ -445,7 +446,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   gap: 10px;
   padding: 10px 14px 8px;
   border-bottom: 1px solid var(--color-border);
-  background: rgba(124, 58, 237, 0.08);
+  background: var(--color-node-well);
   flex-shrink: 0;
   cursor: grab;
 }
@@ -528,14 +529,14 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   padding-bottom: 6px;
   font-size: 15px;
   font-weight: 700;
-  color: #ddd6fe;
-  border-bottom: 1px solid rgba(167, 139, 250, 0.28);
+  color: var(--color-text-1);
+  border-bottom: 1px solid var(--color-border);
 }
 .sdoc-md :deep(h3) {
   margin: 14px 0 6px;
   font-size: 13px;
   font-weight: 700;
-  color: #c4b5fd;
+  color: var(--color-text-2);
 }
 .sdoc-md :deep(p) {
   margin: 0 0 10px;
@@ -569,7 +570,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 }
 .sdoc-md :deep(hr) {
   border: none;
-  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+  border-top: 1px dashed var(--color-border);
   margin: 12px 0;
 }
 .sdoc-err {
@@ -590,7 +591,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 }
 .sdoc-gate span {
   font-size: 12px;
-  color: #fcd34d;
+  color: var(--color-warning);
   line-height: 1.4;
 }
 .sdoc-gate button {
@@ -605,14 +606,14 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 .sdoc-ok {
   padding: 8px 14px;
   font-size: 11px;
-  color: #6ee7b7;
+  color: var(--color-success);
   border-top: 1px solid rgba(16, 185, 129, 0.25);
   flex-shrink: 0;
 }
 .hndl {
   width: 8px;
   height: 8px;
-  background: #a78bfa;
+  background: var(--color-accent);
   border: 1px solid #fff;
 }
 .rz {
@@ -647,8 +648,8 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   bottom: 4px;
   width: 8px;
   height: 8px;
-  border-right: 2px solid rgba(196, 181, 253, 0.85);
-  border-bottom: 2px solid rgba(196, 181, 253, 0.85);
+  border-right: 2px solid var(--color-text-3);
+  border-bottom: 2px solid var(--color-text-3);
 }
 .prompt {
   position: absolute;
@@ -660,8 +661,8 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   width: auto;
   transform: none;
   transform-origin: 50% 100%;
-  background: #16161f;
-  border: 1px solid rgba(167, 139, 250, 0.28);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px 12px;
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
@@ -715,14 +716,14 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   min-width: 0;
   height: 28px;
   padding: 0 26px 0 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
-  background-color: #2a2a38;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-color: var(--color-bg-1);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23ececef' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23ececef' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;
   background-position: right 8px center;
   background-size: 10px;
-  color: #f5f5fa;
+  color: var(--color-text-1);
   font-size: 11px;
   appearance: none;
 }
@@ -730,7 +731,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   flex-shrink: 0;
   margin: 0;
   padding: 6px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   background: transparent;
   color: var(--color-text-2);
@@ -750,8 +751,8 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: var(--color-accent);
-  color: #fff;
+  background: #ececef;
+  color: #111;
   font-size: 16px;
   cursor: pointer;
 }

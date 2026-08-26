@@ -105,9 +105,7 @@ function newProject() {
   justify-content: space-between;
   height: 56px;
   padding: 0 var(--space-5);
-  background: rgba(18, 18, 31, 0.85);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: var(--color-bg-1);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
   z-index: 10;
@@ -133,7 +131,7 @@ function newProject() {
   app-region: no-drag;
 }
 .logo:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
 }
 .logo-mark {
   display: inline-flex;
@@ -143,18 +141,14 @@ function newProject() {
   height: 28px;
   border-radius: var(--radius-sm);
   background: var(--grad-primary);
-  color: white;
+  color: #fff;
   font-size: 12px;
-  box-shadow: 0 0 12px rgba(124, 58, 237, 0.4);
 }
 .logo-text {
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  background: var(--grad-primary);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--color-text-1);
 }
 .divider {
   width: 1px;
@@ -172,7 +166,7 @@ function newProject() {
   transition: all var(--duration-fast);
 }
 .project-name:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 .pencil {
@@ -217,7 +211,7 @@ function newProject() {
   transition: all var(--duration-fast);
 }
 .icon-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 </style>

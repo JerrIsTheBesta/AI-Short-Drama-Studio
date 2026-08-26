@@ -293,12 +293,9 @@ function drawPreview() {
   const w = canvas.width
   const h = canvas.height
 
-  ctx.fillStyle = '#1a1a2e'
+  ctx.fillStyle = '#1a1a1e'
   ctx.fillRect(0, 0, w, h)
-  const grad = ctx.createLinearGradient(0, 0, w, h)
-  grad.addColorStop(0, '#7c3aed')
-  grad.addColorStop(1, '#ec4899')
-  ctx.fillStyle = grad
+  ctx.fillStyle = '#121214'
   ctx.fillRect(20, 20, w - 40, h - 40)
 
   const text =
@@ -776,7 +773,7 @@ function next() {
   border-radius: var(--radius-sm);
 }
 .refresh-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 
@@ -891,7 +888,7 @@ function next() {
 .pos-icon {
   width: 32px;
   height: 24px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-fill);
   border-radius: 2px;
   position: relative;
 }

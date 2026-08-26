@@ -177,7 +177,7 @@ function removeActiveLlm() {
     <template v-else-if="module === 'video'">
       <section class="video">
         <h3>图生视频</h3>
-        <p class="hint">MiniMax H3 / ComfyUI。填工作流地址和 ID。提示词写法会记住，提炼分镜和出视频都按这个来。</p>
+        <p class="hint">AutoDL.art MiniMax H3 图+音频生视频（minimax_h3_image_audio_to_video_v2_15s），分辨率固定 768p。多个镜头可以同时提交。</p>
         <label>提示词写法</label>
         <div class="style-cards">
           <button
@@ -200,21 +200,21 @@ function removeActiveLlm() {
         <label>服务地址</label>
         <input
           :value="settings.config.video.baseUrl"
-          placeholder="https://host:port 或云端 Comfy 地址"
+          placeholder="https://autodl.art"
           @change="settings.patchVideo({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
         />
         <label>工作流 ID</label>
         <input
           :value="settings.config.video.workflowId"
-          placeholder="U09-API-9图版"
+          placeholder="minimax_h3_image_audio_to_video_v2_15s"
           @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
         />
-        <label>API Key（可空）</label>
+        <label>令牌</label>
         <input
           type="password"
           autocomplete="off"
           :value="settings.config.video.apiKey"
-          placeholder="没有就留空"
+          placeholder="AutoDL.art Token"
           @change="settings.patchVideo({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
         />
       </section>
@@ -351,7 +351,7 @@ select {
 .llm-cards button.on {
   border-color: var(--color-accent);
   color: var(--color-text-1);
-  background: rgba(124, 58, 237, 0.16);
+  background: var(--color-fill);
 }
 .llm-cards strong {
   font-size: 13px;
@@ -382,7 +382,7 @@ select {
 .style-cards button.on {
   border-color: var(--color-accent);
   color: var(--color-text-1);
-  background: rgba(124, 58, 237, 0.16);
+  background: var(--color-fill);
 }
 .style-cards strong {
   font-size: 13px;

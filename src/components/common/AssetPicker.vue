@@ -3,7 +3,7 @@
  * 从资源库挑选已有图片 / 视频
  */
 import { ref, computed, watch } from 'vue'
-import { useAssetsStore, useProjectStore } from '@/stores'
+import { useAssetsStore, useLibraryStore, useProjectStore } from '@/stores'
 import type { Asset, AssetKind, ID } from '@/types'
 import { assetContext } from '@/utils/assetLabel'
 import GradientButton from '@/components/common/GradientButton.vue'
@@ -16,8 +16,10 @@ const props = defineProps<{
   kind?: AssetKind | 'all'
   multiple?: boolean
   title?: string
-  /** 已经选中的（打开时预勾） */
   selectedIds?: ID[]
+  /** 本页可用的图片 ID（一图生视频） */
+  pageIds?: ID[]
+  showLibrary?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -26,18 +28,38 @@ const emit = defineEmits<{
 }>()
 
 const assets = useAssetsStore()
+const library = useLibraryStore()
 const project = useProjectStore()
 const picked = ref<Set<ID>>(new Set())
 const urls = ref<Record<string, string>>({})
 const loading = ref(false)
+const tab = ref<'page' | 'library'>('page')
 
 const kind = computed(() => props.kind ?? 'image')
+const showTabs = computed(() => Boolean(props.showLibrary))
 
 const list = computed(() => {
+  if (tab.value === 'library' && showTabs.value) {
+    return library.all.filter((a) => kind.value === 'all' || a.kind === kind.value)
+  }
   const items =
     kind.value === 'all'
       ? assets.all
       : assets.all.filter((a) => a.kind === kind.value)
+  if (props.pageIds?.length) {
+    const allow = new Set(props.pageIds)
+    const fromProject = items.filter((a) => allow.has(a.id))
+    const have = new Set(fromProject.map((a) => a.id))
+    const fromLib = showTabs.value
+      ? library.all.filter(
+          (a) =>
+            allow.has(a.id) &&
+            !have.has(a.id) &&
+            (kind.value === 'all' || a.kind === kind.value)
+        )
+      : []
+    return [...fromProject, ...fromLib]
+  }
   return items
 })
 
@@ -46,25 +68,36 @@ watch(
   async (open) => {
     if (!open) return
     picked.value = new Set(props.selectedIds ?? [])
+    tab.value = props.pageIds?.length || !props.showLibrary ? 'page' : 'library'
     loading.value = true
     try {
       await assets.refresh()
-      const next: Record<string, string> = {}
-      for (const a of list.value) {
-        if (a.kind === 'video') {
-          const u = await assets.ensureThumb(a.id)
-          if (u) next[a.id] = u
-        } else {
-          const u = await assets.getUrl(a.id)
-          if (u) next[a.id] = u
-        }
-      }
-      urls.value = next
+      if (props.showLibrary) await library.refresh()
+      await loadUrls()
     } finally {
       loading.value = false
     }
   }
 )
+
+watch(tab, () => {
+  if (props.open) loadUrls()
+})
+
+async function loadUrls() {
+  const next: Record<string, string> = { ...urls.value }
+  for (const a of list.value) {
+    if (next[a.id]) continue
+    if (a.kind === 'video') {
+      const u = await assets.ensureThumb(a.id)
+      if (u) next[a.id] = u
+    } else {
+      const u = (await assets.getUrl(a.id)) || (await library.getUrl(a.id))
+      if (u) next[a.id] = u
+    }
+  }
+  urls.value = next
+}
 
 function toggle(id: ID) {
   if (props.multiple) {
@@ -107,17 +140,25 @@ function labelOf(a: Asset) {
           <header class="head">
             <div>
               <h3>{{ title || '从资源库选择' }}</h3>
-              <p>已生成/上传的素材都在这里，不会因为重新生成而丢失</p>
+              <p>{{ showTabs ? '可从本页图片或公共资产库选用' : '已生成/上传的素材都在这里' }}</p>
             </div>
             <button class="close" @click="emit('close')">×</button>
           </header>
+          <div v-if="showTabs" class="tabs">
+            <button type="button" :class="{ on: tab === 'page' }" @click="tab = 'page'">本页图片</button>
+            <button type="button" :class="{ on: tab === 'library' }" @click="tab = 'library'">公共资产库</button>
+          </div>
 
           <div v-if="loading" class="loading">加载资源库...</div>
           <EmptyState
             v-else-if="list.length === 0"
             icon="📦"
-            title="资源库是空的"
-            description="生成图片/视频后会自动进入资源库"
+            :title="tab === 'library' ? '公共资产库是空的' : '本页还没有图片'"
+            :description="
+              tab === 'library'
+                ? '去首页上传，或把项目里生成的图加入公共库'
+                : '先用图片节点出图，或点节点上的＋上传参考图'
+            "
           />
           <div v-else class="grid">
             <button
@@ -145,9 +186,9 @@ function labelOf(a: Asset) {
                 <div class="name" :title="labelOf(a).title">{{ labelOf(a).title }}</div>
                 <div class="sub">
                   <Tag size="sm" :type="a.source === 'ai-generated' ? 'accent' : 'info'">
-                    {{ a.source === 'ai-generated' ? 'AI' : '上传' }}
+                    {{ a.library ? '公共库' : a.source === 'ai-generated' ? 'AI' : '上传' }}
                   </Tag>
-                  {{ labelOf(a).projectName }}
+                  {{ a.library ? '公共资产库' : labelOf(a).projectName }}
                   · {{ fmtSize(a.size) }}
                 </div>
               </div>
@@ -213,8 +254,28 @@ function labelOf(a: Asset) {
   color: var(--color-text-3);
 }
 .close:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-fill-hover);
   color: var(--color-text-1);
+}
+.tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 20px 0;
+}
+.tabs button {
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tabs button.on {
+  background: var(--color-fill-strong);
+  color: var(--color-text-1);
+  border-color: var(--color-border-strong);
 }
 .loading {
   padding: 48px;

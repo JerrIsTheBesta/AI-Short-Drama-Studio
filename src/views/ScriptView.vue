@@ -533,7 +533,7 @@ async function removeProductImage(id: string) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-fill);
   border-radius: 2px;
 }
 .aspect-box {

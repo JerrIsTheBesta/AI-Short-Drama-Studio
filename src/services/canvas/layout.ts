@@ -71,6 +71,9 @@ function pos(
 }
 
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
+  if (project.pipelineMode === 'img2video') {
+    return project.canvas ?? emptyCanvas()
+  }
   const prevList = project.canvas?.nodes ?? []
   const subjects = project.subjects ?? []
   const scenes = project.scenes ?? []

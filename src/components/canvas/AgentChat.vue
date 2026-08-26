@@ -449,8 +449,28 @@ async function send() {
               </template>
             </div>
           </div>
-          <button v-if="busy" type="button" class="stop" @click="cancel">停止</button>
-          <button v-else type="submit" class="send" :disabled="!input.trim()">发送</button>
+          <button
+            v-if="busy"
+            type="button"
+            class="icon-act stop"
+            title="停止"
+            @click="cancel"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="1.5" />
+            </svg>
+          </button>
+          <button
+            v-else
+            type="submit"
+            class="icon-act send"
+            title="发送"
+            :disabled="!input.trim()"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h12M13 6l6 6-6 6" />
+            </svg>
+          </button>
         </div>
       </div>
     </form>
@@ -459,13 +479,15 @@ async function send() {
 
 <style scoped>
 .agent {
-  width: 360px;
+  width: 440px;
   flex-shrink: 0;
+  min-width: 0;
   border-right: 1px solid var(--color-border);
   background: var(--color-bg-1);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-x: hidden;
 }
 .head {
   display: flex;
@@ -484,10 +506,12 @@ async function send() {
   color: var(--color-text-4);
 }
 .head span.live {
-  color: #c4b5fd;
+  color: var(--color-text-1);
 }
 .msgs {
   flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px 16px 16px;
   display: flex;
@@ -498,6 +522,8 @@ async function send() {
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   max-width: 100%;
 }
 .msg.user {
@@ -505,7 +531,7 @@ async function send() {
   max-width: 88%;
   padding: 8px 12px;
   border-radius: 12px 12px 4px 12px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 .msg.assistant {
@@ -518,21 +544,21 @@ async function send() {
   flex-direction: column;
   gap: 8px;
   padding: 10px 0 2px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--color-border);
 }
 .think {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #c4b5fd;
+  color: var(--color-text-3);
 }
 .dots {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #a78bfa;
-  box-shadow: 12px 0 0 #a78bfa, 24px 0 0 #a78bfa;
+  background: var(--color-text-1);
+  box-shadow: 12px 0 0 var(--color-text-1), 24px 0 0 var(--color-text-1);
   animation: pulse 1s ease-in-out infinite;
   margin-right: 24px;
 }
@@ -550,12 +576,13 @@ async function send() {
 }
 .trace li {
   display: grid;
-  grid-template-columns: 14px 1fr;
+  grid-template-columns: 14px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
   padding: 5px 0;
   font-size: 12px;
   color: var(--color-text-3);
+  min-width: 0;
 }
 .trace li i {
   width: 7px;
@@ -567,6 +594,8 @@ async function send() {
 .trace li p,
 .trace li small {
   margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .trace li small {
   display: block;
@@ -579,20 +608,20 @@ async function send() {
   color: var(--color-text-1);
 }
 .trace li.running i {
-  background: #a78bfa;
-  box-shadow: 0 0 8px #a78bfa;
+  background: var(--color-text-1);
+  box-shadow: none;
 }
 .trace li.done {
   color: var(--color-text-3);
 }
 .trace li.done i {
-  background: #34d399;
+  background: var(--color-success);
 }
 .trace li.fail {
-  color: #fca5a5;
+  color: var(--color-error);
 }
 .trace li.fail i {
-  background: #f87171;
+  background: var(--color-error);
 }
 .trace li.log {
   color: var(--color-text-4);
@@ -606,6 +635,8 @@ async function send() {
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 16px 10px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 .chips button {
   margin: 0;
@@ -618,12 +649,13 @@ async function send() {
   cursor: pointer;
 }
 .chips button:hover {
-  border-color: rgba(255, 255, 255, 0.22);
+  border-color: var(--color-text-1);
   color: var(--color-text-1);
 }
 .composer {
   padding: 10px 12px 12px;
   border-top: 1px solid var(--color-border);
+  min-width: 0;
 }
 .estimate {
   margin: 0 0 6px;
@@ -633,6 +665,7 @@ async function send() {
 .box {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -656,6 +689,7 @@ textarea {
   align-items: center;
   gap: 6px;
   min-height: 32px;
+  min-width: 0;
 }
 .bar-pop {
   position: relative;
@@ -664,14 +698,15 @@ textarea {
 .model-pop {
   min-width: 0;
   flex: 1;
-  max-width: 168px;
+  max-width: 220px;
 }
 .bar-btn {
   height: 28px;
   margin: 0;
+  min-width: 0;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-2);
   font-size: 11px;
   cursor: pointer;
@@ -680,6 +715,7 @@ textarea {
   gap: 4px;
   padding: 0 8px;
   white-space: nowrap;
+  overflow: hidden;
 }
 .model-btn {
   width: 100%;
@@ -705,10 +741,10 @@ textarea {
   z-index: 8;
   width: 220px;
   padding: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: #1b1b24;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  background: var(--color-bg-1);
+  box-shadow: var(--shadow-md);
 }
 .model-menu {
   width: 248px;
@@ -761,32 +797,43 @@ textarea {
 .menu > button:hover,
 .model-item.on,
 .model-item:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 .tip {
   margin: 6px 2px 2px;
   padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--color-border);
   font-size: 11px;
   line-height: 1.45;
   color: var(--color-text-4);
 }
-.send,
-.stop {
+.icon-act {
   flex-shrink: 0;
+  width: 28px;
   height: 28px;
   margin: 0 0 0 auto;
-  padding: 0 12px;
+  padding: 0;
   border: none;
   border-radius: 8px;
-  font-size: 12px;
-  font-weight: 650;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-act svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .send {
-  background: #fff;
+  background: #ececef;
   color: #111;
+  border-radius: 50%;
 }
 .send:disabled {
   opacity: 0.35;
@@ -794,7 +841,11 @@ textarea {
 }
 .stop {
   background: transparent;
-  color: #fca5a5;
-  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: var(--color-error);
+  border: 1px solid rgba(185, 28, 28, 0.35);
+}
+.stop svg {
+  fill: currentColor;
+  stroke: none;
 }
 </style>

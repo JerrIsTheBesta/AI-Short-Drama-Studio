@@ -493,7 +493,7 @@ function next() {
   transition: all var(--duration-fast);
 }
 .shot-item:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
 }
 .shot-item.on {
   opacity: 0.5;
@@ -563,7 +563,7 @@ function next() {
   border-radius: var(--radius-sm);
 }
 .preview-head button:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-fill);
   color: var(--color-text-1);
 }
 .preview-video {

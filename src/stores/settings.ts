@@ -5,7 +5,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import { envDefaults } from '@/services/ai/env'
+import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/services/ai/env'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 const STORAGE_KEY = 'ai-cut:settings'
@@ -220,6 +220,7 @@ function load(): AppSettings {
     return {
       ...defaults,
       ...parsed,
+      theme: 'dark',
       aiMode: 'real',
       llm: asEndpoint(active),
       llms,
@@ -238,6 +239,9 @@ function load(): AppSettings {
       video: {
         ...defaults.video,
         ...parsed.video,
+        baseUrl: migrateVideoBaseUrl(parsed.video?.baseUrl || defaults.video.baseUrl),
+        apiKey: parsed.video?.apiKey || defaults.video.apiKey,
+        workflowId: migrateVideoWorkflowId(parsed.video?.workflowId || defaults.video.workflowId),
         promptStyle:
           parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
       },

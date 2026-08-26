@@ -30,27 +30,27 @@ defineProps<{
   font-size: 10px;
 }
 .type-default {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-fill);
   color: var(--color-text-2);
 }
 .type-success {
-  background: rgba(16, 185, 129, 0.15);
-  color: #6ee7b7;
+  background: rgba(74, 222, 128, 0.14);
+  color: var(--color-success);
 }
 .type-warning {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--color-warning);
 }
 .type-error {
-  background: rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--color-error);
 }
 .type-info {
-  background: rgba(59, 130, 246, 0.15);
-  color: #93c5fd;
+  background: rgba(126, 180, 255, 0.14);
+  color: var(--color-info);
 }
 .type-accent {
-  background: var(--grad-primary-soft);
-  color: #f5d0fe;
+  background: var(--color-fill-strong);
+  color: var(--color-text-1);
 }
 </style>

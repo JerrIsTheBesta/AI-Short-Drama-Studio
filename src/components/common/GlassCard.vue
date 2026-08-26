@@ -24,38 +24,22 @@ defineProps<{
 <style scoped>
 .glass-card-root {
   background: var(--color-bg-card);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm);
   transition: all var(--duration-normal) var(--ease-out);
   position: relative;
   overflow: hidden;
 }
 
-.glass-card-root::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: var(--grad-primary-soft);
-  opacity: 0;
-  transition: opacity var(--duration-normal) var(--ease-out);
-  pointer-events: none;
-}
-
 .glass-card-root.hoverable:hover {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   border-color: var(--color-border-strong);
-  box-shadow: var(--shadow-lg);
-}
-
-.glass-card-root.hoverable:hover::before {
-  opacity: 0.5;
+  box-shadow: var(--shadow-md);
 }
 
 .glass-card-root.glow {
-  box-shadow: var(--shadow-glow);
+  box-shadow: var(--shadow-md);
 }
 
 .pad-none { padding: 0; }

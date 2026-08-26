@@ -69,9 +69,14 @@ function triggerUpload() {
   input.type = 'file'
   input.accept = 'image/*'
   input.multiple = true
+  input.hidden = true
+  input.style.display = 'none'
+  const cleanup = () => {
+    input.remove()
+  }
   input.addEventListener('change', async () => {
     const files = input.files
-    document.body.removeChild(input)
+    cleanup()
     if (!files?.length) return
     let count = 0
     const added: string[] = []
@@ -90,6 +95,15 @@ function triggerUpload() {
   })
   document.body.appendChild(input)
   input.click()
+  window.addEventListener(
+    'focus',
+    () => {
+      window.setTimeout(() => {
+        if (document.body.contains(input) && !input.files?.length) cleanup()
+      }, 300)
+    },
+    { once: true }
+  )
 }
 
 onBeforeUnmount(() => {
@@ -153,7 +167,7 @@ onBeforeUnmount(() => {
 .ref-strip {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--color-border);
 }
 .ref-head {
   display: flex;
@@ -175,13 +189,13 @@ onBeforeUnmount(() => {
   padding: 2px 8px;
   border: none;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f5f5fa;
+  background: var(--color-fill);
+  color: var(--color-text-1);
   font-size: 11px;
   cursor: pointer;
 }
 .ref-acts button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--color-fill-hover);
 }
 .ref-list {
   display: flex;
@@ -200,8 +214,8 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   object-fit: cover;
   display: block;
-  background: #0b0b14;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
 }
 .ref-item .ph {
   display: flex;
@@ -230,7 +244,7 @@ onBeforeUnmount(() => {
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: #1a1a26;
+  background: var(--color-text-1);
   color: #fff;
   font-size: 11px;
   line-height: 16px;
@@ -240,10 +254,10 @@ onBeforeUnmount(() => {
   width: 52px;
   height: 52px;
   margin: 0;
-  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border: 1px dashed var(--color-border-strong);
   border-radius: 8px;
   background: transparent;
-  color: #f5f5fa;
+  color: var(--color-text-2);
   font-size: 18px;
   cursor: pointer;
 }

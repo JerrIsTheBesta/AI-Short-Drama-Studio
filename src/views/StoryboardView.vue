@@ -888,7 +888,7 @@ function movementLabel(m: Shot['cameraMovement']): string {
   transition: all var(--duration-fast);
 }
 .shot-actions button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-fill-hover);
   color: var(--color-text-1);
 }
 .shot-actions button:disabled {

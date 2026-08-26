@@ -27,7 +27,7 @@ const offset = computed(() => {
         :cy="size / 2"
         :r="radius"
         fill="none"
-        stroke="rgba(255,255,255,0.1)"
+        stroke="rgba(17,17,17,0.12)"
         :stroke-width="stroke"
       />
       <circle
@@ -45,9 +45,8 @@ const offset = computed(() => {
       />
       <defs>
         <linearGradient id="ring-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#7c3aed" />
-          <stop offset="50%" stop-color="#ec4899" />
-          <stop offset="100%" stop-color="#f59e0b" />
+          <stop offset="0%" stop-color="#7eb4ff" />
+          <stop offset="100%" stop-color="#c4c4cc" />
         </linearGradient>
       </defs>
     </svg>

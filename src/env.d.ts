@@ -24,6 +24,7 @@ interface ImportMetaEnv {
   readonly VITE_IMAGE_MODEL: string
   readonly VITE_VIDEO_BASE_URL: string
   readonly VITE_VIDEO_API_KEY: string
+  readonly VITE_VIDEO_WORKFLOW_ID: string
   readonly VITE_VIDEO_MODEL: string
   readonly VITE_TTS_BASE_URL: string
   readonly VITE_TTS_API_KEY: string

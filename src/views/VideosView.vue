@@ -5,6 +5,7 @@ import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { composeVideoPrompt, spokenTextOnly } from '@/services/ai'
 import { collectShotVideoEntries, packVideoRefEntries, subjectsForShot } from '@/utils/consistency'
 import { generateShotVideo } from '@/services/canvas/runner'
+import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import { effectiveShotAudioMode, editableVideoPrompt, resolveH3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -140,7 +141,9 @@ function toggleExpanded(id: string) {
 }
 
 async function generateOne(shot: Shot) {
-  generating.value.add(shot.id)
+  const next = new Set(generating.value)
+  next.add(shot.id)
+  generating.value = next
   try {
     const asset = await generateShotVideo(shot, (msg) => {
       progress.value[shot.id] = msg
@@ -152,17 +155,16 @@ async function generateOne(shot: Shot) {
   } catch (e: any) {
     toast.error(`分镜 ${shot.index + 1} 视频生成失败：${e.message}`)
   } finally {
-    generating.value.delete(shot.id)
+    const done = new Set(generating.value)
+    done.delete(shot.id)
+    generating.value = done
     delete progress.value[shot.id]
   }
 }
 
 async function generateAll() {
-  for (const shot of shots.value) {
-    if (shot.imageAssetId && !shot.videoAssetId && !generating.value.has(shot.id)) {
-      await generateOne(shot)
-    }
-  }
+  const targets = shots.value.filter((shot) => !shot.videoAssetId && !generating.value.has(shot.id))
+  await mapPool(targets, VIDEO_GEN_CONCURRENCY, (shot) => generateOne(shot))
 }
 
 async function restoreHistory(shot: Shot, assetId: ID) {
@@ -296,7 +298,7 @@ function next() {
 
         <div class="shot-info">
           <label class="info-row">
-            <span>⏱ 时长</span>
+            <span>时长</span>
             <input
               class="dur-input"
               type="number"
@@ -308,7 +310,7 @@ function next() {
             />
           </label>
           <label class="info-row">
-            <span>🎞 运镜</span>
+            <span>运镜</span>
             <select
               class="cam-select"
               :value="shot.cameraMovement"
@@ -323,7 +325,7 @@ function next() {
             </select>
           </label>
           <label class="info-row">
-            <span>🎙 人声 / 口型</span>
+            <span>人声</span>
             <select
               class="cam-select"
               :value="effectiveShotAudioMode(shot)"
@@ -550,29 +552,40 @@ function next() {
   display: block;
 }
 .shot-info {
-  display: flex;
-  gap: var(--space-3);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
   font-size: 12px;
 }
 .info-row {
-  flex: 1;
+  min-width: 0;
   background: var(--color-bg-2);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  padding: 8px 10px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   color: var(--color-text-3);
-  gap: 8px;
+  gap: 10px;
+}
+.info-row span {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.info-row:last-child {
+  grid-column: 1 / -1;
 }
 .dur-input,
 .cam-select {
-  width: 72px;
+  min-width: 0;
+  flex: 1;
+  width: auto;
+  max-width: 100%;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
   color: var(--color-text-1);
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 4px 8px;
   font-size: 12px;
   font-weight: 600;
 }

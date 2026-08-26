@@ -207,32 +207,32 @@ function openDetail() {
   width: 240px;
   min-height: 128px;
   padding: 10px 12px 8px;
-  background: #11181a;
-  border: 1px solid rgba(52, 211, 153, 0.28);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-node-border);
   border-radius: 12px;
   color: var(--color-text-1);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-node);
   overflow: visible;
 }
 .anode.on {
-  border-color: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 16px 40px rgba(0, 0, 0, 0.45);
+  border-color: var(--color-text-1);
+  box-shadow: 0 0 0 1px var(--color-text-1), var(--shadow-md);
   z-index: 4;
 }
 .anode.st-running,
 .anode.busy {
-  border-color: #c4b5fd;
-  box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.55), 0 0 22px rgba(124, 58, 237, 0.5);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.28);
   animation: node-busy 1.35s ease-in-out infinite;
   z-index: 5;
 }
 @keyframes node-busy {
   0%,
   100% {
-    box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4), 0 0 14px rgba(124, 58, 237, 0.32);
+    box-shadow: 0 0 0 2px rgba(126, 180, 255, 0.22);
   }
   50% {
-    box-shadow: 0 0 0 3px rgba(221, 214, 254, 0.9), 0 0 28px rgba(124, 58, 237, 0.62);
+    box-shadow: 0 0 0 3px rgba(126, 180, 255, 0.4);
   }
 }
 .anode.st-failed {
@@ -248,7 +248,7 @@ function openDetail() {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #6ee7b7;
+  color: var(--color-text-4);
 }
 .name {
   min-width: 0;
@@ -305,11 +305,11 @@ function openDetail() {
   z-index: 5;
   width: 320px;
   transform: translateX(-50%);
-  background: #161f1d;
-  border: 1px solid rgba(52, 211, 153, 0.22);
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-md);
 }
 .modes {
   display: grid;
@@ -322,8 +322,8 @@ function openDetail() {
   padding: 6px 0;
   border: none;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f5f5fa;
+  background: var(--color-fill);
+  color: var(--color-text-1);
   font-size: 11px;
   cursor: pointer;
 }
@@ -370,8 +370,8 @@ function openDetail() {
   height: 28px;
   margin: 0;
   border: none;
-  border-radius: 7px;
-  background: #fff;
+  border-radius: 50%;
+  background: #ececef;
   color: #111;
   font-size: 14px;
   font-weight: 700;
@@ -384,7 +384,7 @@ function openDetail() {
 .hndl {
   width: 8px;
   height: 8px;
-  background: #34d399;
+  background: var(--color-accent);
   border: 1px solid #fff;
 }
 .float-down-enter-active,

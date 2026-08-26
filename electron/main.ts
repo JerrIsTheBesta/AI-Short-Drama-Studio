@@ -6,12 +6,15 @@ import {
   dialog,
   shell,
   protocol,
-  Menu
+  Menu,
+  net
 } from 'electron'
 import path from 'node:path'
+import os from 'node:os'
 import fs from 'node:fs/promises'
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 const mainDir = path.dirname(fileURLToPath(import.meta.url))
@@ -136,7 +139,7 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 720,
     title: '剧流 Studio',
-    backgroundColor: '#0a0a14',
+    backgroundColor: '#101012',
     frame: false,
     autoHideMenuBar: true,
     show: false,
@@ -257,6 +260,137 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('desktop:openPath', async (_e, filePath: string) => {
     return shell.openPath(filePath)
+  })
+
+  ipcMain.handle('desktop:autodlFetch', async (_e, opts?: {
+    url?: string
+    method?: string
+    authorization?: string
+    body?: string
+    timeoutMs?: number
+  }) => {
+    const url = String(opts?.url || '')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('invalid url')
+    }
+    const host = parsed.hostname.toLowerCase()
+    if (parsed.protocol !== 'https:' || (host !== 'autodl.art' && !host.endsWith('.autodl.art'))) {
+      throw new Error('只允许请求 AutoDL')
+    }
+    if (!parsed.pathname.includes('/api/v1/comfyui/')) {
+      throw new Error('只允许请求 AutoDL ComfyUI API')
+    }
+    const method = String(opts?.method || 'GET').toUpperCase()
+    const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      const token = String(opts?.authorization || '').trim()
+      if (token) headers.Authorization = token
+      if (method === 'POST') headers['Content-Type'] = 'application/json'
+      const res = await net.fetch(url, {
+        method,
+        headers,
+        body: method === 'POST' ? String(opts?.body || '') : undefined,
+        signal: controller.signal
+      })
+      const text = await res.text()
+      return { status: res.status, ok: res.ok, text }
+    } catch (err: any) {
+      if (controller.signal.aborted) {
+        throw new Error(`AutoDL 请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
+  ipcMain.handle('desktop:dashscopeFetch', async (_e, opts?: {
+    url?: string
+    method?: string
+    authorization?: string
+    extraHeaders?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }) => {
+    const url = String(opts?.url || '')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('invalid url')
+    }
+    const host = parsed.hostname.toLowerCase()
+    const pathName = parsed.pathname
+    const allowedHost =
+      host === 'dashscope.aliyuncs.com' ||
+      host.endsWith('.dashscope.aliyuncs.com') ||
+      host.endsWith('.maas.aliyuncs.com')
+    const allowedPath =
+      pathName.includes('/services/aigc/video-generation/') ||
+      /\/api\/v1\/tasks\/[^/]+$/.test(pathName)
+    if (parsed.protocol !== 'https:' || !allowedHost || !allowedPath) {
+      throw new Error('只允许请求百炼视频 API')
+    }
+    const method = String(opts?.method || 'GET').toUpperCase()
+    const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      const token = String(opts?.authorization || '').trim()
+      if (token) headers.Authorization = token
+      if (method === 'POST') headers['Content-Type'] = 'application/json'
+      for (const [k, v] of Object.entries(opts?.extraHeaders || {})) {
+        const key = String(k || '').trim()
+        if (!key || /^authorization$/i.test(key) || /^host$/i.test(key)) continue
+        headers[key] = String(v ?? '')
+      }
+      const res = await net.fetch(url, {
+        method,
+        headers,
+        body: method === 'POST' ? String(opts?.body || '') : undefined,
+        signal: controller.signal
+      })
+      const text = await res.text()
+      return { status: res.status, ok: res.ok, text }
+    } catch (err: any) {
+      if (controller.signal.aborted) {
+        throw new Error(`百炼请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
+  ipcMain.handle('desktop:downloadToTemp', async (_e, url: string) => {
+    const target = String(url || '')
+    let parsed: URL
+    try {
+      parsed = new URL(target)
+    } catch {
+      throw new Error('invalid url')
+    }
+    if (
+      parsed.protocol !== 'https:' ||
+      !/myqcloud\.com|codewithgpu|autodl\.art|aliyuncs\.com/i.test(parsed.hostname)
+    ) {
+      throw new Error('只允许下载已知视频源')
+    }
+    const dest = path.join(
+      os.tmpdir(),
+      `aicuts-dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`
+    )
+    const res = await net.fetch(target, { redirect: 'follow' })
+    if (!res.ok || !res.body) throw new Error(`下载失败 ${res.status}`)
+    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(dest))
+    return dest
   })
 
   function senderWin(e: Electron.IpcMainInvokeEvent) {

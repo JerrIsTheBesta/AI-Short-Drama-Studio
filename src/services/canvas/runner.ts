@@ -1,4 +1,4 @@
-import { useProjectStore, useAssetsStore, useSettingsStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useSettingsStore, useLibraryStore } from '@/stores'
 import {
   generateImage,
   generateVideo,
@@ -36,10 +36,11 @@ import { emitCanvasActivity } from './canvasBridge'
 import { extractStageLabel } from './pipeline'
 import { friendlyAiError } from '@/services/ai/abort'
 import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
-import { topicFromBrief } from '@/utils/storyBrief'
-import { mapPool, withNodeJob } from './jobs'
+import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
+import { mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
+import { setActiveProjectDir } from '@/services/storage'
 import type { CanvasNode, Scene, Shot, Subject } from '@/types'
 
 export type RunProgress = (nodeId: string, msg: string) => void
@@ -696,6 +697,12 @@ export async function runGeneratePlay(
     ...(run.result.colorPalette ? { colorPalette: run.result.colorPalette } : {}),
     ...(run.result.lightingNote ? { lightingNote: run.result.lightingNote } : {})
   })
+  project.applyPlayTitle(
+    playTitleOf({
+      topic: run.result.topic || project.current.script.topic,
+      content: run.result.playMarkdown
+    })
+  )
   if (!continueMode) {
     project.setCanvas(rebuildCanvasGraph(project.current, false))
   }
@@ -970,6 +977,12 @@ export async function runVideoRemake(
       ...(analysis.result.colorPalette ? { colorPalette: analysis.result.colorPalette } : {}),
       ...(analysis.result.lightingNote ? { lightingNote: analysis.result.lightingNote } : {})
     })
+    project.applyPlayTitle(
+      playTitleOf({
+        topic: analysis.topic || topic,
+        content: analysis.playMarkdown
+      })
+    )
     project.setCanvas(rebuildCanvasGraph(project.current, false))
     project.setPlayApproved(false)
     await project.save()
@@ -1003,6 +1016,109 @@ export async function rerunVideoRemake(
   })
 }
 
+export async function generateFreeformImage(
+  nodeId: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  if (!p) throw new Error('没有打开的项目')
+  const node = p.canvas?.nodes.find((n) => n.id === nodeId)
+  if (!node) throw new Error('找不到节点')
+  const prompt = node.data.prompt?.trim()
+  if (!prompt) throw new Error('请先写提示词')
+  onProgress?.('准备参考图...')
+  const library = useLibraryStore()
+  const blobs: Blob[] = []
+  for (const id of node.data.referenceAssetIds ?? []) {
+    const b = (await assets.getBlob(id)) || (await library.getBlob(id))
+    if (b) blobs.push(b)
+  }
+  const look = lookFromScript(p.script)
+  const size = pendingRun.hd
+    ? { width: p.settings.width, height: p.settings.height }
+    : { width: Math.min(p.settings.width, 1280), height: Math.min(p.settings.height, 720) }
+  onProgress?.('正在出图...')
+  const result = await generateImage({
+    prompt,
+    style: look.style,
+    width: size.width,
+    height: size.height,
+    aspectRatio: p.settings.aspectRatio,
+    referenceImages: blobs.length ? blobs : undefined,
+    model: imageModelForProject(p.pipelineMode),
+    signal
+  })
+  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+    filename: `${node.data.label || '图片'}.png`,
+    prompt,
+    projectId: p.id
+  })
+  project.patchCanvasNode(nodeId, { outputAssetId: asset.id })
+  await project.save()
+  return asset
+}
+
+export async function generateFreeformVideo(
+  nodeId: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  if (!p) throw new Error('没有打开的项目')
+  const node = p.canvas?.nodes.find((n) => n.id === nodeId)
+  if (!node) throw new Error('找不到节点')
+  const prompt = node.data.prompt?.trim()
+  if (!prompt) throw new Error('请先写提示词')
+  const ids = node.data.referenceAssetIds ?? []
+  if (!ids.length) throw new Error('请先选至少一张参考图')
+  onProgress?.('读取参考图...')
+  const library = useLibraryStore()
+  const blobs: Blob[] = []
+  for (const id of ids) {
+    const b = (await assets.getBlob(id)) || (await library.getBlob(id))
+    if (b) blobs.push(b)
+  }
+  if (!blobs.length) throw new Error('参考图读取失败')
+  if (p.folderPath) setActiveProjectDir(p.folderPath)
+  const duration =
+    node.data.videoModel === 'wan-prime'
+      ? Math.min(30, Math.max(2, Math.round(node.data.duration || 8)))
+      : Math.min(15, Math.max(1, Math.round(node.data.duration || 8)))
+  onProgress?.('正在出视频...')
+  const result = await generateVideo(
+    {
+      prompt,
+      imageBlob: blobs[0],
+      referenceImages: blobs.slice(1, node.data.videoModel === 'wan-prime' ? 10 : 9),
+      duration,
+      width: p.settings.width,
+      height: p.settings.height,
+      aspectRatio: p.settings.aspectRatio,
+      voiceMode: 'none',
+      promptStyle: 'scene-narrative',
+      videoModel: node.data.videoModel === 'wan-prime' ? 'wan-prime' : 'h3',
+      signal
+    },
+    onProgress
+  )
+  const asset = await assets.add(result.blob, 'video', 'ai-generated', {
+    filename: `${node.data.label || '视频'}.mp4`,
+    prompt,
+    projectId: p.id
+  })
+  project.patchCanvasNode(nodeId, { outputAssetId: asset.id })
+  onProgress?.('视频已写入节点')
+  await project.save()
+  return asset
+}
+
 export async function runCanvasNode(
   nodeId: string,
   onProgress?: RunProgress,
@@ -1025,6 +1141,8 @@ export async function runCanvasNode(
       node.type !== 'script' &&
       node.type !== 'export' &&
       node.type !== 'final' &&
+      node.type !== 'imageGen' &&
+      node.type !== 'videoGen' &&
       !isPlayApproved(p)
     ) {
       throw new Error(PLAY_GATE_MSG)
@@ -1066,6 +1184,10 @@ export async function runCanvasNode(
         await generateShotAudio(shot, report, signal)
       } else if (node.type === 'export' || node.type === 'final') {
         await generateFinalCut(report)
+      } else if (node.type === 'imageGen') {
+        await generateFreeformImage(node.id, report, signal)
+      } else if (node.type === 'videoGen') {
+        await generateFreeformVideo(node.id, report, signal)
       } else {
         throw new Error(`未知节点类型：${node.type}`)
       }
@@ -1130,7 +1252,7 @@ export async function generateMissingVideos(onProgress?: (msg: string) => void, 
   const ids = p.shots
     .filter((s) => !s.videoAssetId)
     .map((s) => `shotVideo:${s.id}`)
-  await mapPool(ids, 2, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
+  await mapPool(ids, VIDEO_GEN_CONCURRENCY, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }
 
 export async function generateMissingAudio(onProgress?: (msg: string) => void, signal?: AbortSignal) {

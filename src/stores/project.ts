@@ -17,7 +17,7 @@ import {
   loadProjectFromDir
 } from '@/services/storage'
 import { isDesktop, desktop } from '@/services/desktop'
-import { emptyCanvas } from '@/types/canvas'
+import { emptyCanvas, normalizeVideoGenModel } from '@/types/canvas'
 import { pushHistory } from '@/utils/shot'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
 import type {
@@ -32,6 +32,7 @@ import type {
   Subject,
   Scene,
   CanvasGraph,
+  CanvasNode,
   ShotAudioMode
 } from '@/types'
 
@@ -242,6 +243,15 @@ export const useProjectStore = defineStore('project', () => {
   function setScript(script: Script) {
     if (!current.value) return
     current.value.script = script
+    touch()
+  }
+
+  /** 用剧本名称作为项目标题 */
+  function applyPlayTitle(title?: string) {
+    if (!current.value) return
+    const name = (title || '').replace(/\s+/g, ' ').trim().slice(0, 48)
+    if (!name || current.value.name === name) return
+    current.value.name = name
     touch()
   }
 
@@ -456,6 +466,67 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  function patchCanvasNode(
+    id: string,
+    data: Partial<NonNullable<Project['canvas']>['nodes'][number]['data']>
+  ) {
+    const node = current.value?.canvas?.nodes.find((n) => n.id === id)
+    if (!node) return
+    node.data = { ...node.data, ...data }
+    touch()
+  }
+
+  function addCanvasNode(node: NonNullable<Project['canvas']>['nodes'][number]) {
+    if (!current.value) return
+    if (!current.value.canvas) current.value.canvas = emptyCanvas()
+    current.value.canvas.nodes = [...current.value.canvas.nodes, node]
+    touch()
+  }
+
+  function duplicateCanvasNode(id: string): string | null {
+    const canvas = current.value?.canvas
+    if (!canvas) return null
+    const idx = canvas.nodes.findIndex((n) => n.id === id)
+    if (idx < 0) return null
+    const src = canvas.nodes[idx]
+    if (src.type !== 'imageGen' && src.type !== 'videoGen') return null
+    const type = src.type
+    const count = canvas.nodes.filter((n) => n.type === type).length + 1
+    const copy: CanvasNode = {
+      id: `${type}_${Date.now().toString(36)}`,
+      type,
+      position: {
+        x: src.position.x + 280,
+        y: src.position.y
+      },
+      data: {
+        label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
+        prompt: src.data.prompt || '',
+        referenceAssetIds: [...(src.data.referenceAssetIds ?? [])],
+        duration: src.data.duration ?? 8,
+        ...(type === 'videoGen'
+          ? { videoModel: normalizeVideoGenModel(src.data.videoModel) }
+          : {})
+      },
+      status: 'idle',
+      parentGroupId: src.parentGroupId
+    }
+    const nodes = [...canvas.nodes]
+    nodes.splice(idx + 1, 0, copy)
+    canvas.nodes = nodes
+    touch()
+    return copy.id
+  }
+
+  function removeCanvasNode(id: string) {
+    if (!current.value?.canvas) return
+    current.value.canvas.nodes = current.value.canvas.nodes.filter((n) => n.id !== id)
+    current.value.canvas.edges = current.value.canvas.edges.filter(
+      (e) => e.source !== id && e.target !== id
+    )
+    touch()
+  }
+
   function setCanvas(canvas: CanvasGraph) {
     if (!current.value) return
     current.value.canvas = canvas
@@ -559,6 +630,7 @@ export const useProjectStore = defineStore('project', () => {
     createNamed,
     openFromFolder,
     setScript,
+    applyPlayTitle,
     setShots,
     setSubjects,
     updateSubject,
@@ -582,6 +654,10 @@ export const useProjectStore = defineStore('project', () => {
     setAgentState,
     patchAgentState,
     setCanvas,
+    patchCanvasNode,
+    addCanvasNode,
+    duplicateCanvasNode,
+    removeCanvasNode,
     syncCanvasFromProject,
     setAspectRatio,
     setPlayApproved,

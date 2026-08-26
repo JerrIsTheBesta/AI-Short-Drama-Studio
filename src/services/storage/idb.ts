@@ -142,7 +142,12 @@ export async function deleteAsset(id: string): Promise<void> {
 
 export async function listAssets(): Promise<Asset[]> {
   const all = await list<Asset>('assets')
-  return all.sort((a, b) => b.createdAt - a.createdAt)
+  return all.filter((a) => !a.library).sort((a, b) => b.createdAt - a.createdAt)
+}
+
+export async function listLibraryAssets(): Promise<Asset[]> {
+  const all = await list<Asset>('assets')
+  return all.filter((a) => a.library).sort((a, b) => b.createdAt - a.createdAt)
 }
 
 /** 估算存储用量 */

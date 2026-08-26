@@ -6,8 +6,17 @@ import { assetFileUrl, isDesktop } from '@/services/desktop'
 import type { Asset, Project } from '@/types'
 import * as idb from './idb'
 import * as fsStore from './fs'
+import * as library from './library'
 
-export { setActiveProjectDir, getActiveProjectDir, loadProjectFromDir, assetAbsPath } from './fs'
+export { setActiveProjectDir, getActiveProjectDir, loadProjectFromDir } from './fs'
+export {
+  listLibraryAssets,
+  saveLibraryAsset,
+  loadLibraryAssetBlob,
+  loadLibraryThumbBlob,
+  deleteLibraryAsset,
+  libraryAssetAbsPath
+} from './library'
 
 function useFs() {
   return isDesktop()
@@ -40,15 +49,30 @@ export async function saveAsset(
 }
 
 export async function loadAssetBlob(id: string): Promise<Blob | undefined> {
-  return useFs() ? fsStore.loadAssetBlob(id) : idb.loadAssetBlob(id)
+  if (useFs()) {
+    const blob = await fsStore.loadAssetBlob(id)
+    if (blob) return blob
+    return library.loadLibraryAssetBlob(id)
+  }
+  return idb.loadAssetBlob(id)
 }
 
 export async function loadAsset(id: string): Promise<Asset | undefined> {
-  return useFs() ? fsStore.loadAsset(id) : idb.loadAsset(id)
+  if (useFs()) {
+    const hit = await fsStore.loadAsset(id)
+    if (hit) return hit
+    return (await library.listLibraryAssets()).find((a) => a.id === id)
+  }
+  return idb.loadAsset(id)
 }
 
 export async function loadThumbBlob(id: string): Promise<Blob | undefined> {
-  return useFs() ? fsStore.loadThumbBlob(id) : idb.loadThumbBlob(id)
+  if (useFs()) {
+    const blob = await fsStore.loadThumbBlob(id)
+    if (blob) return blob
+    return library.loadLibraryThumbBlob(id)
+  }
+  return idb.loadThumbBlob(id)
 }
 
 export async function saveThumb(id: string, blob: Blob): Promise<void> {
@@ -67,8 +91,18 @@ export async function estimateStorage(): Promise<{ usage: number; quota: number 
   return useFs() ? fsStore.estimateStorage() : idb.estimateStorage()
 }
 
-/** 封面：第一张场景底板 → 第一张人设图 → 第一张分镜配图 */
+export async function assetAbsPath(id: string): Promise<string | undefined> {
+  if (!useFs()) return undefined
+  const fromProject = await fsStore.assetAbsPath(id)
+  if (fromProject) return fromProject
+  return library.libraryAssetAbsPath(id)
+}
+
+/** 封面：一图生视频用节点出图；否则场景底板 → 人设 → 分镜配图 */
 export function pickCoverAssetId(p: Project): string | undefined {
+  if (p.pipelineMode === 'img2video') {
+    return (p.canvas?.nodes ?? []).find((n) => n.data.outputAssetId)?.data.outputAssetId
+  }
   const plate = (p.scenes ?? []).find((s) => s.plateAssetId)?.plateAssetId
   if (plate) return plate
   const sheet = (p.subjects ?? []).find((s) => s.designSheetAssetId)?.designSheetAssetId

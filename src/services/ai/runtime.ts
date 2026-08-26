@@ -3,7 +3,7 @@
  */
 
 import { useSettingsStore } from '@/stores'
-import { envDefaults } from './env'
+import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from './env'
 import type { AIMode } from '@/stores/settings'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
@@ -70,9 +70,9 @@ export function getVideoConfig() {
   const d = envDefaults().video
   const s = pick()?.video
   return {
-    baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
+    baseUrl: migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
     apiKey: s?.apiKey || d.apiKey,
-    workflowId: s?.workflowId || d.workflowId,
+    workflowId: migrateVideoWorkflowId(s?.workflowId || d.workflowId),
     promptStyle: getVideoPromptStyle()
   }
 }
