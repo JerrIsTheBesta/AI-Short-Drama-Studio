@@ -1,35 +1,43 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
+import { useAssetsStore, useLibraryStore, useProjectStore, useToastStore } from '@/stores'
 import { imageRefSlots, videoRefSlots, boardRefSlots, boundSubjectIds } from '@/utils/consistency'
 import { openLightbox } from '@/composables/useLightbox'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import type { ID, Shot } from '@/types'
 
 const props = defineProps<{
-  shot: Shot
-  mode: 'image' | 'video' | 'board'
+  shot?: Shot
+  mode?: 'image' | 'video' | 'board'
+  extraIds?: ID[]
+}>()
+
+const emit = defineEmits<{
+  'update:extraIds': [ids: ID[]]
 }>()
 
 const project = useProjectStore()
 const assets = useAssetsStore()
+const library = useLibraryStore()
 const toast = useToastStore()
 const urls = ref<Record<string, string>>({})
 const pickerOpen = ref(false)
 
 const unboundCast = computed(() => {
   const p = project.current
-  if (!p || props.mode !== 'image') return false
+  if (!p || props.mode !== 'image' || !props.shot) return false
   const people = (p.subjects ?? []).filter((s) => s.kind !== 'other')
   if (!people.length) return false
   return boundSubjectIds(props.shot, people).length === 0
 })
 
 const slots = computed(() => {
-  if (!project.current) return []
-  if (props.mode === 'video') return videoRefSlots(props.shot, project.current)
-  if (props.mode === 'board') return boardRefSlots(props.shot, project.current)
-  return imageRefSlots(props.shot, project.current)
+  if (props.shot && project.current) {
+    if (props.mode === 'video') return videoRefSlots(props.shot, project.current)
+    if (props.mode === 'board') return boardRefSlots(props.shot, project.current)
+    return imageRefSlots(props.shot, project.current)
+  }
+  return (props.extraIds ?? []).map((id) => ({ id, label: '参考', locked: false }))
 })
 
 watch(
@@ -37,7 +45,7 @@ watch(
   async () => {
     const next: Record<string, string> = {}
     for (const slot of slots.value) {
-      const url = await assets.getUrl(slot.id)
+      const url = (await assets.getUrl(slot.id)) || (await library.getUrl(slot.id))
       if (url) next[slot.id] = url
     }
     urls.value = next
@@ -45,18 +53,30 @@ watch(
   { immediate: true }
 )
 
-function addExtraIds(ids: ID[]) {
-  const shot = props.shot
-  const merged = [...(shot.referenceAssetIds ?? [])]
-  for (const id of ids) {
-    if (!merged.includes(id) && id !== shot.imageAssetId) merged.push(id)
+function currentExtraIds(): ID[] {
+  return props.shot ? props.shot.referenceAssetIds ?? [] : props.extraIds ?? []
+}
+
+function setExtraIds(ids: ID[]) {
+  const merged = [...new Set(ids)].slice(0, 10)
+  if (props.shot) {
+    project.updateShot(props.shot.id, { referenceAssetIds: merged })
+    return
   }
-  project.updateShot(shot.id, { referenceAssetIds: merged })
+  emit('update:extraIds', merged)
+}
+
+function addExtraIds(ids: ID[]) {
+  const skip = props.shot?.imageAssetId
+  const merged = [...currentExtraIds()]
+  for (const id of ids) {
+    if (!merged.includes(id) && id !== skip) merged.push(id)
+  }
+  setExtraIds(merged)
 }
 
 function removeExtra(id: ID) {
-  const ids = (props.shot.referenceAssetIds ?? []).filter((x) => x !== id)
-  project.updateShot(props.shot.id, { referenceAssetIds: ids })
+  setExtraIds(currentExtraIds().filter((x) => x !== id))
 }
 
 function onPickerConfirm(ids: ID[]) {
@@ -85,7 +105,7 @@ function triggerUpload() {
       const asset = await assets.add(file, 'image', 'uploaded', {
         filename: file.name,
         projectId: project.current?.id,
-        shotId: props.shot.id
+        shotId: props.shot?.id
       })
       added.push(asset.id)
       count++
@@ -157,6 +177,7 @@ onBeforeUnmount(() => {
       kind="image"
       multiple
       title="添加参考图"
+      show-library
       @close="pickerOpen = false"
       @confirm="onPickerConfirm"
     />

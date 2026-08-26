@@ -3,7 +3,7 @@
  * 从资源库挑选已有图片 / 视频
  */
 import { ref, computed, watch } from 'vue'
-import { useAssetsStore, useLibraryStore, useProjectStore } from '@/stores'
+import { useAssetsStore, useLibraryStore, useProjectStore, LIBRARY_PUBLIC_ID } from '@/stores'
 import type { Asset, AssetKind, ID } from '@/types'
 import { assetContext } from '@/utils/assetLabel'
 import GradientButton from '@/components/common/GradientButton.vue'
@@ -34,13 +34,16 @@ const picked = ref<Set<ID>>(new Set())
 const urls = ref<Record<string, string>>({})
 const loading = ref(false)
 const tab = ref<'page' | 'library'>('page')
+const libraryFolder = ref(LIBRARY_PUBLIC_ID)
 
 const kind = computed(() => props.kind ?? 'image')
-const showTabs = computed(() => Boolean(props.showLibrary))
+const showTabs = computed(() => Boolean(props.showLibrary) && kind.value !== 'video' && kind.value !== 'audio')
 
 const list = computed(() => {
   if (tab.value === 'library' && showTabs.value) {
-    return library.all.filter((a) => kind.value === 'all' || a.kind === kind.value)
+    return library
+      .inFolder(libraryFolder.value)
+      .filter((a) => kind.value === 'all' || a.kind === kind.value)
   }
   const items =
     kind.value === 'all'
@@ -63,16 +66,31 @@ const list = computed(() => {
   return items
 })
 
+const emptyTitle = computed(() => {
+  if (tab.value !== 'library') return '本页还没有图片'
+  if (libraryFolder.value === LIBRARY_PUBLIC_ID) return '公共资产还是空的'
+  return `「${library.folderName(libraryFolder.value)}」还是空的`
+})
+
+const emptyDesc = computed(() => {
+  if (tab.value !== 'library') return '先用图片节点出图，或点节点上的＋上传参考图'
+  if (libraryFolder.value === LIBRARY_PUBLIC_ID) {
+    return '去首页资产库上传，或把项目里生成的图加入公共库'
+  }
+  return '去首页资产库创建分类，再把公共资产转移进来'
+})
+
 watch(
   () => props.open,
   async (open) => {
     if (!open) return
     picked.value = new Set(props.selectedIds ?? [])
-    tab.value = props.pageIds?.length || !props.showLibrary ? 'page' : 'library'
+    tab.value = props.pageIds?.length || !showTabs.value ? 'page' : 'library'
+    libraryFolder.value = LIBRARY_PUBLIC_ID
     loading.value = true
     try {
       await assets.refresh()
-      if (props.showLibrary) await library.refresh()
+      if (showTabs.value) await library.refresh()
       await loadUrls()
     } finally {
       loading.value = false
@@ -80,7 +98,7 @@ watch(
   }
 )
 
-watch(tab, () => {
+watch([tab, libraryFolder], () => {
   if (props.open) loadUrls()
 })
 
@@ -140,25 +158,41 @@ function labelOf(a: Asset) {
           <header class="head">
             <div>
               <h3>{{ title || '从资源库选择' }}</h3>
-              <p>{{ showTabs ? '可从本页图片或公共资产库选用' : '已生成/上传的素材都在这里' }}</p>
+              <p>{{ showTabs ? '可从本页图片、公共资产或自己的分类文件夹选用' : '已生成/上传的素材都在这里' }}</p>
             </div>
             <button class="close" @click="emit('close')">×</button>
           </header>
           <div v-if="showTabs" class="tabs">
             <button type="button" :class="{ on: tab === 'page' }" @click="tab = 'page'">本页图片</button>
-            <button type="button" :class="{ on: tab === 'library' }" @click="tab = 'library'">公共资产库</button>
+            <button type="button" :class="{ on: tab === 'library' }" @click="tab = 'library'">资产库</button>
+          </div>
+          <div v-if="showTabs && tab === 'library'" class="folder-rail">
+            <button
+              type="button"
+              :class="{ on: libraryFolder === LIBRARY_PUBLIC_ID }"
+              @click="libraryFolder = LIBRARY_PUBLIC_ID"
+            >
+              公共资产
+              <em>{{ library.folderCount(LIBRARY_PUBLIC_ID) }}</em>
+            </button>
+            <button
+              v-for="f in library.folders"
+              :key="f.id"
+              type="button"
+              :class="{ on: libraryFolder === f.id }"
+              @click="libraryFolder = f.id"
+            >
+              {{ f.name }}
+              <em>{{ library.folderCount(f.id) }}</em>
+            </button>
           </div>
 
           <div v-if="loading" class="loading">加载资源库...</div>
           <EmptyState
             v-else-if="list.length === 0"
             icon="📦"
-            :title="tab === 'library' ? '公共资产库是空的' : '本页还没有图片'"
-            :description="
-              tab === 'library'
-                ? '去首页上传，或把项目里生成的图加入公共库'
-                : '先用图片节点出图，或点节点上的＋上传参考图'
-            "
+            :title="emptyTitle"
+            :description="emptyDesc"
           />
           <div v-else class="grid">
             <button
@@ -186,9 +220,9 @@ function labelOf(a: Asset) {
                 <div class="name" :title="labelOf(a).title">{{ labelOf(a).title }}</div>
                 <div class="sub">
                   <Tag size="sm" :type="a.source === 'ai-generated' ? 'accent' : 'info'">
-                    {{ a.library ? '公共库' : a.source === 'ai-generated' ? 'AI' : '上传' }}
+                    {{ a.library ? (a.folderId ? library.folderName(a.folderId) : '公共') : a.source === 'ai-generated' ? 'AI' : '上传' }}
                   </Tag>
-                  {{ a.library ? '公共资产库' : labelOf(a).projectName }}
+                  {{ a.library ? library.folderName(a.folderId) : labelOf(a).projectName }}
                   · {{ fmtSize(a.size) }}
                 </div>
               </div>
@@ -273,6 +307,35 @@ function labelOf(a: Asset) {
   cursor: pointer;
 }
 .tabs button.on {
+  background: var(--color-fill-strong);
+  color: var(--color-text-1);
+  border-color: var(--color-border-strong);
+}
+.folder-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 20px 0;
+}
+.folder-rail button {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.folder-rail button em {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--color-text-4);
+}
+.folder-rail button.on {
   background: var(--color-fill-strong);
   color: var(--color-text-1);
   border-color: var(--color-border-strong);

@@ -15,7 +15,10 @@ export {
   loadLibraryAssetBlob,
   loadLibraryThumbBlob,
   deleteLibraryAsset,
-  libraryAssetAbsPath
+  libraryAssetAbsPath,
+  listLibraryFolders,
+  saveLibraryFolders,
+  updateLibraryAssetMeta
 } from './library'
 
 function useFs() {

@@ -166,7 +166,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       /Unexpected item type in content|does not support.*image|image.*not supported/i.test(errText)
     ) {
       throw new Error(
-        `[视觉模型] 当前模型 ${model} 不支持图片输入。请在设置页把“视觉理解”切换为 qwen3-vl-plus。`
+        `当前视觉模型不支持看图。请到设置页把「视觉理解」换成能看图的模型。`
       )
     }
     if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)

@@ -243,7 +243,7 @@ export async function analyzeRemakeVideo(
     input.onProgress?.('演示模式：按参考视频节奏生成脚本')
     raw = mockRemakeRaw(topic)
   } else {
-    input.onProgress?.(`Qwen 理解视频镜头（${frames.length} 帧）…`)
+    input.onProgress?.(`理解视频镜头（${frames.length} 帧）…`)
     const parts: LLMContentPart[] = [
       {
         type: 'text',
@@ -287,7 +287,7 @@ export async function analyzeRemakeVideo(
     let respContent = ''
     for (const model of models) {
       try {
-        input.onProgress?.(`用 ${model} 理解镜头…`)
+        input.onProgress?.('理解镜头…')
         const resp = await callLLM({
           provider: 'vision',
           model,
@@ -316,7 +316,7 @@ export async function analyzeRemakeVideo(
             msg
           )
         if (!canFallback) throw e
-        input.onProgress?.(`${model} 不能看图，改用 ${models[models.length - 1]}…`)
+        input.onProgress?.('当前模型不能看图，换一套继续…')
       }
     }
     if (lastErr) throw lastErr

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useToastStore, useLibraryStore } from '@/stores'
+import { useProjectStore, useToastStore, useLibraryStore, LIBRARY_PUBLIC_ID } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -45,6 +45,13 @@ const library = useLibraryStore()
 const libUrls = ref<Record<string, string>>({})
 const libUploading = ref(false)
 const homeTab = ref<'projects' | 'library'>('projects')
+const libFolderId = ref(LIBRARY_PUBLIC_ID)
+const libSelected = ref<Set<string>>(new Set())
+const libMoveTarget = ref(LIBRARY_PUBLIC_ID)
+const folderDraft = ref('')
+const renamingId = ref('')
+const renameDraft = ref('')
+const creatingFolder = ref(false)
 
 onMounted(async () => {
   await project.refreshList()
@@ -252,6 +259,32 @@ function fmtDuration(sec: number) {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+const visibleLibraryAssets = computed(() => library.inFolder(libFolderId.value))
+
+const currentFolderLabel = computed(() =>
+  libFolderId.value === LIBRARY_PUBLIC_ID ? '公共资产' : library.folderName(libFolderId.value)
+)
+
+function selectLibFolder(id: string) {
+  libFolderId.value = id
+  libSelected.value = new Set()
+  libMoveTarget.value =
+    id === LIBRARY_PUBLIC_ID
+      ? library.folders[0]?.id ?? LIBRARY_PUBLIC_ID
+      : LIBRARY_PUBLIC_ID
+}
+
+function clearLibSelected() {
+  libSelected.value = new Set()
+}
+
+function toggleLibSelect(id: string) {
+  const next = new Set(libSelected.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  libSelected.value = next
+}
+
 async function loadLibraryThumbs() {
   const next: Record<string, string> = { ...libUrls.value }
   for (const a of library.all) {
@@ -270,10 +303,13 @@ async function uploadLibraryImages(e: Event) {
   libUploading.value = true
   try {
     for (const file of files) {
-      await library.add(file, 'uploaded', { filename: file.name })
+      await library.add(file, 'uploaded', {
+        filename: file.name,
+        folderId: libFolderId.value
+      })
     }
     await loadLibraryThumbs()
-    toast.success(`已上传 ${files.length} 张到公共资产库`)
+    toast.success(`已上传 ${files.length} 张到${currentFolderLabel.value}`)
   } catch (err: any) {
     toast.error(err?.message || '上传失败')
   } finally {
@@ -282,10 +318,77 @@ async function uploadLibraryImages(e: Event) {
 }
 
 async function removeLibraryItem(id: string) {
-  if (!confirm('从公共资产库删除这张图？')) return
+  if (!confirm('从资产库删除这张图？')) return
   await library.remove(id)
   delete libUrls.value[id]
+  const next = new Set(libSelected.value)
+  next.delete(id)
+  libSelected.value = next
   toast.success('已删除')
+}
+
+async function createLibFolder() {
+  creatingFolder.value = true
+  try {
+    const folder = await library.createFolder(folderDraft.value)
+    folderDraft.value = ''
+    libFolderId.value = folder.id
+    toast.success(`已创建「${folder.name}」`)
+  } catch (err: any) {
+    toast.error(err?.message || '创建失败')
+  } finally {
+    creatingFolder.value = false
+  }
+}
+
+function startRenameFolder(id: string, name: string) {
+  renamingId.value = id
+  renameDraft.value = name
+}
+
+async function commitRenameFolder() {
+  const id = renamingId.value
+  if (!id) return
+  try {
+    await library.renameFolder(id, renameDraft.value)
+    renamingId.value = ''
+    toast.success('已重命名')
+  } catch (err: any) {
+    toast.error(err?.message || '重命名失败')
+  }
+}
+
+async function removeLibFolder(id: string, name: string) {
+  const n = library.folderCount(id)
+  const msg =
+    n > 0
+      ? `删除「${name}」后，里面的 ${n} 张图会回到公共资产。确定删除？`
+      : `删除文件夹「${name}」？`
+  if (!confirm(msg)) return
+  try {
+    await library.deleteFolder(id)
+    if (libFolderId.value === id) libFolderId.value = LIBRARY_PUBLIC_ID
+    libSelected.value = new Set()
+    toast.success('已删除文件夹')
+  } catch (err: any) {
+    toast.error(err?.message || '删除失败')
+  }
+}
+
+async function moveSelectedLibrary() {
+  const ids = [...libSelected.value]
+  if (!ids.length) return
+  try {
+    await library.moveToFolder(ids, libMoveTarget.value)
+    libSelected.value = new Set()
+    const label =
+      libMoveTarget.value === LIBRARY_PUBLIC_ID
+        ? '公共资产'
+        : library.folderName(libMoveTarget.value)
+    toast.success(`已转移到「${label}」`)
+  } catch (err: any) {
+    toast.error(err?.message || '转移失败')
+  }
 }
 </script>
 
@@ -295,7 +398,7 @@ async function removeLibraryItem(id: string) {
       <div class="hero-bg" />
       <div class="hero-content">
         <div class="brand">
-          <span class="brand-mark">▶</span>
+          <img class="brand-mark" src="/logo.png" alt="" />
           <span class="brand-name">剧流 Studio</span>
         </div>
         <h1 class="title">
@@ -367,7 +470,7 @@ async function removeLibraryItem(id: string) {
           />
         </div>
         <label v-else class="lib-upload">
-          {{ libUploading ? '上传中…' : '＋ 上传图片' }}
+          {{ libUploading ? '上传中…' : `＋ 上传到${currentFolderLabel}` }}
           <input type="file" accept="image/*" multiple hidden :disabled="libUploading" @change="uploadLibraryImages" />
         </label>
       </div>
@@ -443,26 +546,113 @@ async function removeLibraryItem(id: string) {
       </div>
       </div>
 
-      <div v-else>
-      <p class="lib-hint">各项目图片节点可入库。一图生视频也可从这里选参考图。</p>
-      <EmptyState
-        v-if="library.all.length === 0"
-        icon="🖼"
-        title="资产库还是空的"
-        description="上传图片，或在项目画布里把生成图加入公共库"
-      />
-      <div v-else class="lib-grid">
-        <div v-for="a in library.all" :key="a.id" class="lib-card">
-          <button type="button" class="lib-thumb" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
-            <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
-            <span v-else>🖼</span>
+      <div v-else class="lib-layout">
+        <aside class="lib-side">
+          <div class="lib-side-title">分类</div>
+          <button
+            type="button"
+            class="lib-folder"
+            :class="{ on: libFolderId === LIBRARY_PUBLIC_ID }"
+            @click="selectLibFolder(LIBRARY_PUBLIC_ID)"
+          >
+            <span>公共资产</span>
+            <em>{{ library.folderCount(LIBRARY_PUBLIC_ID) }}</em>
           </button>
-          <div class="lib-meta">
-            <span>{{ a.filename }}</span>
-            <button type="button" title="删除" @click="removeLibraryItem(a.id)">🗑</button>
+          <div v-for="f in library.folders" :key="f.id" class="lib-folder-row">
+            <button
+              v-if="renamingId !== f.id"
+              type="button"
+              class="lib-folder"
+              :class="{ on: libFolderId === f.id }"
+              @click="selectLibFolder(f.id)"
+            >
+              <span>{{ f.name }}</span>
+              <em>{{ library.folderCount(f.id) }}</em>
+            </button>
+            <form v-else class="lib-rename" @submit.prevent="commitRenameFolder">
+              <input v-model="renameDraft" maxlength="24" @keydown.esc="renamingId = ''" />
+              <button type="submit">好</button>
+            </form>
+            <button
+              type="button"
+              class="lib-folder-act"
+              title="重命名"
+              @click="startRenameFolder(f.id, f.name)"
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              class="lib-folder-act danger"
+              title="删除文件夹"
+              @click="removeLibFolder(f.id, f.name)"
+            >
+              🗑
+            </button>
+          </div>
+          <form class="lib-new-folder" @submit.prevent="createLibFolder">
+            <input
+              v-model="folderDraft"
+              maxlength="24"
+              placeholder="新文件夹名称"
+              :disabled="creatingFolder"
+            />
+            <button type="submit" :disabled="creatingFolder || !folderDraft.trim()">创建</button>
+          </form>
+        </aside>
+
+        <div class="lib-main">
+          <p class="lib-hint">
+            公共资产可转移到自己的文件夹分类。选图时也能从公共资产或这些文件夹里挑。
+          </p>
+          <div v-if="libSelected.size" class="lib-move-bar">
+            <span>已选 {{ libSelected.size }} 张</span>
+            <select v-model="libMoveTarget">
+              <option :value="LIBRARY_PUBLIC_ID">公共资产</option>
+              <option v-for="f in library.folders" :key="f.id" :value="f.id">{{ f.name }}</option>
+            </select>
+            <button type="button" @click="moveSelectedLibrary">转移</button>
+            <button type="button" class="ghost" @click="clearLibSelected">取消</button>
+          </div>
+          <EmptyState
+            v-if="visibleLibraryAssets.length === 0"
+            :icon="library.all.length === 0 ? '🖼' : '📂'"
+            :title="
+              library.all.length === 0 && libFolderId === LIBRARY_PUBLIC_ID
+                ? '资产库还是空的'
+                : `${currentFolderLabel}还是空的`
+            "
+            :description="
+              library.all.length === 0 && libFolderId === LIBRARY_PUBLIC_ID
+                ? '上传图片，或在项目画布里把生成图加入公共库'
+                : '上传到这里，或从公共资产勾选后点「转移」'
+            "
+          />
+          <div v-else class="lib-grid">
+            <div
+              v-for="a in visibleLibraryAssets"
+              :key="a.id"
+              class="lib-card"
+              :class="{ picked: libSelected.has(a.id) }"
+            >
+              <label class="lib-check">
+                <input
+                  type="checkbox"
+                  :checked="libSelected.has(a.id)"
+                  @change="toggleLibSelect(a.id)"
+                />
+              </label>
+              <button type="button" class="lib-thumb" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
+                <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
+                <span v-else>🖼</span>
+              </button>
+              <div class="lib-meta">
+                <span>{{ a.filename }}</span>
+                <button type="button" title="删除" @click="removeLibraryItem(a.id)">🗑</button>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
       </div>
     </div>
 
@@ -549,7 +739,7 @@ async function removeLibraryItem(id: string) {
 
               <div class="field">
                 <span>产品图（必传，可多张，最多 {{ MAX_REMAKE_PRODUCTS }} 张）</span>
-                <p class="field-hint">复刻镜头里的商品都会换成这些图。作图走 APIYI GPT。</p>
+                <p class="field-hint">复刻镜头里的商品都会换成这些图。</p>
                 <div class="product-row">
                   <div
                     v-for="(url, i) in remakeProductUrls"
@@ -660,16 +850,11 @@ async function removeLibraryItem(id: string) {
   margin-bottom: var(--space-6);
 }
 .brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 36px;
   height: 36px;
   border-radius: var(--radius-md);
-  background: var(--grad-primary);
-  color: white;
-  font-size: 16px;
-  box-shadow: none;
+  object-fit: contain;
 }
 .brand-name {
   font-size: 20px;
@@ -1213,10 +1398,150 @@ async function removeLibraryItem(id: string) {
   font-size: 12px;
   cursor: pointer;
 }
+.lib-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+.lib-side {
+  position: sticky;
+  top: 12px;
+  padding: 12px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.lib-side-title {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--color-text-4);
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+.lib-folder-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 2px;
+  align-items: center;
+}
+.lib-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.lib-folder span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-folder em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--color-text-4);
+}
+.lib-folder.on {
+  background: var(--color-fill-strong);
+  border-color: var(--color-border-strong);
+  color: var(--color-text-1);
+}
+.lib-folder-act {
+  margin: 0 0 4px;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  color: var(--color-text-4);
+  cursor: pointer;
+  font-size: 11px;
+}
+.lib-folder-act:hover {
+  color: var(--color-text-1);
+}
+.lib-folder-act.danger:hover {
+  color: var(--color-error);
+}
+.lib-rename,
+.lib-new-folder {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+.lib-rename {
+  margin: 0 0 4px;
+}
+.lib-rename input,
+.lib-new-folder input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+}
+.lib-rename button,
+.lib-new-folder button {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lib-new-folder button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .lib-hint {
   margin: 0 0 var(--space-4);
   font-size: 12px;
   color: var(--color-text-4);
+}
+.lib-move-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--space-4);
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+.lib-move-bar select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+}
+.lib-move-bar button {
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-fill-strong);
+  color: var(--color-text-1);
+  cursor: pointer;
+}
+.lib-move-bar button.ghost {
+  background: transparent;
 }
 .lib-grid {
   display: grid;
@@ -1225,10 +1550,32 @@ async function removeLibraryItem(id: string) {
   padding-bottom: var(--space-8);
 }
 .lib-card {
+  position: relative;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
+}
+.lib-card.picked {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+.lib-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.lib-check input {
+  margin: 0;
+  cursor: pointer;
 }
 .lib-thumb {
   width: 100%;
@@ -1270,5 +1617,13 @@ async function removeLibraryItem(id: string) {
 }
 .lib-meta button:hover {
   color: var(--color-error);
+}
+@media (max-width: 720px) {
+  .lib-layout {
+    grid-template-columns: 1fr;
+  }
+  .lib-side {
+    position: static;
+  }
 }
 </style>

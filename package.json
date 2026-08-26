@@ -1,7 +1,7 @@
 {
   "name": "ai-cut",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "dist-electron/main.js",
   "description": "剧流 Studio：无限画布 + 智能体，从剧本到成片",
@@ -9,13 +9,14 @@
     "dev": "vite",
     "web": "vite --mode web",
     "build": "vue-tsc --noEmit && vite build",
-    "electron:build": "vue-tsc --noEmit && vite build && electron-builder",
+    "electron:build": "vue-tsc --noEmit && vite build && node scripts/clean-unpacked.mjs && electron-builder",
     "preview": "vite preview --host",
     "type-check": "vue-tsc --noEmit"
   },
   "build": {
     "appId": "com.aicuts.desktop",
     "productName": "剧流 Studio",
+    "icon": "logo.png",
     "directories": {
       "output": "release"
     },
@@ -23,10 +24,22 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "logo.png",
+        "to": "logo.png"
+      }
+    ],
     "win": {
+      "icon": "logo.png",
       "target": [
         "nsis"
       ]
+    },
+    "nsis": {
+      "installerIcon": "logo.png",
+      "uninstallerIcon": "logo.png",
+      "installerHeaderIcon": "logo.png"
     }
   },
   "dependencies": {

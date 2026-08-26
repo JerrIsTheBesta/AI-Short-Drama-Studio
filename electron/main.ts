@@ -132,6 +132,24 @@ function slugName(name: string, id: string) {
   return `${s}_${id}`
 }
 
+function resolveAppIcon() {
+  const names = ['logo.png', 'icon.png']
+  const dirs = [
+    process.resourcesPath,
+    path.join(mainDir, '..'),
+    path.join(mainDir, '../..'),
+    process.cwd()
+  ]
+  for (const dir of dirs) {
+    if (!dir) continue
+    for (const name of names) {
+      const p = path.join(dir, name)
+      if (existsSync(p)) return p
+    }
+  }
+  return undefined
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1540,
@@ -139,6 +157,7 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 720,
     title: '剧流 Studio',
+    icon: resolveAppIcon(),
     backgroundColor: '#101012',
     frame: false,
     autoHideMenuBar: true,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { VueFlow, useVueFlow, type Connection, type Edge, type Node } from '@vue-flow/core'
+import { VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
@@ -215,10 +215,19 @@ async function relayout() {
   setTimeout(() => fitView({ padding: 0.2 }), 40)
 }
 
-function eventFromCtx(ev: MouseEvent | { event: MouseEvent }): MouseEvent | null {
-  if (ev instanceof MouseEvent) return ev
-  if (ev && typeof ev === 'object' && ev.event instanceof MouseEvent) return ev.event
+function eventFromCtx(
+  ev: MouseEvent | TouchEvent | { event: MouseEvent | TouchEvent }
+): MouseEvent | TouchEvent | null {
+  if (ev instanceof MouseEvent || ev instanceof TouchEvent) return ev
+  if (ev && typeof ev === 'object' && ev.event) return ev.event
   return null
+}
+
+function pointerClient(ev: MouseEvent | TouchEvent): { x: number; y: number } | null {
+  if (ev instanceof MouseEvent) return { x: ev.clientX, y: ev.clientY }
+  const t = ev.changedTouches[0] || ev.touches[0]
+  if (!t) return null
+  return { x: t.clientX, y: t.clientY }
 }
 
 function canDuplicate(id: string | null | undefined): boolean {
@@ -252,25 +261,25 @@ function onDupKey(e: KeyboardEvent) {
   }
 }
 
-function openCtxMenu(ev: MouseEvent | { event: MouseEvent; node?: Node }) {
+function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
   if (!isImg2Video.value) return
   const event = eventFromCtx(ev)
   if (!event) return
   event.preventDefault()
   event.stopPropagation()
-  const flow = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
+  const pt = pointerClient(event)
+  if (!pt) return
+  const flow = screenToFlowCoordinate({ x: pt.x, y: pt.y })
   const clickedId =
-    ev && typeof ev === 'object' && 'node' in ev && ev.node && ev.node.type !== 'groupFrame'
-      ? String(ev.node.id)
-      : undefined
+    'node' in ev && ev.node && ev.node.type !== 'groupFrame' ? String(ev.node.id) : undefined
   if (clickedId) selectedId.value = clickedId
   const nodeId = clickedId || selectedId.value || undefined
   const extra = canDuplicate(nodeId) ? 36 : 0
   const w = 188
   const h = 92 + extra
   ctxMenu.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - w - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - h - 8)),
+    x: Math.max(8, Math.min(pt.x, window.innerWidth - w - 8)),
+    y: Math.max(8, Math.min(pt.y, window.innerHeight - h - 8)),
     flow,
     nodeId
   }

@@ -165,76 +165,41 @@ function trackActivity(
   }
 }
 
+async function extraRefBlobs(ids: string[] | undefined, label: string) {
+  const assets = useAssetsStore()
+  const library = useLibraryStore()
+  const blobs: Blob[] = []
+  const labels: string[] = []
+  const seen = new Set<string>()
+  for (const id of ids ?? []) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const b = (await assets.getBlob(id)) || (await library.getBlob(id))
+    if (!b) continue
+    blobs.push(b)
+    labels.push(label)
+  }
+  return { blobs, labels }
+}
+
 export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
+  const latest = (project.current.subjects ?? []).find((s) => s.id === sub.id) || sub
   const look = lookFromScript(project.current.script)
   const style = look.style
-  const refs = await productRefBlobs()
-  const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
-  const prompt = characterSheetPrompt(sub, style, useRefs, look)
-  onProgress?.('生成四视图...')
-  const size = imageGenSize('sheet')
-  const result = await generateImage(
-    {
-      prompt,
-      style,
-      width: size.width,
-      height: size.height,
-      aspectRatio: '16:9',
-      referenceImages: useRefs ? refs : undefined,
-      referenceLabels: useRefs
-        ? refs.map(() => `角色「${sub.name}」参考照片，外貌必须一致`)
-        : undefined,
-      model: imageModelForProject(project.current.pipelineMode),
-      signal
-    },
-    onProgress
-  )
-  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `turnaround_${sub.name}_${Date.now().toString(36)}`,
-    prompt,
-    projectId: project.current.id
-  })
-  onProgress?.('校验人设图片文件...')
-  const quality = await reviewImageQuality(result.blob, prompt, signal)
-  if (!quality.passed) throw new Error(`四视图文件无效：${quality.issues.join('；')}`)
-  project.updateSubject(sub.id, {
-    designSheetAssetId: asset.id,
-    designSheetHistoryIds: pushHistory(
-      sub.designSheetAssetId,
-      asset.id,
-      sub.designSheetHistoryIds
-    )
-  })
-  await project.save()
-  return asset
-}
-
-export async function generateSubjectPropSheet(
-  sub: Subject,
-  onProgress?: (msg: string) => void,
-  signal?: AbortSignal
-) {
-  ensureNotCancelled(signal)
-  const project = useProjectStore()
-  const assets = useAssetsStore()
-  if (!project.current) throw new Error('没有打开的项目')
-  const look = lookFromScript(project.current.script)
-  const style = look.style
-  const prompt = characterPropSheetPrompt(sub, style, look)
-  const refs: Blob[] = []
-  const labels: string[] = []
-  if (sub.designSheetAssetId) {
-    const four = await assets.getBlob(sub.designSheetAssetId)
-    if (four) {
-      refs.push(four)
-      labels.push(`四视图「${sub.name}」，资产图里的物件必须能戴在/拿在这个人身上`)
-    }
-  }
-  onProgress?.('生成资产图...')
+  const product = await productRefBlobs()
+  const extras = await extraRefBlobs(latest.referenceAssetIds, `角色「${latest.name}」补充参考，外貌必须一致`)
+  const useProduct = product.length > 0 && (Boolean(latest.fromReference) || latest.kind === 'other')
+  const refs = [...(useProduct ? product : []), ...extras.blobs].slice(0, 10)
+  const labels = [
+    ...(useProduct ? product.map(() => `角色「${latest.name}」参考照片，外貌必须一致`) : []),
+    ...extras.labels
+  ].slice(0, 10)
+  const prompt = characterSheetPrompt(latest, style, refs.length > 0, look)
+  onProgress?.(refs.length ? `生成四视图（${refs.length} 张参考）...` : '生成四视图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
     {
@@ -251,16 +216,79 @@ export async function generateSubjectPropSheet(
     onProgress
   )
   const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `props_${sub.name}_${Date.now().toString(36)}`,
+    filename: `turnaround_${latest.name}_${Date.now().toString(36)}`,
+    prompt,
+    projectId: project.current.id
+  })
+  onProgress?.('校验人设图片文件...')
+  const quality = await reviewImageQuality(result.blob, prompt, signal)
+  if (!quality.passed) throw new Error(`四视图文件无效：${quality.issues.join('；')}`)
+  project.updateSubject(latest.id, {
+    designSheetAssetId: asset.id,
+    designSheetHistoryIds: pushHistory(
+      latest.designSheetAssetId,
+      asset.id,
+      latest.designSheetHistoryIds
+    )
+  })
+  await project.save()
+  return asset
+}
+
+export async function generateSubjectPropSheet(
+  sub: Subject,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const latest = (project.current.subjects ?? []).find((s) => s.id === sub.id) || sub
+  const look = lookFromScript(project.current.script)
+  const style = look.style
+  const prompt = characterPropSheetPrompt(latest, style, look)
+  const refs: Blob[] = []
+  const labels: string[] = []
+  if (latest.designSheetAssetId) {
+    const four = await assets.getBlob(latest.designSheetAssetId)
+    if (four) {
+      refs.push(four)
+      labels.push(`四视图「${latest.name}」，资产图里的物件必须能戴在/拿在这个人身上`)
+    }
+  }
+  const extras = await extraRefBlobs(latest.propReferenceAssetIds, `资产补充参考，物件外观必须一致`)
+  refs.push(...extras.blobs)
+  labels.push(...extras.labels)
+  const clippedRefs = refs.slice(0, 10)
+  const clippedLabels = labels.slice(0, 10)
+  onProgress?.(clippedRefs.length ? `生成资产图（${clippedRefs.length} 张参考）...` : '生成资产图...')
+  const size = imageGenSize('sheet')
+  const result = await generateImage(
+    {
+      prompt,
+      style,
+      width: size.width,
+      height: size.height,
+      aspectRatio: '16:9',
+      referenceImages: clippedRefs.length ? clippedRefs : undefined,
+      referenceLabels: clippedLabels.length ? clippedLabels : undefined,
+      model: imageModelForProject(project.current.pipelineMode),
+      signal
+    },
+    onProgress
+  )
+  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+    filename: `props_${latest.name}_${Date.now().toString(36)}`,
     prompt,
     projectId: project.current.id
   })
   onProgress?.('校验资产图文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`资产图文件无效：${quality.issues.join('；')}`)
-  project.updateSubject(sub.id, {
+  project.updateSubject(latest.id, {
     propSheetAssetId: asset.id,
-    propSheetHistoryIds: pushHistory(sub.propSheetAssetId, asset.id, sub.propSheetHistoryIds)
+    propSheetHistoryIds: pushHistory(latest.propSheetAssetId, asset.id, latest.propSheetHistoryIds)
   })
   await project.save()
   return asset
@@ -271,10 +299,12 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
+  const latest = (project.current.scenes ?? []).find((s) => s.id === scn.id) || scn
   const look = lookFromScript(project.current.script)
   const style = look.style
-  const prompt = scenePlatePrompt(scn, style, look)
-  onProgress?.('生成场景锚点图...')
+  const extras = await extraRefBlobs(latest.referenceAssetIds, `场景「${latest.name}」参考，空间和光线必须一致`)
+  const prompt = scenePlatePrompt(latest, style, look)
+  onProgress?.(extras.blobs.length ? `生成场景锚点图（${extras.blobs.length} 张参考）...` : '生成场景锚点图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
     {
@@ -283,22 +313,24 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
       width: size.width,
       height: size.height,
       aspectRatio: '16:9',
+      referenceImages: extras.blobs.length ? extras.blobs.slice(0, 10) : undefined,
+      referenceLabels: extras.labels.length ? extras.labels.slice(0, 10) : undefined,
       model: imageModelForProject(project.current.pipelineMode),
       signal
     },
     onProgress
   )
   const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `anchors_${scn.name}_${Date.now().toString(36)}`,
+    filename: `anchors_${latest.name}_${Date.now().toString(36)}`,
     prompt,
     projectId: project.current.id
   })
   onProgress?.('校验场景图片文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`场景锚点图文件无效：${quality.issues.join('；')}`)
-  project.updateScene(scn.id, {
+  project.updateScene(latest.id, {
     plateAssetId: asset.id,
-    plateHistoryIds: pushHistory(scn.plateAssetId, asset.id, scn.plateHistoryIds)
+    plateHistoryIds: pushHistory(latest.plateAssetId, asset.id, latest.plateHistoryIds)
   })
   await project.save()
   return asset
@@ -320,7 +352,7 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
   const blobs: Blob[] = []
   const labels: string[] = []
   for (let i = 0; i < bundle.ids.length; i++) {
-    const b = await assets.getBlob(bundle.ids[i])
+    const b = (await assets.getBlob(bundle.ids[i])) || (await useLibraryStore().getBlob(bundle.ids[i]))
     if (!b) continue
     blobs.push(b)
     labels.push(bundle.labels[i])
@@ -375,8 +407,9 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   const bundle = collectShotRefIds(shot, project.current)
   const blobs: Blob[] = []
   const labels: string[] = []
+  const library = useLibraryStore()
   for (let i = 0; i < bundle.ids.length; i++) {
-    const b = await assets.getBlob(bundle.ids[i])
+    const b = (await assets.getBlob(bundle.ids[i])) || (await library.getBlob(bundle.ids[i]))
     if (!b) continue
     blobs.push(b)
     labels.push(bundle.labels[i])

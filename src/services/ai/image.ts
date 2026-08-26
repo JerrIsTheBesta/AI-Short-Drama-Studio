@@ -294,7 +294,7 @@ async function realSeedream(input: ImageGenInput): Promise<ImageGenOutput> {
   })
 
   if (!resp.ok) {
-    throw new Error(`[image] Seedream 失败 ${resp.status} ${await resp.text()}`)
+    throw new Error(`[image] 出图失败 ${resp.status} ${await resp.text()}`)
   }
 
   const data = await resp.json()
@@ -391,8 +391,8 @@ export async function generateImage(
     if (isSeedreamModel(model)) {
       onProgress?.(
         input.referenceImages?.length
-          ? `Seedream 多图融合（${input.referenceImages.length} 张参考）...`
-          : 'Seedream 文生图...'
+          ? `多图融合（${input.referenceImages.length} 张参考）...`
+          : '文生图...'
       )
       return await realSeedream(input)
     }

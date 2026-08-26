@@ -282,6 +282,10 @@ export interface Subject {
   propSheetHistoryIds?: ID[]
   /** 是否从用户参考图里识别出来 */
   fromReference?: boolean
+  /** 四视图额外参考图 */
+  referenceAssetIds?: ID[]
+  /** 资产图额外参考图 */
+  propReferenceAssetIds?: ID[]
 }
 
 /** 整片锁定的场景锚点图（四宫格：全景 / 主锚 / 地面 / 光线） */
@@ -300,6 +304,8 @@ export interface Scene {
   plateAssetId?: ID
   /** 历史锚点图（不含当前） */
   plateHistoryIds?: ID[]
+  /** 场景锚点图额外参考图 */
+  referenceAssetIds?: ID[]
 }
 
 /** 完整项目 */

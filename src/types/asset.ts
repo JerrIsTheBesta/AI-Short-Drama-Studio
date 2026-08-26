@@ -34,6 +34,15 @@ export interface AssetBase {
   fileRelPath?: string
   /** 公共资产库（跨项目可选用） */
   library?: boolean
+  /** 用户自建分类文件夹；空则在公共资产（未分类） */
+  folderId?: string
+}
+
+/** 公共资产库里的用户自建文件夹 */
+export interface LibraryFolder {
+  id: ID
+  name: string
+  createdAt: number
 }
 
 export interface ImageAsset extends AssetBase {

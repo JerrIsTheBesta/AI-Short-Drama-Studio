@@ -209,7 +209,7 @@ async function realMinimaxMusic(prompt: string, model: string): Promise<MusicGen
   const audio = data.data?.audio ?? data.audio
   const status = data.data?.status
   if (status === 1) {
-    throw new Error('[music] MiniMax 仍在合成中，请稍后重试')
+    throw new Error('[music] 配乐仍在合成中，请稍后重试')
   }
   if (!audio) {
     throw new Error(`[music] 响应无音频：${raw.slice(0, 240)}`)

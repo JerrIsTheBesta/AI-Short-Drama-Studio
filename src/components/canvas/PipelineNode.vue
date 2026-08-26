@@ -14,7 +14,7 @@ import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveImagePrompt, effectiveShotAudioMode, needsExternalTts, pushHistory, editableVideoPrompt } from '@/utils/shot'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
-import type { CanvasNodeType } from '@/types'
+import type { CanvasNodeType, ID } from '@/types'
 
 const props = defineProps<{
   id: string
@@ -153,6 +153,24 @@ const showPrompt = computed(
     type.value === 'scene' ||
     type.value === 'audio'
 )
+
+const extraRefIds = computed({
+  get(): ID[] {
+    if (type.value === 'subject') return subject.value?.referenceAssetIds ?? []
+    if (type.value === 'subjectProps') return subject.value?.propReferenceAssetIds ?? []
+    if (type.value === 'scene') return scene.value?.referenceAssetIds ?? []
+    return []
+  },
+  set(ids: ID[]) {
+    if (type.value === 'subject' && subject.value) {
+      project.updateSubject(subject.value.id, { referenceAssetIds: ids })
+    } else if (type.value === 'subjectProps' && subject.value) {
+      project.updateSubject(subject.value.id, { propReferenceAssetIds: ids })
+    } else if (type.value === 'scene' && scene.value) {
+      project.updateScene(scene.value.id, { referenceAssetIds: ids })
+    }
+  }
+})
 
 const promptValue = computed({
   get() {
@@ -759,6 +777,10 @@ const cropStyle = computed(() => ({
         v-if="shot && (type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo')"
         :shot="shot"
         :mode="type === 'shotVideo' ? 'video' : type === 'shotBoard' ? 'board' : 'image'"
+      />
+      <ShotRefStrip
+        v-else-if="type === 'subject' || type === 'subjectProps' || type === 'scene'"
+        v-model:extra-ids="extraRefIds"
       />
       <div class="prompt-foot">
         <ImageModelSelect v-if="isImageNode" />

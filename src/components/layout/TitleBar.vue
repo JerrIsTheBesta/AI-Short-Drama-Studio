@@ -33,7 +33,7 @@ function run(fn: () => void) {
 <template>
   <header v-if="show" class="titlebar win-titlebar">
     <div class="brand">
-      <span class="mark">▶</span>
+      <img class="mark" src="/logo.png" alt="" />
       <span class="name">剧流 Studio</span>
     </div>
     <div class="controls">
@@ -90,12 +90,8 @@ function run(fn: () => void) {
   width: 18px;
   height: 18px;
   border-radius: 5px;
-  background: var(--grad-primary);
-  color: #fff;
-  font-size: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  object-fit: contain;
+  display: block;
 }
 .name {
   font-size: 12px;

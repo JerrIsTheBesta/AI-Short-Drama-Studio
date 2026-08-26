@@ -48,7 +48,7 @@ function newProject() {
   <header class="topbar">
     <div class="left">
       <button class="logo" @click="goHome">
-        <span class="logo-mark">▶</span>
+        <img class="logo-mark" src="/logo.png" alt="" />
         <span class="logo-text">剧流 Studio</span>
       </button>
 
@@ -134,15 +134,11 @@ function newProject() {
   background: var(--color-fill);
 }
 .logo-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 28px;
   height: 28px;
   border-radius: var(--radius-sm);
-  background: var(--grad-primary);
-  color: #fff;
-  font-size: 12px;
+  object-fit: contain;
 }
 .logo-text {
   font-size: 15px;

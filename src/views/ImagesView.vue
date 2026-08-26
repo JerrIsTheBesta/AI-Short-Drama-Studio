@@ -851,6 +851,7 @@ function next() {
       kind="image"
       :multiple="picker?.mode === 'ref'"
       :title="picker?.mode === 'ref' ? '从资源库添加参考图' : '从资源库选用配图'"
+      show-library
       @close="picker = null"
       @confirm="onPickerConfirm"
     />
