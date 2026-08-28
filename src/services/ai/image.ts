@@ -13,6 +13,7 @@ import { getAIMode } from './client'
 import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
 import type { VisualStyle, AspectRatio } from '@/types'
+import { aspectFrameHint } from '@/utils/aspect'
 import { professionalQualityLock, styleLockSuffix } from '@/utils/visualStyle'
 import { abortableDelay } from './abort'
 
@@ -167,8 +168,7 @@ function pickSeedreamSize(ar?: AspectRatio, w?: number, h?: number): string {
     case '21:9':
       return '3360x1440'
     default:
-      // 4.5 官方预设，最稳
-      return '2K'
+      return '2560x1440'
   }
 }
 
@@ -189,7 +189,11 @@ function pickLegacySize(ar?: AspectRatio, w?: number, h?: number): string {
 
 function prependAspect(prompt: string, ar?: AspectRatio): string {
   if (!ar) return prompt
-  return `[${ar}] ${prompt}`
+  const hint = aspectFrameHint(ar)
+  if (prompt.includes(`【${ar}`) || prompt.startsWith(`[${ar}]`)) {
+    return `${prompt}。画幅锁定：${hint}。`
+  }
+  return `【${ar}】${hint}。整张图必须按这个画幅输出。\n${prompt}`
 }
 
 function blobToDataUri(blob: Blob): Promise<string> {

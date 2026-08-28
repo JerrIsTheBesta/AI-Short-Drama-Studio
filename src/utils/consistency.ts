@@ -387,6 +387,8 @@ export function composeShotImagePrompt(
   const scene = sceneForShot(shot, project)
   const aesthetic = project.script?.aesthetic?.trim()
   const parts = [basePrompt.trim()]
+  const ar = project.settings?.aspectRatio || '16:9'
+  parts.push(`画面比例必须是 ${ar}，整张图按这个画幅输出，禁止另一种比例。`)
   const dialogueSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
   const filmChapter =
     project.pipelineMode !== 'remake' && project.script?.workflowMode === 'film-chapter'

@@ -17,6 +17,7 @@ import type { Shot, AspectRatio, VideoGenModel } from '@/types'
 import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
+import { isLandscapeAspect } from '@/utils/aspect'
 
 export interface VideoGenInput {
   /** 第一张参考图：角色设计图 / 场景图 / 故事看板之一，不是人物+场景配图 */
@@ -375,7 +376,9 @@ async function dashscopeRequest(
 
 function autodlResolution(input: VideoGenInput): string {
   const ratio = String(input.aspectRatio || '')
-  const landscape = ratio === '16:9' || ratio === '4:3' || (input.width || 0) >= (input.height || 0)
+  if (ratio === '9:16') return '768p竖'
+  if (isLandscapeAspect(ratio) || ratio === '1:1') return '768p横'
+  const landscape = (input.width || 0) >= (input.height || 0)
   return landscape ? '768p横' : '768p竖'
 }
 
@@ -579,7 +582,7 @@ async function realWorkflowVideo(
     onProgress?.(`恢复已有任务 (${taskId})，不会重复提交…`)
     log(`↻ 恢复任务: ${taskId}`)
   } else {
-    onProgress?.(`提交生成任务（${resolution}，${dataUrls.length} 张参考图）...`)
+    onProgress?.(`提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`)
     const submitCtl = controlledSignal(input.signal, 120_000)
     let submitResp: AutodlHttpResult
     try {

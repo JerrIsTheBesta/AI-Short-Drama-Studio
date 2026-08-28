@@ -208,7 +208,6 @@ async function createProject() {
   try {
     const p = await project.createNamed(newName.value.trim())
     createdId = p.id
-    const preset = aspectPresets.find((a) => a.value === newAspectRatio.value)!
     p.pipelineMode = pipelineMode.value
     p.script = {
       id: 's_' + Date.now().toString(36),
@@ -220,14 +219,11 @@ async function createProject() {
       shotDuration: 5,
       createdAt: Date.now()
     }
-    p.settings.aspectRatio = newAspectRatio.value
-    p.settings.width = preset.w
-    p.settings.height = preset.h
     if (pipelineMode.value === 'img2video') {
       p.playApproved = true
     }
     project.setScript(p.script)
-    project.setSettings(p.settings)
+    project.setAspectRatio(newAspectRatio.value)
     await project.save()
 
     if (pipelineMode.value === 'remake' && remakeVideo.value) {

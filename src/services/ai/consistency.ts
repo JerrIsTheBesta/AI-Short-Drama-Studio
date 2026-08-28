@@ -87,8 +87,10 @@ export function shotBoardPrompt(
   >,
   _style: VisualStyle,
   _look?: VisualLook,
-  options?: { filmChapter?: boolean }
+  options?: { filmChapter?: boolean; aspectRatio?: string }
 ): string {
+  const ar = options?.aspectRatio || '16:9'
+  const frame = ar === '9:16' ? '竖版 9:16' : ar === '1:1' ? '方形 1:1' : `横版 ${ar}`
   const body = (shot.boardPrompt || shot.visualPrompt || shot.title).trim()
   const size = shot.shotSize ? `景别：${shot.shotSize}。` : ''
   const blocking = shot.blocking ? `站位：${shot.blocking}。` : ''
@@ -132,8 +134,8 @@ export function shotBoardPrompt(
         ? `${count} 格机位、焦段和构图完全固定，只让人物动作、表情、雨水、蒸汽等环境细节连续变化。`
         : `用 ${count} 个连续时间采样清楚表现同一次「${shot.cameraMovement}」运镜，幅度克制，禁止跳轴或突然换机位。`
 
-    return `【16:9 彩色电影故事看板】「${shot.title}」，总时长 ${shot.duration} 秒。
-生成一张 ${layout}、正好 ${count} 格的彩色电影故事看板，阅读顺序为左上到右下。所有格子属于同一个连续镜头或同一段连续蒙太奇，不是互不相关的场景。
+    return `【${ar} ${frame}彩色电影故事看板】「${shot.title}」，总时长 ${shot.duration} 秒。
+生成一张 ${layout}、正好 ${count} 格的彩色电影故事看板，阅读顺序为左上到右下。整张图的画幅必须是 ${ar}，禁止竖图或方图冒充。所有格子属于同一个连续镜头或同一段连续蒙太奇，不是互不相关的场景。
 
 画面风格：正常上色的现实主义电影画面，真实自然光、生活化人物、符合剧本年代和地区的服装建筑与用品；像导演与摄影指导使用的成片预演，不是黑白线稿、漫画或海报。
 版式要求：格子大小整齐，细黑线分隔；不出现标题、编号、时间码、字幕、对白气泡、说明文字、logo、水印或任何可读文字。
@@ -148,8 +150,8 @@ ${body}
 参考图必须用上：脸、年龄、体型和服装跟角色设计图；建筑、地面、天气、材料和光跟场景锚点图。禁止另造人物或地点。最终只输出这一张彩色 ${count} 宫格电影故事看板。`
   }
 
-  return `【16:9 单镜动作故事看板】「${shot.title}」，总时长 ${shot.duration} 秒。
-生成一张 3 列 × 2 行、正好六格的导演分镜草图，阅读顺序为左上到右下。六格是同一个连续镜头在六个时间点的采样，不是六个不同场景，也不是六个独立镜头。
+  return `【${ar} ${frame}单镜动作故事看板】「${shot.title}」，总时长 ${shot.duration} 秒。
+生成一张 3 列 × 2 行、正好六格的导演分镜草图，阅读顺序为左上到右下。整张图的画幅必须是 ${ar}，禁止输出另一种比例。六格是同一个连续镜头在六个时间点的采样，不是六个不同场景，也不是六个独立镜头。
 
 画面风格：白底、黑色或浅灰铅笔线稿，线条简洁，少量灰面辅助空间关系；人物用清楚的简笔轮廓表达动作。禁止精致上色、禁止电影海报、禁止写实渲染。
 版式要求：六格大小整齐，细线分隔。画面内不出现标题、编号、时间码、字幕、对白气泡、说明文字、水印或任何可读文字。

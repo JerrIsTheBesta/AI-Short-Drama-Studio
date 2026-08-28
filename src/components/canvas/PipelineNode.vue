@@ -12,6 +12,7 @@ import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveImagePrompt, effectiveShotAudioMode, needsExternalTts, pushHistory, editableVideoPrompt } from '@/utils/shot'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
@@ -793,6 +794,10 @@ const cropStyle = computed(() => ({
         <ImageModelSelect v-if="isImageNode" />
         <VideoModelSelect v-else-if="type === 'shotVideo'" v-model="videoModel" />
         <span v-else>{{ metaLine }}</span>
+        <AspectRatioSeg
+          v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo'"
+          compact
+        />
         <label v-if="type === 'shotVideo' && shot" class="dur-edit">
           <select
             :value="Math.min(10, Math.max(5, Math.round(Number(shot.duration) || 5)))"
@@ -1100,6 +1105,7 @@ const cropStyle = computed(() => ({
 }
 .prompt-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

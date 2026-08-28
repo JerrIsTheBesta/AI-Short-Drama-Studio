@@ -382,7 +382,7 @@ Rules:
           role: 'user',
           content: `Style: ${input.aesthetic || 'Cinematic'}
 Duration: ${durationText(input)}s
-Aspect: ${input.aspectRatio || '16:9'}
+Aspect: ${input.aspectRatio || '16:9'} (${String(input.aspectRatio || '16:9') === '9:16' ? 'vertical portrait, taller than wide' : String(input.aspectRatio || '16:9') === '1:1' ? 'square' : 'horizontal landscape, wider than tall'})
 Camera: ${input.cameraMovement || 'static'}
 Scene: ${[englishOrOmit(input.sceneLighting), englishOrOmit(input.sceneAnchor), englishOrOmit(input.sceneDescription)].filter(Boolean).join(' / ') || 'from the scene plate'}
 On-screen people: ${onScreenEnglish(input).join(', ') || 'from character sheets'}

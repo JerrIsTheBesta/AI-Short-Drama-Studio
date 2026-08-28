@@ -11,6 +11,7 @@ import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
 import type { CanvasNodeType, ID, VideoGenModel } from '@/types'
 import { normalizeVideoGenModel } from '@/types'
@@ -472,6 +473,7 @@ function removeSelf() {
               : '写提示词，可加参考图做图生图…'
           "
         />
+        <AspectRatioSeg compact />
         <div class="prompt-foot">
           <ImageModelSelect v-if="!isVideo" />
           <VideoModelSelect v-else v-model="videoModel" />

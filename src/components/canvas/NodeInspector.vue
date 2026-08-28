@@ -12,6 +12,7 @@ import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
+import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
 import { canBuildExport } from '@/utils/timeline'
@@ -152,6 +153,18 @@ const extractLabel = computed(() =>
 const isImageNode = computed(() => {
   const t = props.node?.type
   return t === 'subject' || t === 'subjectProps' || t === 'scene' || t === 'shotBoard' || t === 'shotImage'
+})
+
+const showAspect = computed(() => {
+  const t = props.node?.type
+  return (
+    t === 'script' ||
+    t === 'shotBoard' ||
+    t === 'shotImage' ||
+    t === 'shotVideo' ||
+    t === 'imageGen' ||
+    t === 'videoGen'
+  )
 })
 
 const videoModel = computed({
@@ -485,6 +498,8 @@ function resetVideoPrompt() {
         可预览/下载视频。改音频设置后点重新合成即可。
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
+
+      <AspectRatioSeg v-if="showAspect" />
 
       <div v-if="preview && (node.type === 'shotVideo' || node.type === 'final')" class="prev prev-video">
         <div class="prev-frame" :style="{ aspectRatio: previewAspect }">

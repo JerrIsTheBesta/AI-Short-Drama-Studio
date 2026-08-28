@@ -20,6 +20,7 @@ import { isDesktop, desktop } from '@/services/desktop'
 import { emptyCanvas, normalizeVideoGenModel } from '@/types/canvas'
 import { pushHistory } from '@/utils/shot'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
+import { aspectToSize, isLandscapeAspect } from '@/utils/aspect'
 import type {
   Project,
   Script,
@@ -69,19 +70,19 @@ function defaultSettings(): ProjectSettings {
   }
 }
 
-function aspectToSize(ar: AspectRatio): { width: number; height: number } {
-  switch (ar) {
-    case '16:9':
-      return { width: 1280, height: 720 }
-    case '9:16':
-      return { width: 720, height: 1280 }
-    case '1:1':
-      return { width: 1080, height: 1080 }
-    case '4:3':
-      return { width: 960, height: 720 }
-    case '21:9':
-      return { width: 1680, height: 720 }
-  }
+function alignSettingsSize(settings: ProjectSettings): ProjectSettings {
+  const ar = settings.aspectRatio || '16:9'
+  const size = aspectToSize(ar)
+  const w = Number(settings.width) || 0
+  const h = Number(settings.height) || 0
+  const mismatch =
+    !w ||
+    !h ||
+    (ar === '9:16' && w >= h) ||
+    (ar === '1:1' && Math.abs(w - h) > 32) ||
+    (isLandscapeAspect(ar) && w <= h)
+  if (!mismatch) return { ...settings, aspectRatio: ar }
+  return { ...settings, aspectRatio: ar, width: size.width, height: size.height }
 }
 
 function newProject(): Project {
@@ -194,14 +195,14 @@ export const useProjectStore = defineStore('project', () => {
         callBudget: p.agentState?.callBudget ?? 24
       }
       if (p.folderPath) setActiveProjectDir(p.folderPath)
-      p.settings = {
+      p.settings = alignSettingsSize({
         ...defaultSettings(),
         ...(p.settings ?? {}),
         captionStyle: {
           ...defaultSettings().captionStyle,
           ...(p.settings?.captionStyle ?? {})
         }
-      }
+      })
       current.value = p
       dirty.value = false
       rememberCurrent()
@@ -236,6 +237,14 @@ export const useProjectStore = defineStore('project', () => {
     const p = await loadProjectFromDir(dir)
     if (!p) return
     p.canvas = p.canvas ?? emptyCanvas()
+    p.settings = alignSettingsSize({
+      ...defaultSettings(),
+      ...(p.settings ?? {}),
+      captionStyle: {
+        ...defaultSettings().captionStyle,
+        ...(p.settings?.captionStyle ?? {})
+      }
+    })
     current.value = p
     dirty.value = false
     rememberCurrent()
@@ -548,6 +557,8 @@ export const useProjectStore = defineStore('project', () => {
     current.value.settings.aspectRatio = ar
     current.value.settings.width = width
     current.value.settings.height = height
+    if (current.value.script) current.value.script.aspectRatio = ar
+    current.value.canvas = rebuildCanvasGraph(current.value, true)
     touch()
   }
 

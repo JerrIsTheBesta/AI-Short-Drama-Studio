@@ -360,7 +360,10 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
   const filmChapter =
     project.current.pipelineMode !== 'remake' &&
     project.current.script?.workflowMode === 'film-chapter'
-  const prompt = shotBoardPrompt(shot, style, look, { filmChapter })
+  const prompt = shotBoardPrompt(shot, style, look, {
+    filmChapter,
+    aspectRatio: project.current.settings.aspectRatio
+  })
   onProgress?.(blobs.length ? `画故事看板（${blobs.length} 张参考）...` : '画故事看板...')
   const size = imageGenSize('shot')
   const result = await generateImage(
@@ -1074,9 +1077,7 @@ export async function generateFreeformImage(
     if (b) blobs.push(b)
   }
   const look = lookFromScript(p.script)
-  const size = pendingRun.hd
-    ? { width: p.settings.width, height: p.settings.height }
-    : { width: Math.min(p.settings.width, 1280), height: Math.min(p.settings.height, 720) }
+  const size = { width: p.settings.width, height: p.settings.height }
   onProgress?.('正在出图...')
   const result = await generateImage({
     prompt,
