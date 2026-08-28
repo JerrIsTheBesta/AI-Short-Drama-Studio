@@ -1,0 +1,574 @@
+/**
+ * 设置页接入助手：依赖已配置的 LLM，帮用户写入视觉 / 生图 / 配音 / 视频。
+ */
+
+import { callLLM } from '@/services/ai/client'
+import { getLlmConfig } from '@/services/ai/runtime'
+import {
+  IMAGE_PROVIDERS,
+  LLM_PROVIDERS,
+  MUSIC_PROVIDERS,
+  TTS_PROVIDERS,
+  VIDEO_PROVIDERS,
+  VISION_PROVIDERS,
+  applyProviderPreset,
+  findProvider,
+  matchProviderId,
+  type ProviderPreset
+} from '@/services/ai/providers'
+import { parseJsonRobust } from '@/utils/jsonRepair'
+import {
+  endpointReady,
+  uniqueProfileName,
+  useSettingsStore,
+  type SetupKind
+} from '@/stores/settings'
+import settingsSkillRaw from '@/skills/settings-setup.md?raw'
+
+export interface SetupMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface SetupEvent {
+  kind?: 'think' | 'step' | 'log'
+  label: string
+  step?: string
+  status?: 'running' | 'done' | 'fail'
+}
+
+export interface SetupTurnResult {
+  reply: string
+  chips: { label: string; text: string }[]
+  opened?: SetupKind
+}
+
+function catalog(presets: ProviderPreset[]) {
+  return presets
+    .filter((p) => p.id !== 'custom')
+    .map((p) => `${p.id}｜${p.name}｜${p.baseUrl}｜默认 ${p.defaultModel}｜${p.models.join(', ')}`)
+    .join('\n')
+}
+
+function maskKey(key: string) {
+  const k = key.trim()
+  if (!k) return '未填'
+  if (k.length <= 6) return '已填写'
+  return `${k.slice(0, 3)}…${k.slice(-4)}`
+}
+
+function snapshot() {
+  const cfg = useSettingsStore().config
+  const named = (kind: string, list: { id: string; name: string; baseUrl: string; apiKey: string; model: string; models?: string[] }[]) =>
+    list
+      .map(
+        (p) =>
+          `- [${kind}] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} model=${p.model || '空'} models=${(p.models || []).join(', ') || '无'}`
+      )
+      .join('\n')
+  const videos = cfg.videos
+    .map(
+      (p) =>
+        `- [video] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} workflow=${p.workflowId || '空'} style=${p.promptStyle}`
+    )
+    .join('\n')
+  return `当前本机配置（Key 已脱敏）：
+LLM 是否可用：${endpointReady(cfg.llm) ? '是' : '否'}
+${named('llm', cfg.llms)}
+${named('vision', cfg.visions)}
+${named('image', cfg.images)}
+${named('tts', cfg.ttsProfiles)}
+${videos}
+${named('music', cfg.musics)}`
+}
+
+const SYSTEM = `${settingsSkillRaw}
+
+只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
+一次最多 8 个 actions。没有把握就 actions 为空，先问。文档已经够写的时候不要空 actions。
+
+可用工具：
+{ "tool": "add_profile", "kind": "vision|image|tts|video|music|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted" }
+{ "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选" }
+{ "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
+{ "tool": "add_model", "kind": "llm|vision|image|tts|music", "id": "profile_id，可省略表示当前套", "model": "模型名" }
+
+预设目录（id｜名称｜地址｜默认模型｜常用模型）：
+LLM
+${catalog(LLM_PROVIDERS)}
+视觉
+${catalog(VISION_PROVIDERS)}
+生图
+${catalog(IMAGE_PROVIDERS)}
+配音
+${catalog(TTS_PROVIDERS)}
+视频
+${catalog(VIDEO_PROVIDERS)}
+配乐
+${catalog(MUSIC_PROVIDERS)}
+
+注意：
+- 用户贴 API 文档或中转地址时：provider 必须是 custom，按文档原文抽 Base URL 和模型名，立刻 add_profile。禁止拒绝。
+- 文档同时含聊天 / 看图 / 生图时，每种 kind 各写一条，可共用同一套 Key 和地址。
+- Base URL 写到 /v1 这一层即可，不要带 /chat/completions 或 /images/generations。
+- 只有用户没给任何文档、只说「帮我配」时，才从上面的大厂预设里选。
+- 视频的 model 若没单独给 workflowId，就当作 workflowId。
+- 配音默认音色 longanhuan_v3.6，用户没提音色就用这个。
+- provider 对得上大厂预设、且用户没另给第三方地址时，用预设补全；用户给的 URL 与预设域名不一致时一律当 custom，不要改写成官方地址。`
+
+function providersFor(kind: SetupKind): ProviderPreset[] {
+  if (kind === 'llm') return LLM_PROVIDERS
+  if (kind === 'vision') return VISION_PROVIDERS
+  if (kind === 'image') return IMAGE_PROVIDERS
+  if (kind === 'tts') return TTS_PROVIDERS
+  if (kind === 'video') return VIDEO_PROVIDERS
+  return MUSIC_PROVIDERS
+}
+
+function parseKind(raw: unknown): SetupKind | null {
+  const k = String(raw || '')
+  if (k === 'llm' || k === 'vision' || k === 'image' || k === 'tts' || k === 'video' || k === 'music') {
+    return k
+  }
+  return null
+}
+
+function normalizeBaseUrl(url: string) {
+  return url
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/completions$/i, '')
+    .replace(/\/images\/(generations|edits)$/i, '')
+    .replace(/\/audio\/speech$/i, '')
+    .replace(/\/+$/, '')
+}
+
+function mergePreset(kind: SetupKind, action: Record<string, unknown>) {
+  const providerId = String(action.provider || '').trim()
+  const presets = providersFor(kind)
+  const preset = providerId ? findProvider(providerId, presets) : undefined
+  const current = {
+    baseUrl: normalizeBaseUrl(String(action.baseUrl || '')),
+    model: String(action.model || action.workflowId || ''),
+    models: Array.isArray(action.models) ? action.models.map(String) : []
+  }
+  if (!preset || preset.id === 'custom') {
+    return {
+      provider: 'custom',
+      baseUrl: current.baseUrl,
+      model: current.model,
+      models: current.models
+    }
+  }
+  if (current.baseUrl && matchProviderId(current.baseUrl, presets) === 'custom') {
+    return {
+      provider: 'custom',
+      baseUrl: current.baseUrl,
+      model: current.model || preset.defaultModel,
+      models: current.models.length ? current.models : preset.models
+    }
+  }
+  return applyProviderPreset(current, preset)
+}
+
+function nextName(kind: SetupKind, wanted: string) {
+  const settings = useSettingsStore()
+  const names =
+    kind === 'llm'
+      ? settings.config.llms.map((p) => p.name)
+      : kind === 'vision'
+        ? settings.config.visions.map((p) => p.name)
+        : kind === 'image'
+          ? settings.config.images.map((p) => p.name)
+          : kind === 'tts'
+            ? settings.config.ttsProfiles.map((p) => p.name)
+            : kind === 'video'
+              ? settings.config.videos.map((p) => p.name)
+              : settings.config.musics.map((p) => p.name)
+  return uniqueProfileName(names, wanted || kind)
+}
+
+function runAction(action: Record<string, unknown>): { ok: boolean; detail: string; kind?: SetupKind } {
+  const settings = useSettingsStore()
+  const tool = String(action.tool || '')
+  const kind = parseKind(action.kind)
+  if (!kind) return { ok: false, detail: '缺少有效的 kind' }
+
+  if (tool === 'add_profile') {
+    const merged = mergePreset(kind, action)
+    const name = nextName(kind, String(action.name || merged.provider || kind))
+    const apiKey = String(action.apiKey || '').trim()
+    const baseUrl = normalizeBaseUrl(String(action.baseUrl || merged.baseUrl))
+    const models = Array.isArray(action.models) && action.models.length
+      ? action.models.map(String)
+      : merged.models
+    const model = String(action.model || merged.model || models[0] || '').trim()
+    if (!baseUrl) return { ok: false, detail: `${name} 还缺接口地址`, kind }
+    if (kind === 'video') {
+      const workflowId = String(action.workflowId || model || merged.model).trim()
+      if (!workflowId) return { ok: false, detail: `${name} 还缺工作流 ID`, kind }
+      const id = settings.addVideo({
+        name,
+        baseUrl,
+        apiKey,
+        workflowId,
+        promptStyle: action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
+        provider: merged.provider
+      })
+      return { ok: true, detail: `已保存视频接入「${name}」(${id})`, kind }
+    }
+    if (!model) return { ok: false, detail: `${name} 还缺模型名`, kind }
+    const seed = { name, baseUrl, apiKey, model, models, provider: merged.provider }
+    if (kind === 'llm') settings.addLlm(seed)
+    else if (kind === 'vision') settings.addVision(seed)
+    else if (kind === 'image') settings.addImage(seed)
+    else if (kind === 'tts') {
+      settings.addTts({ ...seed, voice: String(action.voice || 'longanhuan_v3.6') })
+    } else settings.addMusic(seed)
+    return { ok: true, detail: `已保存${labelOf(kind)}「${name}」`, kind }
+  }
+
+  if (tool === 'update_profile') {
+    const id = String(action.id || '').trim()
+    if (!id) return { ok: false, detail: '更新需要 id', kind }
+    const patch: Record<string, unknown> = {}
+    if (action.name) patch.name = String(action.name).trim()
+    if (action.baseUrl) patch.baseUrl = normalizeBaseUrl(String(action.baseUrl))
+    if (action.apiKey) patch.apiKey = String(action.apiKey).trim()
+    if (action.model) patch.model = String(action.model).trim()
+    if (action.provider) patch.provider = String(action.provider).trim()
+    if (Array.isArray(action.models)) patch.models = action.models.map(String)
+    if (kind === 'tts' && action.voice) patch.voice = String(action.voice)
+    if (kind === 'video') {
+      if (action.workflowId || action.model) patch.workflowId = String(action.workflowId || action.model).trim()
+      if (action.promptStyle) patch.promptStyle = action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
+      const cur = settings.config.videos.find((p) => p.id === id)
+      if (!cur) return { ok: false, detail: '找不到这套视频接入', kind }
+      settings.selectVideo(id)
+      settings.patchVideo(patch)
+      return { ok: true, detail: `已更新视频接入「${cur.name}」`, kind }
+    }
+    const lists = {
+      llm: settings.config.llms,
+      vision: settings.config.visions,
+      image: settings.config.images,
+      tts: settings.config.ttsProfiles,
+      music: settings.config.musics
+    } as const
+    const list = lists[kind]
+    const cur = list.find((p) => p.id === id)
+    if (!cur) return { ok: false, detail: '找不到这套接入', kind }
+    if (kind === 'llm') {
+      settings.selectLlm(id)
+      settings.patchLlm(patch)
+    } else if (kind === 'vision') {
+      settings.selectVision(id)
+      settings.patchVision(patch)
+    } else if (kind === 'image') {
+      settings.selectImage(id)
+      settings.patchImage(patch)
+    } else if (kind === 'tts') {
+      settings.selectTts(id)
+      settings.patchTts(patch)
+    } else {
+      settings.selectMusic(id)
+      settings.patchMusic(patch)
+    }
+    return { ok: true, detail: `已更新${labelOf(kind)}「${cur.name}」`, kind }
+  }
+
+  if (tool === 'select_profile') {
+    const id = String(action.id || '').trim()
+    const model = String(action.model || '').trim()
+    if (!id) return { ok: false, detail: '选择需要 id', kind }
+    if (kind === 'llm') {
+      if (model) settings.selectLlmModel(id, model)
+      else settings.selectLlm(id)
+    } else if (kind === 'vision') {
+      if (model) settings.selectVisionModel(id, model)
+      else settings.selectVision(id)
+    } else if (kind === 'image') {
+      if (model) settings.selectImageModel(id, model)
+      else settings.selectImage(id)
+    } else if (kind === 'tts') {
+      if (model) settings.selectTtsModel(id, model)
+      else settings.selectTts(id)
+    } else if (kind === 'video') settings.selectVideo(id)
+    else {
+      if (model) settings.selectMusicModel(id, model)
+      else settings.selectMusic(id)
+    }
+    return { ok: true, detail: `已切换到这套${labelOf(kind)}`, kind }
+  }
+
+  if (tool === 'add_model') {
+    const model = String(action.model || '').trim()
+    if (!model) return { ok: false, detail: '还缺模型名', kind }
+    if (kind === 'video') return { ok: false, detail: '视频请改工作流 ID', kind }
+    const id = String(action.id || '').trim()
+    if (id) {
+      if (kind === 'llm') settings.selectLlm(id)
+      else if (kind === 'vision') settings.selectVision(id)
+      else if (kind === 'image') settings.selectImage(id)
+      else if (kind === 'tts') settings.selectTts(id)
+      else settings.selectMusic(id)
+    }
+    settings.addModel(kind, model)
+    return { ok: true, detail: `已加入模型 ${model}`, kind }
+  }
+
+  return { ok: false, detail: `未知工具 ${tool}` }
+}
+
+function labelOf(kind: SetupKind) {
+  return {
+    llm: '语言模型',
+    vision: '视觉',
+    image: '生图',
+    tts: '配音',
+    video: '视频',
+    music: '配乐'
+  }[kind]
+}
+
+function looksLikePlaceholderKey(key: string) {
+  return /^(sk-)?(xxx+|your[_-]?api[_-]?key|changeme|placeholder|<.+>|\{.+\})$/i.test(key.trim())
+}
+
+function extractApiKey(text: string) {
+  const patterns = [
+    /\b(sk-[A-Za-z0-9_-]{12,})\b/,
+    /(?:api[_-]?key|secret[_-]?key|Authorization)[：:=\s]+(?:Bearer\s+)?([A-Za-z0-9._-]{12,})/i
+  ]
+  for (const re of patterns) {
+    const m = text.match(re)
+    if (m?.[1] && !looksLikePlaceholderKey(m[1])) return m[1]
+  }
+  return ''
+}
+
+function extractBaseUrls(text: string) {
+  const urls = [...text.matchAll(/https?:\/\/[^\s"'<>`]+/gi)].map((m) =>
+    normalizeBaseUrl(m[0].replace(/[),.;]+$/g, ''))
+  )
+  const unique = [...new Set(urls)].filter((u) => {
+    try {
+      const host = new URL(u).host
+      return host.includes('.') && !/example\.com|localhost|127\.0\.0\.1/i.test(host)
+    } catch {
+      return false
+    }
+  })
+  unique.sort((a, b) => Number(/\/v\d+$/i.test(b)) - Number(/\/v\d+$/i.test(a)))
+  return unique
+}
+
+function extractModels(text: string) {
+  const found: string[] = []
+  const push = (raw: string) => {
+    const s = raw.trim()
+    if (s.length < 2 || s.length > 80 || /\s/.test(s) || /^https?:/i.test(s)) return
+    found.push(s)
+  }
+  for (const m of text.matchAll(/"models?"\s*:\s*"([^"]+)"/gi)) push(m[1])
+  for (const m of text.matchAll(/"models?"\s*:\s*\[([^\]]+)\]/gi)) {
+    for (const item of m[1].matchAll(/"([^"]+)"/g)) push(item[1])
+  }
+  for (const m of text.matchAll(/模型[名]?[：:\s]+`?([A-Za-z0-9._:-]+)`?/g)) push(m[1])
+  for (const m of text.matchAll(/`([A-Za-z0-9._:-]{3,60})`/g)) {
+    if (/gpt|qwen|deepseek|claude|gemini|glm|kimi|dall|seedream|flux|wan|hailuo|tts|vl-|minimax|doubao/i.test(m[1])) {
+      push(m[1])
+    }
+  }
+  return [...new Set(found)]
+}
+
+function inferKindsFromDocs(text: string, models: string[]): SetupKind[] {
+  const t = `${text}\n${models.join('\n')}`.toLowerCase()
+  const found = new Set<SetupKind>()
+  if (/视觉|看图|多模态|qwen-vl|\bvl-|\bgpt-4o|claude|gemini/.test(t) || models.some((m) => /vl|vision|gpt-4o/i.test(m))) {
+    found.add('vision')
+  }
+  if (/生图|文生图|images\/generations|dall-e|seedream|flux|qwen-image|imagen|kolors/.test(t) || models.some((m) => /dall-e|seedream|flux|image|imagen|kolors/i.test(m))) {
+    found.add('image')
+  }
+  if (/配音|\btts\b|speech|音色|cosyvoice/.test(t) || models.some((m) => /tts|speech|cosy/i.test(m))) {
+    found.add('tts')
+  }
+  if (/视频生成|文生视频|video\/generations|hailuo|wan2|kling|runway/.test(t) || models.some((m) => /hailuo|wan|kling|video/i.test(m))) {
+    found.add('video')
+  }
+  if (/语言模型|对话模型|聊天补全|chat\/completions|\bllm\b/.test(t) || models.some((m) => /gpt|deepseek|qwen|claude|kimi|glm|minimax|doubao/i.test(m))) {
+    found.add('llm')
+  }
+  if (!found.size) found.add('llm')
+  return [...found]
+}
+
+function nameFromUrl(url: string, kind: SetupKind) {
+  try {
+    return `${new URL(url).host.replace(/^www\./, '')} ${labelOf(kind)}`
+  } catch {
+    return `自定义${labelOf(kind)}`
+  }
+}
+
+function pickModelForKind(kind: SetupKind, models: string[]) {
+  const hit = models.find((m) => {
+    if (kind === 'image') return /dall-e|seedream|flux|image|imagen|kolors/i.test(m)
+    if (kind === 'vision') return /vl|vision|gpt-4o/i.test(m)
+    if (kind === 'tts') return /tts|speech|cosy/i.test(m)
+    if (kind === 'video') return /hailuo|wan|kling|video/i.test(m)
+    return /gpt|deepseek|qwen|claude|kimi|glm|minimax|doubao/i.test(m)
+  })
+  return hit || models[0] || ''
+}
+
+function actionsFromDocs(text: string): Record<string, unknown>[] {
+  const urls = extractBaseUrls(text)
+  if (!urls.length) return []
+  const baseUrl = urls[0]
+  const models = extractModels(text)
+  const apiKey = extractApiKey(text)
+  const kinds = inferKindsFromDocs(text, models)
+  const actions: Record<string, unknown>[] = []
+  for (const kind of kinds) {
+    const model = pickModelForKind(kind, models)
+    if (!model) continue
+    actions.push({
+      tool: 'add_profile',
+      kind,
+      name: nameFromUrl(baseUrl, kind),
+      provider: 'custom',
+      baseUrl,
+      apiKey,
+      model,
+      models,
+      workflowId: kind === 'video' ? model : undefined
+    })
+  }
+  return actions.slice(0, 8)
+}
+
+function parseAgentJson(text: string): { say: string; actions: Record<string, unknown>[] } {
+  try {
+    const obj = parseJsonRobust(text)
+    return {
+      say: String(obj.say || obj.reply || '好的'),
+      actions: Array.isArray(obj.actions) ? obj.actions : []
+    }
+  } catch {
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start < 0 || end <= start) return { say: text.slice(0, 400), actions: [] }
+    try {
+      const obj = JSON.parse(text.slice(start, end + 1))
+      return {
+        say: String(obj.say || '好的'),
+        actions: Array.isArray(obj.actions) ? obj.actions : []
+      }
+    } catch {
+      return { say: text.slice(0, 400), actions: [] }
+    }
+  }
+}
+
+export function llmSetupReady() {
+  try {
+    const cfg = getLlmConfig()
+    return Boolean(cfg.baseUrl && cfg.apiKey)
+  } catch {
+    return false
+  }
+}
+
+export async function runSetupAgentTurn(
+  history: SetupMessage[],
+  userText: string,
+  onProgress?: (ev: SetupEvent) => void,
+  signal?: AbortSignal
+): Promise<SetupTurnResult> {
+  if (!llmSetupReady()) {
+    return {
+      reply: '先在左侧「语言模型」填好接口地址和 API Key。配好之后我就能帮你加视觉、生图、配音和视频。',
+      chips: [{ label: '去配语言模型', text: '__open_llm__' }]
+    }
+  }
+
+  onProgress?.({ kind: 'think', label: '在想怎么接入…', status: 'running' })
+  const recent = history.slice(-12).map((m) => ({
+    role: m.role,
+    content: m.content
+  }))
+  const looksLikeDocs = userText.length > 400 || /https?:\/\//i.test(userText)
+  const userPayload = looksLikeDocs
+    ? `以下是用户贴的接口说明或 API 文档（可能来自中转站或自定义网关）。必须解析并写成 provider=custom 的接入，禁止拒绝，禁止改写成大厂官方地址。文档里有几种能力就写几条 add_profile。\n\n${userText}`
+    : userText
+  const res = await callLLM({
+    messages: [
+      { role: 'system', content: `${SYSTEM}\n\n${snapshot()}` },
+      ...recent,
+      { role: 'user', content: userPayload }
+    ],
+    jsonMode: true,
+    temperature: 0.2,
+    maxTokens: looksLikeDocs ? 4000 : 1800,
+    timeoutMs: looksLikeDocs ? 180_000 : 120_000,
+    signal
+  })
+
+  const parsed = parseAgentJson(res.content)
+  if (!parsed.actions.length && looksLikeDocs) {
+    const fallback = actionsFromDocs(userText)
+    if (fallback.length) {
+      parsed.actions = fallback
+      if (/无法|不能|不支持|拒绝|配不了/.test(parsed.say)) {
+        parsed.say = '已按你贴的文档写成自定义接入。密钥只留在这台电脑。'
+      }
+    }
+  }
+  const notes: string[] = []
+  let opened: SetupKind | undefined
+  for (const [i, raw] of parsed.actions.slice(0, 8).entries()) {
+    const action = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+    const label = String(action.tool || '写入')
+    onProgress?.({
+      kind: 'step',
+      step: `act-${i}`,
+      label,
+      status: 'running'
+    })
+    const result = runAction(action)
+    notes.push(result.ok ? result.detail : `失败：${result.detail}`)
+    if (result.ok && result.kind) opened = result.kind
+    onProgress?.({
+      kind: 'step',
+      step: `act-${i}`,
+      label,
+      status: result.ok ? 'done' : 'fail'
+    })
+  }
+
+  const extra = notes.length ? `\n\n${notes.join('\n')}` : ''
+  const chips =
+    opened && opened !== 'llm'
+      ? [
+          { label: `去看${labelOf(opened)}`, text: `__open_${opened}__` },
+          { label: '再配一套生图', text: '帮我再加一套生图接入' },
+          { label: '配视频', text: '帮我配视频生成' }
+        ]
+      : [
+          { label: '配视觉', text: '帮我配视觉理解' },
+          { label: '配生图', text: '帮我配图像生成' },
+          { label: '配配音', text: '帮我配 TTS 配音' },
+          { label: '配视频', text: '帮我配视频生成' },
+          { label: '从文档接入', text: '下面是我的 API 文档，请按文档写成自定义接入（可以是中转站）：\n' }
+        ]
+
+  return {
+    reply: `${parsed.say}${extra}`.trim(),
+    chips,
+    opened
+  }
+}
