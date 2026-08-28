@@ -5,6 +5,7 @@
 export type { AIMode } from '@/stores/settings'
 export { getAIMode } from './runtime'
 
+import { desktop, isDesktop } from '@/services/desktop'
 import { mockLLM } from './mock'
 import { getAIMode, getLlmConfig, getVisionConfig } from './runtime'
 
@@ -68,6 +69,10 @@ function hasJsonObject(text: string) {
   return /[{｛]/.test(text)
 }
 
+function looksLikeShotList(text: string) {
+  return /镜头\s*\d+\s*[：:]/.test(text) && /画面[：:]/.test(text)
+}
+
 /** 推理模型常把正文放进 reasoning_content；必须优先用带 JSON 的字段，不能把思考过程当成答案。 */
 function pickMessageContent(message: any): string {
   const content = flattenText(message?.content).trim()
@@ -76,6 +81,7 @@ function pickMessageContent(message: any): string {
   ).trim()
   if (hasJsonObject(content)) return content
   if (hasJsonObject(reasoning)) return reasoning
+  if (looksLikeShotList(reasoning) && !looksLikeShotList(content)) return reasoning
   return content || reasoning
 }
 
@@ -83,6 +89,46 @@ function hasImageParts(messages: LLMMessage[]): boolean {
   return messages.some(
     (m) => Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')
   )
+}
+
+function isRetryableNetwork(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? '')
+  return /Failed to fetch|NetworkError|ERR_NETWORK|ERR_CONNECTION|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|net::ERR|socket hang up|fetch failed|连不上语言模型/i.test(
+    msg
+  )
+}
+
+function shouldRetryHttp(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504
+}
+
+function friendlyNetworkError(e: unknown): Error {
+  const msg = e instanceof Error ? e.message : String(e ?? '')
+  if (/连不上语言模型/.test(msg)) return e instanceof Error ? e : new Error(msg)
+  return new Error('连不上语言模型（网络中断或被页面拦截）。请检查网络后点右侧重试。')
+}
+
+async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new DOMException('任务已取消', 'AbortError')
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(new DOMException('任务已取消', 'AbortError'))
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+    ])
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+type LlmHttpResult = {
+  ok: boolean
+  status: number
+  errText: string
+  json: () => Promise<any>
 }
 
 /** 把图片压成 JPEG data URL，避免多模态请求过大（最多约 1280 边） */
@@ -111,7 +157,8 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     return mockLLM(req)
   }
 
-  const { controlledSignal, isAbortError, llmAbortError } = await import('./abort')
+  const { abortableDelay, controlledSignal, isAbortError, llmAbortError, throwIfAborted } =
+    await import('./abort')
   const timeoutMs = req.timeoutMs ?? 120_000
   const control = controlledSignal(req.signal, timeoutMs)
   const { baseUrl, apiKey, model: cfgModel } =
@@ -134,33 +181,77 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     body.response_format = { type: 'json_object' }
   }
 
-  const post = async (payload: Record<string, unknown>, signal = control.signal) => {
-    const resp = await fetch(`${baseUrl}/chat/completions`, {
+  const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`
+
+  const postOnce = async (
+    payload: Record<string, unknown>,
+    signal = control.signal
+  ): Promise<LlmHttpResult> => {
+    const payloadBody = JSON.stringify(payload)
+    const authorization = `Bearer ${apiKey}`
+    if (isDesktop() && typeof desktop().llmFetch === 'function') {
+      const res = await withAbort(
+        desktop().llmFetch({
+          url,
+          authorization,
+          body: payloadBody,
+          timeoutMs
+        }),
+        signal
+      )
+      return {
+        ok: res.ok,
+        status: res.status,
+        errText: res.ok ? '' : res.text,
+        json: async () => JSON.parse(res.text || '{}')
+      }
+    }
+    const resp = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        Authorization: authorization
       },
-      body: JSON.stringify(payload),
+      body: payloadBody,
       signal
     })
     const errText = resp.ok ? '' : await resp.text()
-    return { resp, errText }
+    return { ok: resp.ok, status: resp.status, errText, json: () => resp.json() }
+  }
+
+  const post = async (
+    payload: Record<string, unknown>,
+    signal = control.signal
+  ): Promise<LlmHttpResult> => {
+    let last: unknown
+    for (let attempt = 0; attempt < 3; attempt++) {
+      throwIfAborted(signal)
+      try {
+        const result = await postOnce(payload, signal)
+        if (result.ok || !shouldRetryHttp(result.status) || attempt === 2) return result
+        last = new Error(`[LLM] ${result.status} ${result.errText}`)
+      } catch (e) {
+        last = e
+        if (isAbortError(e) || !isRetryableNetwork(e) || attempt === 2) throw e
+      }
+      await abortableDelay(700 * (attempt + 1), signal)
+    }
+    throw last instanceof Error ? last : new Error(String(last ?? '语言模型请求失败'))
   }
 
   try {
-    let { resp, errText } = await post(body)
+    let { ok, status, errText, json } = await post(body)
     if (
-      !resp.ok &&
+      !ok &&
       body.response_format &&
       (/response_format|json_object/i.test(errText) ||
-        (req.provider === 'vision' && withImages && resp.status === 400))
+        (req.provider === 'vision' && withImages && status === 400))
     ) {
       delete body.response_format
-      ;({ resp, errText } = await post(body))
+      ;({ ok, status, errText, json } = await post(body))
     }
     if (
-      !resp.ok &&
+      !ok &&
       req.provider === 'vision' &&
       withImages &&
       /Unexpected item type in content|does not support.*image|image.*not supported/i.test(errText)
@@ -169,14 +260,14 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
         `当前视觉模型不支持看图。请到设置页把「视觉理解」换成能看图的模型。`
       )
     }
-    if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)
-    let data = await resp.json()
+    if (!ok) throw new Error(`[LLM] ${status} ${errText}`)
+    let data = await json()
     let content = pickMessageContent(data.choices?.[0]?.message)
     if (!content.trim() && body.response_format) {
       delete body.response_format
-      ;({ resp, errText } = await post(body))
-      if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)
-      data = await resp.json()
+      ;({ ok, status, errText, json } = await post(body))
+      if (!ok) throw new Error(`[LLM] ${status} ${errText}`)
+      data = await json()
       content = pickMessageContent(data.choices?.[0]?.message)
     }
     if (req.jsonMode && !hasJsonObject(content)) {
@@ -195,9 +286,9 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
             }
           ]
         }
-        ;({ resp, errText } = await post(follow, followControl.signal))
-        if (resp.ok) {
-          data = await resp.json()
+        ;({ ok, status, errText, json } = await post(follow, followControl.signal))
+        if (ok) {
+          data = await json()
           const next = pickMessageContent(data.choices?.[0]?.message)
           if (next.trim()) content = next
         }
@@ -220,6 +311,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     if (control.signal.aborted || isAbortError(e)) {
       throw llmAbortError(e, control.signal, timeoutMs)
     }
+    if (isRetryableNetwork(e)) throw friendlyNetworkError(e)
     throw e
   } finally {
     control.cleanup()

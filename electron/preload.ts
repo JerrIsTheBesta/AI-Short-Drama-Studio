@@ -27,6 +27,12 @@ export type DesktopAPI = {
     body?: string
     timeoutMs?: number
   }) => Promise<{ status: number; ok: boolean; text: string }>
+  llmFetch: (opts: {
+    url: string
+    authorization?: string
+    body?: string
+    timeoutMs?: number
+  }) => Promise<{ status: number; ok: boolean; text: string }>
   dashscopeFetch: (opts: {
     url: string
     method?: string
@@ -60,6 +66,7 @@ const api: DesktopAPI = {
   pickDirectory: () => ipcRenderer.invoke('desktop:pickDirectory'),
   openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath),
   autodlFetch: (opts) => ipcRenderer.invoke('desktop:autodlFetch', opts),
+  llmFetch: (opts) => ipcRenderer.invoke('desktop:llmFetch', opts),
   dashscopeFetch: (opts) => ipcRenderer.invoke('desktop:dashscopeFetch', opts),
   downloadToTemp: (url) => ipcRenderer.invoke('desktop:downloadToTemp', url),
   minimize: () => ipcRenderer.invoke('window:minimize'),

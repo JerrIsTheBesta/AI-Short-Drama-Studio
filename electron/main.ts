@@ -344,6 +344,65 @@ app.whenReady().then(async () => {
     }
   })
 
+  ipcMain.handle('desktop:llmFetch', async (_e, opts?: {
+    url?: string
+    authorization?: string
+    body?: string
+    timeoutMs?: number
+  }) => {
+    const url = String(opts?.url || '')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('invalid url')
+    }
+    if (parsed.protocol !== 'https:') {
+      const host = parsed.hostname.toLowerCase()
+      const localHttp =
+        parsed.protocol === 'http:' && (host === '127.0.0.1' || host === 'localhost')
+      if (!localHttp) throw new Error('语言模型地址必须是 HTTPS')
+    }
+    if (!parsed.pathname.includes('/chat/completions')) {
+      throw new Error('只允许请求 chat/completions')
+    }
+    const body = String(opts?.body || '')
+    if (body.length > 32 * 1024 * 1024) {
+      throw new Error('语言模型请求过大')
+    }
+    const timeoutMs = Math.min(540000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        'Content-Type': 'application/json'
+      }
+      const token = String(opts?.authorization || '').trim()
+      if (token) headers.Authorization = token
+      const res = await net.fetch(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal
+      })
+      const text = await res.text()
+      return { status: res.status, ok: res.ok, text }
+    } catch (err: any) {
+      if (controller.signal.aborted) {
+        throw new Error(`语言模型请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
+      }
+      const msg = err instanceof Error ? err.message : String(err ?? '')
+      throw new Error(
+        /Failed to fetch|net::ERR|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED/i.test(msg)
+          ? '连不上语言模型（网络中断或被拦截）。请检查网络后重试。'
+          : msg || '连不上语言模型'
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
   ipcMain.handle('desktop:dashscopeFetch', async (_e, opts?: {
     url?: string
     method?: string

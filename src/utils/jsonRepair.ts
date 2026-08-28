@@ -238,6 +238,7 @@ function isUsefulStoryboard(value: unknown): boolean {
   return (
     (Array.isArray(obj.shots) && obj.shots.length > 0) ||
     (Array.isArray(obj.subjects) && obj.subjects.length > 0) ||
+    (Array.isArray(obj.scenes) && obj.scenes.length > 0) ||
     typeof obj.playMarkdown === 'string'
   )
 }

@@ -9,7 +9,7 @@
  */
 
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
-import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort } from './abort'
+import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } from './abort'
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, Subject, VisualStyle } from '@/types'
 import { getSkillBody } from '@/skills'
@@ -465,6 +465,286 @@ async function ensureStoryboardQuality(
   return current
 }
 
+const SHOT_OUTLINE_TIMEOUT_MS = 60_000
+const SHOT_EXPAND_TIMEOUT_MS = 45_000
+const SHOT_EXPAND_CONCURRENCY = 5
+
+interface ShotOutline {
+  title: string
+  shotSize?: string
+  visualPrompt: string
+  duration?: number
+  audioDescription?: string
+  voiceover?: string
+  subjectNames?: string[]
+  sceneName?: string
+}
+
+function asShotOutlineList(raw: unknown): ShotOutline[] {
+  const shots = Array.isArray((raw as { shots?: unknown })?.shots)
+    ? (raw as { shots: unknown[] }).shots
+    : Array.isArray(raw)
+      ? raw
+      : []
+  return shots
+    .map((item, i) => {
+      const s = item as Record<string, unknown>
+      const names = Array.isArray(s?.subjectNames)
+        ? s.subjectNames.map((n) => String(n).trim()).filter(Boolean)
+        : undefined
+      return {
+        title: String(s?.title || `镜头${i + 1}`).trim() || `镜头${i + 1}`,
+        shotSize: String(s?.shotSize || '').trim() || undefined,
+        visualPrompt: String(s?.visualPrompt || s?.picture || '').trim(),
+        duration: Number(s?.duration) || undefined,
+        audioDescription: String(s?.audioDescription || s?.sound || '').trim() || undefined,
+        voiceover: String(s?.voiceover ?? '').trim(),
+        subjectNames: names?.length ? names : undefined,
+        sceneName: String(s?.sceneName || '').trim() || undefined
+      }
+    })
+    .filter((item) => item.visualPrompt || item.voiceover || item.title)
+}
+
+function outlineField(block: string, names: string): string {
+  const m = block.match(
+    new RegExp(
+      `(?:${names})[：:]\\s*([^\\n]+(?:\\n(?!(?:画面|时长|声音|音效|口播|对白|台词|镜头)\\s*\\d*\\s*[：:])[^\\n]+)*)`,
+      'i'
+    )
+  )
+  return (m?.[1] || '').replace(/\s+/g, ' ').trim()
+}
+
+/** 按「镜头 N：标题（景别）/ 画面 / 时长 / 声音」场记拆条 */
+function parseOutlineText(content: string): ShotOutline[] {
+  const text = String(content || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/```[\w]*\n?|\n?```/g, '')
+    .trim()
+  const blocks = text
+    .split(/\n(?=镜头\s*\d+\s*[：:])/)
+    .map((b) => b.trim())
+    .filter((b) => /^镜头\s*\d+\s*[：:]/.test(b))
+  return blocks
+    .map((block, i) => {
+      const head = block.match(/^镜头\s*\d+\s*[：:]\s*([^\n]+)/)
+      let title = (head?.[1] || `镜头${i + 1}`).trim()
+      let shotSize = outlineField(block, '景别')
+      const paren = title.match(/[（(]([^）)]+)[）)]\s*$/)
+      if (paren) {
+        if (!shotSize) shotSize = paren[1].trim()
+        title = title.slice(0, paren.index).trim() || title
+      }
+      const visualPrompt = outlineField(block, '画面|内容')
+      const audioDescription = outlineField(block, '声音|音效')
+      const voiceover = outlineField(block, '口播|对白|台词')
+      const duration = Number(block.match(/时长[：:]\s*(\d+(?:\.\d+)?)/)?.[1])
+      return {
+        title: title.trim() || `镜头${i + 1}`,
+        shotSize: shotSize || undefined,
+        visualPrompt,
+        duration: Number.isFinite(duration) && duration > 0 ? duration : undefined,
+        audioDescription: audioDescription || undefined,
+        voiceover
+      }
+    })
+    .filter((item) => item.visualPrompt.length > 4 || item.title.length > 1)
+}
+
+function attachCastToOutline(
+  outline: ShotOutline,
+  subjectNames: string[],
+  sceneNames: string[]
+): ShotOutline {
+  const blob = `${outline.title}\n${outline.visualPrompt}\n${outline.voiceover}`
+  const hits = subjectNames.filter((name) => name && blob.includes(name))
+  const sceneName = outline.sceneName || sceneNames.find((name) => name && blob.includes(name))
+  return {
+    ...outline,
+    subjectNames: outline.subjectNames?.length ? outline.subjectNames : hits.length ? hits : undefined,
+    sceneName
+  }
+}
+
+function formatOutlineNote(outline: ShotOutline, index: number): string {
+  const size = outline.shotSize ? `（${outline.shotSize}）` : ''
+  const lines = [
+    `镜头 ${index + 1}：${outline.title}${size}`,
+    `画面：${outline.visualPrompt}`,
+    `时长：${outline.duration || 6} 秒`,
+    `声音：${outline.audioDescription || '现场环境声'}`
+  ]
+  if (outline.voiceover) lines.push(`口播：${outline.voiceover}`)
+  return lines.join('\n')
+}
+
+function outlineToRawShot(outline: ShotOutline, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    title: outline.title,
+    shotSize: outline.shotSize,
+    visualPrompt: outline.visualPrompt,
+    duration: outline.duration || 6,
+    audioDescription: outline.audioDescription,
+    voiceover: outline.voiceover || '',
+    subjectNames: outline.subjectNames,
+    sceneName: outline.sceneName,
+    ...extra
+  }
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<R[]> {
+  const out: R[] = new Array(items.length)
+  let cursor = 0
+  const n = Math.min(Math.max(1, limit), items.length)
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      while (true) {
+        throwIfAborted(signal)
+        const index = cursor++
+        if (index >= items.length) return
+        out[index] = await fn(items[index], index)
+      }
+    })
+  )
+  return out
+}
+
+async function extractShotOutline(
+  input: StoryboardInput,
+  model: string,
+  play: string,
+  subjectNames: string[],
+  sceneNames: string[],
+  onProgress?: (msg: string) => void
+): Promise<{ outlines: ShotOutline[]; model?: string }> {
+  onProgress?.('先把剧本交给模型出分镜场记（只要画面、时长、声音）…')
+  const response = await callLLM({
+    messages: [
+      {
+        role: 'system',
+        content: `你是分镜导演。只写一份能拍的场记，像聊天里列镜头那样短、快。
+按剧本顺序拆镜。一个说话者一镜；轮流对话按轮次拆；同一人连续短句可留在一镜。
+每镜只写四项：标题（括号里写景别或运镜）、画面（2–4 句看见的动作）、时长、声音。
+有对白时再加一行「口播：人物名：原词」。没有对白不要写口播。
+禁止 JSON、禁止思考过程、禁止 continuity / blocking / videoPrompt / 美学设定。
+严格按下述格式，镜头之间空一行：
+
+镜头 1：夜奔（远景→中景）
+画面：村口浅滩，夜晚十一点，水面横着一条银白光带。牛郎挑着竹筐从草丛中冲出，两个孩子颠簸抓筐边，一只凉鞋陷进泥里。
+时长：6 秒
+声音：踩草声、急促呼吸、水流声、泼水声
+
+镜头 2：对岸静立（中景→特写）
+画面：织女站在河对岸雾气中，头发被风吹乱，手腕红绳若隐若现。她轻声说话，脚边湿泥因光墙推开一圈。
+时长：5 秒
+声音：风声、水声、织女轻语`
+      },
+      {
+        role: 'user',
+        content: `已有人物：${subjectNames.join('、') || '（无）'}
+已有地点：${sceneNames.join('、') || '（无）'}
+单镜时长参考：${input.shotDuration} 秒（可按节奏在 3–10 秒间浮动）
+
+完整剧本：
+${play}`
+      }
+    ],
+    model,
+    temperature: 0.4,
+    jsonMode: false,
+    maxTokens: 2500,
+    signal: input.signal,
+    timeoutMs: SHOT_OUTLINE_TIMEOUT_MS
+  })
+  let outlines = parseOutlineText(response.content).map((item) =>
+    attachCastToOutline(item, subjectNames, sceneNames)
+  )
+  if (!outlines.length) {
+    try {
+      outlines = asShotOutlineList(parseJsonRobust(response.content)).map((item) =>
+        attachCastToOutline(item, subjectNames, sceneNames)
+      )
+      if (outlines.length) log('⚠ 场记不是文本格式，已从 JSON 兜底识别')
+    } catch {
+      /* 下面统一报空表 */
+    }
+  }
+  if (!outlines.length) {
+    throw new Error('粗分镜表是空的。人物和场景已保留，可直接重试拆分镜')
+  }
+  onProgress?.(`✓ 已拿到 ${outlines.length} 个镜头场记，开始并发拆节点…`)
+  return { outlines, model: response.model }
+}
+
+async function expandOneShot(
+  input: StoryboardInput,
+  model: string,
+  outline: ShotOutline,
+  index: number,
+  prev: ShotOutline | undefined,
+  next: ShotOutline | undefined,
+  subjectNames: string[],
+  sceneNames: string[]
+): Promise<Record<string, unknown>> {
+  try {
+    const response = await callLLM({
+      messages: [
+        {
+          role: 'system',
+          content: `你是分镜节点填写员。只把下面这一条场记扩成画布字段，不改故事、不改时长、不改画面原意。
+口播必须用场记里的原词；场记没写口播就空字符串。一个镜头一个说话者。
+只输出一个 JSON 对象：{"title":"3-8字","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别","blocking":"站位与动作","eyeline":"视线","continuity":"上一镜末态 → 本镜变化 → 下一镜初态","propFocus":"道具或无","visualPrompt":"中文静帧画面","audioDescription":"现场声音","voiceover":"人物名：台词，无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"声线与情绪","duration":6,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["短名"],"sceneName":"地点原名"}`
+        },
+        {
+          role: 'user',
+          content: `已有人物：${subjectNames.join('、') || '（无）'}
+已有地点：${sceneNames.join('、') || '（无）'}
+${prev ? `上一镜：${formatOutlineNote(prev, index - 1)}` : '上一镜：无（本镜是开场）'}
+
+本镜场记：
+${formatOutlineNote(outline, index)}
+
+${next ? `下一镜：${formatOutlineNote(next, index + 1)}` : '下一镜：无（本镜是收尾）'}
+只扩这一镜。不要再读整本剧本。`
+        }
+      ],
+      model,
+      temperature: 0.2,
+      jsonMode: true,
+      maxTokens: 1200,
+      signal: input.signal,
+      timeoutMs: SHOT_EXPAND_TIMEOUT_MS
+    })
+    let raw: any
+    try {
+      raw = parseJsonRobust(response.content)
+    } catch {
+      return outlineToRawShot(outline)
+    }
+    const shot = (raw?.shots && Array.isArray(raw.shots) ? raw.shots[0] : raw) as Record<string, unknown>
+    if (!shot || typeof shot !== 'object') return outlineToRawShot(outline)
+    return {
+      ...outlineToRawShot(outline),
+      ...shot,
+      title: String(shot.title || outline.title),
+      visualPrompt: String(shot.visualPrompt || outline.visualPrompt),
+      duration: Number(shot.duration) || outline.duration,
+      audioDescription: String(shot.audioDescription || outline.audioDescription || ''),
+      voiceover: String(shot.voiceover ?? outline.voiceover ?? '')
+    }
+  } catch (error) {
+    if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+    log(`⚠ 第${index + 1}镜扩节点失败，先用粗分镜落库：${(error as Error).message.split('\n')[0]}`)
+    return outlineToRawShot(outline)
+  }
+}
+
 /** 真实 LLM 调用 */
 async function realStoryboard(
   input: StoryboardInput,
@@ -588,7 +868,6 @@ async function realStoryboard(
 
     const sceneSystem = `你是场景与视觉设定提炼子智能体。只从完整剧本提炼本集实际出现的地点，并给出项目级视觉设定；不写人物，不拆分镜。场景按地点和明确时段区分，不因景别不同重复建场景。scene.name 必须原样采用剧本“## 场景”下的地点标题或分场里反复使用的地点短名，禁止另起同义名。${productNote}\n${stylePriority}\n只输出 JSON：{"aesthetic":"全片中文氛围","h3Aesthetic":"English production aesthetic with concrete lighting, material, color and camera qualities","styleBrief":"本集冲突和视觉抓点","colorPalette":"可见颜色","lightingNote":"时辰与光源","scenes":[{"name":"剧本地点原名","description":"无人时的空间、地面、建筑、天气、动态和光线，至少80字","mainAnchor":"主视觉实物","anchors":"全景；主锚；地面站位区；光源或次锚","lighting":"时辰和光源"}]}。输出前自行检查地点没有遗漏，四宫格锚点都是同一地点。`
 
-    const shotSystem = `你是分镜导演子智能体。只把完整剧本忠实拆成本集可拍的 shots，不输出 subjects、scenes、项目美学或长篇 videoPrompt。subjectNames 直接使用剧本人物短名；sceneName 必须原样复制剧本“## 场景”下的地点标题或该分场使用的地点短名，禁止另起同义名。汇总器会在本地绑定并根据导演字段合成视频表演草稿。\n${NARRATIVE_CONTINUITY_RULES}\n${SPEAKER_STAGING_RULES}\n每镜 5-10 秒。相邻镜头必须接住位置、姿势、朝向、道具、情绪和已知信息。一个 H3 镜头只能有一个说话者；轮流对话按轮次拆镜。同一人连续短句可留在一镜。visualPrompt 是中文单帧可画内容。blocking 和 continuity 必须写具体动作，不能用空话。\n只输出 JSON：{"shots":[{"title":"3-8字内容标题","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别与理由","blocking":"具体站位、动作和说话者视觉归属","eyeline":"视线","continuity":"上一镜具体末态 → 本镜可见变化 → 下一镜具体末态","propFocus":"道具状态或无","visualPrompt":"中文静帧画面","audioDescription":"现场声音","voiceover":"人物名：实际台词；无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"说话人声线与情绪","duration":7,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["剧本人物短名"],"sceneName":"剧本地点原名"}]}。输出前自行逐对检查 continuity、台词原文和说话者构图。`
 
     let subjectPart: { raw: any; model?: string } = {
       raw: { subjects: input.existingSubjects || [] }
@@ -596,7 +875,6 @@ async function realStoryboard(
     let scenePart: { raw: any; model?: string } = {
       raw: { scenes: input.existingScenes || [] }
     }
-    let shotPart: { raw: any; model?: string } = { raw: { shots: [] } }
 
     if (stageOrder[startAt] <= stageOrder.subjects) {
       onProgress?.('第 1/3 步：只提炼人物角色…')
@@ -642,13 +920,23 @@ async function realStoryboard(
       onProgress?.(`✓ 已有 ${input.existingScenes?.length || 0} 个场景，从已保存结果继续`)
     }
 
-    onProgress?.('第 3/3 步：按已保存的人物和场景拆分镜…')
-    shotPart = await runPart('分镜', shotSystem, 9000, PLAY_LLM_TIMEOUT_MS)
+    onProgress?.('第 3/3 步：先出分镜场记，再并发拆节点…')
+    const subjectNames = (Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : [])
+      .map((item: { name?: unknown }) => String(item?.name || '').trim())
+      .filter(Boolean)
+    const sceneNames = (Array.isArray(scenePart.raw?.scenes) ? scenePart.raw.scenes : [])
+      .map((item: { name?: unknown }) => String(item?.name || '').trim())
+      .filter(Boolean)
+    const { outlines, model: outlineModel } = await extractShotOutline(
+      input,
+      parallelModel,
+      play,
+      subjectNames,
+      sceneNames,
+      onProgress
+    )
 
-    const rawShots = Array.isArray(shotPart.raw?.shots) ? shotPart.raw.shots : []
-    if (!rawShots.length) {
-      throw new Error('提炼分镜失败：模型没有返回可用镜头；人物和场景节点已经保留，可直接重试分镜')
-    }
+    let rawShots = outlines.map((item) => outlineToRawShot(item))
     const subjectRows = Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : []
     if (!subjectRows.length) {
       const names = new Set<string>()
@@ -672,7 +960,7 @@ async function realStoryboard(
     }
     const sceneRows = Array.isArray(scenePart.raw?.scenes) ? scenePart.raw.scenes : []
     if (!sceneRows.length) {
-      const names = [...new Set(rawShots.map((shot: any) => String(shot?.sceneName || '').trim()).filter(Boolean))]
+      const names = [...new Set(rawShots.map((shot) => String(shot?.sceneName || '').trim()).filter(Boolean))]
       sceneRows.push(
         ...names.slice(0, 8).map((name) => ({
           name,
@@ -683,6 +971,42 @@ async function realStoryboard(
         }))
       )
     }
+
+    await input.onExtractStage?.(
+      'shots',
+      normalizeStoryboard(
+        {
+          ...scenePart.raw,
+          subjects: subjectRows,
+          scenes: sceneRows,
+          shots: rawShots
+        },
+        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
+      )
+    )
+
+    let done = 0
+    rawShots = await mapLimit(
+      outlines,
+      SHOT_EXPAND_CONCURRENCY,
+      async (outline, index) => {
+        const expanded = await expandOneShot(
+          input,
+          parallelModel,
+          outline,
+          index,
+          outlines[index - 1],
+          outlines[index + 1],
+          subjectNames,
+          sceneNames
+        )
+        done += 1
+        onProgress?.(`正在拆分镜节点 ${done}/${outlines.length}…`)
+        return expanded
+      },
+      input.signal
+    )
+
     const merged = {
       ...scenePart.raw,
       subjects: subjectRows,
@@ -703,7 +1027,7 @@ async function realStoryboard(
       onProgress?.('人物、场景、分镜均已完成并绑定…')
     }
     await input.onExtractStage?.('shots', parsed)
-    const usedModel = shotPart.model || subjectPart.model || scenePart.model || parallelModel
+    const usedModel = outlineModel || subjectPart.model || scenePart.model || parallelModel
     return { result: parsed, model: usedModel }
   }
 
@@ -1423,7 +1747,15 @@ export async function generateStoryboard(
       const msg = e?.message ?? String(e)
       log(`✗ 真实 LLM 调用失败：${msg}`)
       if (isAbortError(e) && !isTimeoutAbort(e)) throw e
-      throw new Error(msg.startsWith('脚本') || msg.startsWith('提炼') || msg.startsWith('模型超过') ? msg : `脚本生成失败：${msg}`)
+      throw new Error(
+        msg.startsWith('脚本') ||
+          msg.startsWith('提炼') ||
+          msg.startsWith('模型超过') ||
+          msg.startsWith('连不上') ||
+          msg.startsWith('粗分镜')
+          ? msg
+          : `脚本生成失败：${msg}`
+      )
     }
   }
 
