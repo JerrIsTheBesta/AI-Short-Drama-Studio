@@ -66,6 +66,10 @@ export interface VideoGenInput {
   promptStyle?: VideoPromptStyle
   /** 图生视频节点模型。默认 H3 */
   videoModel?: VideoGenModel
+  /** 已提交的 AutoDL 工作流 task_id；传入后跳过提交，直接恢复轮询。 */
+  resumeTaskId?: string
+  /** 新任务提交成功后立即回传 task_id，调用方应持久化用于断点恢复。 */
+  onTaskSubmitted?: (taskId: string) => void | Promise<void>
 }
 
 export interface VideoGenOutput {
@@ -570,57 +574,66 @@ async function realWorkflowVideo(
   dataUrls.forEach((url, index) => {
     body[`ref_image_${index}`] = url
   })
-  onProgress?.(`提交生成任务（${resolution}，${dataUrls.length} 张参考图）...`)
-  const submitCtl = controlledSignal(input.signal, 120_000)
-  let submitResp: AutodlHttpResult
-  try {
-    submitResp = await autodlRequest(
-      `${root}/comfyui_workflow/${encodeURIComponent(workflowId)}`,
-      {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify(body),
-        signal: submitCtl.signal
-      },
-      120_000
-    )
-  } catch (error: any) {
-    if (isTimeoutAbort(error, submitCtl.signal)) {
-      throw new Error(
-        `[video] 提交超时（120 秒），参考图约 ${referencePayloadMb.toFixed(1)} MB。请检查网络或减小参考图。`
+  let taskId = String(input.resumeTaskId || '').trim()
+  if (taskId) {
+    onProgress?.(`恢复已有任务 (${taskId})，不会重复提交…`)
+    log(`↻ 恢复任务: ${taskId}`)
+  } else {
+    onProgress?.(`提交生成任务（${resolution}，${dataUrls.length} 张参考图）...`)
+    const submitCtl = controlledSignal(input.signal, 120_000)
+    let submitResp: AutodlHttpResult
+    try {
+      submitResp = await autodlRequest(
+        `${root}/comfyui_workflow/${encodeURIComponent(workflowId)}`,
+        {
+          method: 'POST',
+          headers: authHeaders(apiKey),
+          body: JSON.stringify(body),
+          signal: submitCtl.signal
+        },
+        120_000
       )
+    } catch (error: any) {
+      if (isTimeoutAbort(error, submitCtl.signal)) {
+        throw new Error(
+          `[video] 提交超时（120 秒），参考图约 ${referencePayloadMb.toFixed(1)} MB。请检查网络或减小参考图。`
+        )
+      }
+      throw new Error(
+        `[video] 无法连接 AutoDL：${error?.message || String(error)}（参考图约 ${referencePayloadMb.toFixed(1)} MB）`
+      )
+    } finally {
+      submitCtl.cleanup()
     }
-    throw new Error(
-      `[video] 无法连接 AutoDL：${error?.message || String(error)}（参考图约 ${referencePayloadMb.toFixed(1)} MB）`
-    )
-  } finally {
-    submitCtl.cleanup()
-  }
 
-  const submitText = await submitResp.text()
-  let submitData: any = null
-  try {
-    submitData = submitText ? JSON.parse(submitText) : null
-  } catch {
-    submitData = null
+    const submitText = await submitResp.text()
+    let submitData: any = null
+    try {
+      submitData = submitText ? JSON.parse(submitText) : null
+    } catch {
+      submitData = null
+    }
+    if (!submitResp.ok) {
+      const hint = submitResp.status === 413 ? '；请求体过大，请降低参考图尺寸' : ''
+      throw new Error(`[video] 任务提交失败 ${submitResp.status}${hint}：${submitText.slice(0, 1200)}`)
+    }
+    const submitCode = String(submitData?.code ?? '')
+    taskId = taskIdOf(submitData)
+    if (submitCode && !/^success$/i.test(submitCode) && !taskId) {
+      throw new Error(`[video] 任务提交失败：${submitData?.msg || submitCode}\n${submitText.slice(0, 400)}`)
+    }
+    if (!taskId) {
+      throw new Error(`[video] 提交响应无 task_id\n原始：${submitText.slice(0, 400)}`)
+    }
+    await input.onTaskSubmitted?.(taskId)
+    onProgress?.(`任务已提交 (${taskId})`)
+    log(`✓ 任务已提交: ${taskId}`)
   }
-  if (!submitResp.ok) {
-    const hint = submitResp.status === 413 ? '；请求体过大，请降低参考图尺寸' : ''
-    throw new Error(`[video] 任务提交失败 ${submitResp.status}${hint}：${submitText.slice(0, 1200)}`)
-  }
-  const submitCode = String(submitData?.code ?? '')
-  const taskId = taskIdOf(submitData)
-  if (submitCode && !/^success$/i.test(submitCode) && !taskId) {
-    throw new Error(`[video] 任务提交失败：${submitData?.msg || submitCode}\n${submitText.slice(0, 400)}`)
-  }
-  if (!taskId) {
-    throw new Error(`[video] 提交响应无 task_id\n原始：${submitText.slice(0, 400)}`)
-  }
-  onProgress?.(`任务已提交 (${taskId})`)
-  log(`✓ 任务已提交: ${taskId}`)
 
   const start = Date.now()
-  const deadline = start + 15 * 60 * 1000
+  // 旺时任务可能在队列中超过 15 分钟。保留到 30 分钟，并允许调用方随时 abort；
+  // 智能口播会逐段落库，因此取消或超时后可以从已完成段继续。
+  const deadline = start + 30 * 60 * 1000
   let attempt = 0
   while (Date.now() < deadline) {
     attempt++
@@ -691,7 +704,7 @@ async function realWorkflowVideo(
     onProgress?.(`生成中… ${elapsed}s${status ? `（${status}）` : ''}`)
   }
 
-  throw new Error(`[video] 生成超时（15 分钟未完成），task_id=${taskId}`)
+  throw new Error(`[video] 生成超时（30 分钟未完成），task_id=${taskId}`)
 }
 
 /** 百炼 wan3.0-video-prime：单张首帧，多张走全能参考（reference_image），固定 720P */

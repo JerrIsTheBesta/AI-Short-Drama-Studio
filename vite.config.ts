@@ -1,13 +1,33 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 import path from 'node:path'
 import electron from 'vite-plugin-electron/simple'
 
+/** Packaged builds must not inline this machine's .env keys or endpoints. */
+const packEnvDir = path.join(__dirname, 'scripts/pack-env')
+
+function stripMachineEnvOnPack(): Plugin {
+  return {
+    name: 'strip-machine-env-on-pack',
+    configResolved(config) {
+      if (config.command !== 'build') return
+      for (const key of Object.keys(config.env)) {
+        if (key.startsWith('VITE_')) config.env[key] = ''
+      }
+    }
+  }
+}
+
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   base: './',
+  envDir: command === 'build' ? packEnvDir : __dirname,
+  build: {
+    sourcemap: false
+  },
   plugins: [
+    stripMachineEnvOnPack(),
     vue(),
     electron({
       main: { entry: 'electron/main.ts' },
@@ -60,4 +80,4 @@ export default defineConfig({
   }
   // ⚠️ 不要设置 worker.format='es'：ffmpeg-core UMD 用 importScripts 加载，
   //    module worker 不支持，会导致 core 永远加载不出来。
-})
+}))

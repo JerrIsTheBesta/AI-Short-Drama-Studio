@@ -269,6 +269,21 @@ app.whenReady().then(async () => {
     return res.canceled ? [] : res.filePaths
   })
 
+  ipcMain.handle('desktop:saveTextFile', async (_e, opts?: {
+    defaultName?: string
+    text?: string
+    filters?: Electron.FileFilter[]
+  }) => {
+    const win = BrowserWindow.getFocusedWindow()
+    const res = await dialog.showSaveDialog(win ?? undefined, {
+      defaultPath: String(opts?.defaultName || 'script.md'),
+      filters: opts?.filters ?? [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (res.canceled || !res.filePath) return null
+    await fs.writeFile(res.filePath, String(opts?.text || ''), 'utf8')
+    return res.filePath
+  })
+
   ipcMain.handle('desktop:pickDirectory', async () => {
     const win = BrowserWindow.getFocusedWindow()
     const res = await dialog.showOpenDialog(win ?? undefined, {

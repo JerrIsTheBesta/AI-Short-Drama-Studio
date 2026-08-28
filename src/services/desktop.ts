@@ -11,6 +11,11 @@ export type DesktopAPI = {
   remove: (filePath: string) => Promise<void>
   join: (...parts: string[]) => Promise<string>
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
+  saveTextFile: (opts: {
+    defaultName: string
+    text: string
+    filters?: { name: string; extensions: string[] }[]
+  }) => Promise<string | null>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
   autodlFetch: (opts: {

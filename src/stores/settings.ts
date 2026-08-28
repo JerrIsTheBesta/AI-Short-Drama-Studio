@@ -14,24 +14,33 @@ export type { VideoPromptStyle }
 
 export type AIMode = 'mock' | 'real'
 
+export type SetupKind = 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'music'
+
 export interface ServiceEndpoint {
   baseUrl: string
   apiKey: string
   model: string
   /** 配好后可在下拉里选 */
   models: string[]
-  /** 设置页选中的接入方式 id，如 deepseek / apiyi / custom */
+  /** 设置页选中的接入方式 id，如 deepseek / dashscope / custom */
   provider?: string
 }
 
-/** 一套已保存的 LLM 接入（地址 + Key + 模型列表） */
-export interface LlmProfile extends ServiceEndpoint {
+/** 一套已保存的接入（地址 + Key + 模型列表） */
+export interface NamedEndpoint extends ServiceEndpoint {
   id: string
   name: string
 }
 
+export interface LlmProfile extends NamedEndpoint {}
+
 export interface TtsEndpoint extends ServiceEndpoint {
   voice: string
+}
+
+export interface TtsProfile extends TtsEndpoint {
+  id: string
+  name: string
 }
 
 export interface VideoEndpoint {
@@ -43,6 +52,12 @@ export interface VideoEndpoint {
    * formatted：人物图 + 空镜底板直接出视频，套 Aesthetic / SHOT 结构。
    */
   promptStyle: VideoPromptStyle
+  provider?: string
+}
+
+export interface VideoProfile extends VideoEndpoint {
+  id: string
+  name: string
 }
 
 export interface AppSettings {
@@ -52,14 +67,23 @@ export interface AppSettings {
   defaultAspectRatio: string
   autoSaveInterval: number
   llm: ServiceEndpoint
-  /** 已保存的多套 LLM，可随时切换 */
   llms: LlmProfile[]
   activeLlmId: string
   vision: ServiceEndpoint
+  visions: NamedEndpoint[]
+  activeVisionId: string
   image: ServiceEndpoint
+  images: NamedEndpoint[]
+  activeImageId: string
   tts: TtsEndpoint
+  ttsProfiles: TtsProfile[]
+  activeTtsId: string
   video: VideoEndpoint
+  videos: VideoProfile[]
+  activeVideoId: string
   music: ServiceEndpoint
+  musics: NamedEndpoint[]
+  activeMusicId: string
 }
 
 export const LLM_PRESETS = [
@@ -68,13 +92,13 @@ export const LLM_PRESETS = [
   'deepseek-reasoner'
 ]
 
-export const VISION_PRESETS = ['qwen3-vl-plus', 'qwen3.8-max']
+export const VISION_PRESETS = ['qwen-vl-max', 'qwen-vl-plus', 'gpt-4o']
 
 export const IMAGE_PRESETS = [
-  'seedream-4-5-251128',
-  'gpt-image-2',
+  'doubao-seedream-4-0-250828',
+  'gpt-image-1',
   'dall-e-3',
-  'flux-1-pro'
+  'qwen-image-plus'
 ]
 
 export const TTS_PRESETS = ['qwen-audio-3.0-tts-flash', 'qwen3-tts-flash']
@@ -85,13 +109,36 @@ function uniq(list: string[]): string[] {
   return [...new Set(list.map((s) => s.trim()).filter(Boolean))]
 }
 
+export function uniqueProfileName(existing: string[], base: string): string {
+  const names = new Set(existing)
+  if (!names.has(base)) return base
+  let i = 2
+  while (names.has(`${base} ${i}`)) i += 1
+  return `${base} ${i}`
+}
+
+export function endpointReady(ep?: { baseUrl?: string; apiKey?: string; model?: string; workflowId?: string }) {
+  if (!ep) return false
+  const hasEndpoint = Boolean(ep.baseUrl?.trim() && ep.apiKey?.trim())
+  const hasModel = Boolean(ep.model?.trim() || ep.workflowId?.trim())
+  return hasEndpoint && hasModel
+}
+
+export function isLlmConfigured(cfg: AppSettings) {
+  return endpointReady(cfg.llm)
+}
+
 /** 每个接入下可切换的模型名，给智能体 / 写剧本下拉用 */
-export function llmModelGroups(llms: LlmProfile[]) {
-  return (llms ?? []).map((p) => ({
+export function namedModelGroups(list: NamedEndpoint[] | TtsProfile[]) {
+  return (list ?? []).map((p) => ({
     id: p.id,
     name: p.name,
     models: uniq([p.model, ...(p.models ?? [])])
   }))
+}
+
+export function llmModelGroups(llms: LlmProfile[]) {
+  return namedModelGroups(llms)
 }
 
 export function llmChoiceKey(profileId: string, model: string) {
@@ -104,8 +151,8 @@ export function parseLlmChoiceKey(key: string): { profileId: string; model: stri
   return { profileId: key.slice(0, i), model: key.slice(i + 2) }
 }
 
-function newId() {
-  return `llm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+function newId(prefix = 'cfg') {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
 }
 
 function asEndpoint(ep: ServiceEndpoint): ServiceEndpoint {
@@ -118,11 +165,44 @@ function asEndpoint(ep: ServiceEndpoint): ServiceEndpoint {
   }
 }
 
-function profileFromEndpoint(ep: ServiceEndpoint, name: string, id?: string): LlmProfile {
+function asTts(ep: TtsEndpoint): TtsEndpoint {
   return {
-    id: id || newId(),
+    ...asEndpoint(ep),
+    voice: ep.voice || 'longanhuan_v3.6'
+  }
+}
+
+function asVideo(ep: VideoEndpoint): VideoEndpoint {
+  return {
+    baseUrl: migrateVideoBaseUrl(ep.baseUrl || ''),
+    apiKey: ep.apiKey || '',
+    workflowId: migrateVideoWorkflowId(ep.workflowId || ''),
+    promptStyle: ep.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
+    provider: ep.provider
+  }
+}
+
+function profileFromEndpoint(ep: ServiceEndpoint, name: string, id?: string): NamedEndpoint {
+  return {
+    id: id || newId('svc'),
     name,
     ...asEndpoint(ep)
+  }
+}
+
+function ttsFromEndpoint(ep: TtsEndpoint, name: string, id?: string): TtsProfile {
+  return {
+    id: id || newId('tts'),
+    name,
+    ...asTts(ep)
+  }
+}
+
+function videoFromEndpoint(ep: VideoEndpoint, name: string, id?: string): VideoProfile {
+  return {
+    id: id || newId('vid'),
+    name,
+    ...asVideo(ep)
   }
 }
 
@@ -140,32 +220,122 @@ function endpoint(
   }
 }
 
+function hydrateNamed(
+  saved: unknown,
+  fallback: ServiceEndpoint,
+  defaultName: string,
+  savedActiveId?: string,
+  prefix = 'svc'
+): { list: NamedEndpoint[]; activeId: string; active: ServiceEndpoint } {
+  const savedList = Array.isArray(saved)
+    ? saved.filter((p): p is NamedEndpoint => Boolean(p && p.id && p.name))
+    : []
+  const list = savedList.length
+    ? savedList.map((p) =>
+        profileFromEndpoint(
+          {
+            ...fallback,
+            ...p,
+            models: uniq([...(p.models ?? []), ...(p.model ? [p.model] : [])])
+          },
+          p.name,
+          p.id
+        )
+      )
+    : [profileFromEndpoint(fallback, defaultName, newId(prefix))]
+  const activeId = list.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : list[0].id
+  const active = list.find((p) => p.id === activeId) || list[0]
+  return { list, activeId: active.id, active: asEndpoint(active) }
+}
+
+function hydrateTts(
+  saved: unknown,
+  fallback: TtsEndpoint,
+  savedActiveId?: string
+): { list: TtsProfile[]; activeId: string; active: TtsEndpoint } {
+  const savedList = Array.isArray(saved)
+    ? saved.filter((p): p is TtsProfile => Boolean(p && p.id && p.name))
+    : []
+  const list = savedList.length
+    ? savedList.map((p) =>
+        ttsFromEndpoint(
+          {
+            ...fallback,
+            ...p,
+            models: uniq([...(p.models ?? []), ...(p.model ? [p.model] : [])])
+          },
+          p.name,
+          p.id
+        )
+      )
+    : [ttsFromEndpoint(fallback, '默认配音')]
+  const activeId = list.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : list[0].id
+  const active = list.find((p) => p.id === activeId) || list[0]
+  return { list, activeId: active.id, active: asTts(active) }
+}
+
+function hydrateVideo(
+  saved: unknown,
+  fallback: VideoEndpoint,
+  savedActiveId?: string
+): { list: VideoProfile[]; activeId: string; active: VideoEndpoint } {
+  const savedList = Array.isArray(saved)
+    ? saved.filter((p): p is VideoProfile => Boolean(p && p.id && p.name))
+    : []
+  const list = savedList.length
+    ? savedList.map((p) => videoFromEndpoint({ ...fallback, ...p }, p.name, p.id))
+    : [videoFromEndpoint(fallback, '默认视频')]
+  const activeId = list.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : list[0].id
+  const active = list.find((p) => p.id === activeId) || list[0]
+  return { list, activeId: active.id, active: asVideo(active) }
+}
+
 function buildDefaults(): AppSettings {
   const env = envDefaults()
   const llm = endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS)
-  const first = profileFromEndpoint(llm, '默认 LLM')
+  const first = profileFromEndpoint(llm, '默认 LLM', newId('llm'))
+  const vision = endpoint(env.vision.baseUrl, env.vision.apiKey, env.vision.model, VISION_PRESETS)
+  const visionFirst = profileFromEndpoint(vision, '默认视觉', newId('vis'))
+  const image = endpoint(env.image.baseUrl, env.image.apiKey, env.image.model, IMAGE_PRESETS)
+  const imageFirst = profileFromEndpoint(image, '默认生图', newId('img'))
+  const tts: TtsEndpoint = {
+    ...endpoint(env.tts.baseUrl, env.tts.apiKey, env.tts.model, TTS_PRESETS),
+    voice: env.tts.voice
+  }
+  const ttsFirst = ttsFromEndpoint(tts, '默认配音')
+  const video: VideoEndpoint = {
+    baseUrl: env.video.baseUrl,
+    apiKey: env.video.apiKey,
+    workflowId: env.video.workflowId,
+    promptStyle: 'scene-narrative'
+  }
+  const videoFirst = videoFromEndpoint(video, '默认视频')
+  const music = endpoint(env.music.baseUrl, env.music.apiKey, env.music.model, MUSIC_PRESETS)
+  const musicFirst = profileFromEndpoint(music, '默认配乐', newId('mus'))
   return {
     theme: 'dark',
     aiMode: 'real',
     debug: false,
     defaultAspectRatio: '16:9',
     autoSaveInterval: 0,
-    llm,
+    llm: asEndpoint(first),
     llms: [first],
     activeLlmId: first.id,
-    vision: endpoint(env.vision.baseUrl, env.vision.apiKey, env.vision.model, VISION_PRESETS),
-    image: endpoint(env.image.baseUrl, env.image.apiKey, env.image.model, IMAGE_PRESETS),
-    tts: {
-      ...endpoint(env.tts.baseUrl, env.tts.apiKey, env.tts.model, TTS_PRESETS),
-      voice: env.tts.voice
-    },
-    video: {
-      baseUrl: env.video.baseUrl,
-      apiKey: env.video.apiKey,
-      workflowId: env.video.workflowId,
-      promptStyle: 'scene-narrative'
-    },
-    music: endpoint(env.music.baseUrl, env.music.apiKey, env.music.model, MUSIC_PRESETS)
+    vision: asEndpoint(visionFirst),
+    visions: [visionFirst],
+    activeVisionId: visionFirst.id,
+    image: asEndpoint(imageFirst),
+    images: [imageFirst],
+    activeImageId: imageFirst.id,
+    tts: asTts(ttsFirst),
+    ttsProfiles: [ttsFirst],
+    activeTtsId: ttsFirst.id,
+    video: asVideo(videoFirst),
+    videos: [videoFirst],
+    activeVideoId: videoFirst.id,
+    music: asEndpoint(musicFirst),
+    musics: [musicFirst],
+    activeMusicId: musicFirst.id
   }
 }
 
@@ -177,7 +347,7 @@ function load(): AppSettings {
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     const savedLlm = parsed.llm
     const legacyQwenPrimary = /^qwen/i.test(savedLlm?.model ?? '')
-    const llm = legacyQwenPrimary
+    const llmSnap = legacyQwenPrimary
       ? defaults.llm
       : {
           ...defaults.llm,
@@ -188,7 +358,7 @@ function load(): AppSettings {
         }
     const savedVision = parsed.vision
     const legacyTextOnlyVision = /^(qwen3\.7|qwen-vl-)/i.test(savedVision?.model ?? '')
-    const vision = {
+    const visionSnap = {
       ...defaults.vision,
       ...savedVision,
       model: legacyTextOnlyVision ? defaults.vision.model : (savedVision?.model || defaults.vision.model),
@@ -196,47 +366,31 @@ function load(): AppSettings {
         (model) => !/^(qwen3\.7|qwen-vl-)/i.test(model)
       )
     }
-    const savedProfiles = Array.isArray(parsed.llms)
-      ? parsed.llms.filter((p): p is LlmProfile => Boolean(p && p.id && p.name))
-      : []
-    const llms = savedProfiles.length
-      ? savedProfiles.map((p) =>
-          profileFromEndpoint(
-            {
-              ...llm,
-              ...p,
-              models: uniq([...(p.models ?? []), ...(p.model ? [p.model] : [])])
-            },
-            p.name,
-            p.id
-          )
-        )
-      : [profileFromEndpoint(llm, '默认 LLM')]
-    const activeLlmId = llms.some((p) => p.id === parsed.activeLlmId)
-      ? (parsed.activeLlmId as string)
-      : llms[0].id
-    const active = llms.find((p) => p.id === activeLlmId) || llms[0]
-
-    return {
-      ...defaults,
-      ...parsed,
-      theme: 'dark',
-      aiMode: 'real',
-      llm: asEndpoint(active),
-      llms,
-      activeLlmId: active.id,
-      vision,
-      image: {
+    const llm = hydrateNamed(parsed.llms, llmSnap, '默认 LLM', parsed.activeLlmId, 'llm')
+    const vision = hydrateNamed(parsed.visions, visionSnap, '默认视觉', parsed.activeVisionId, 'vis')
+    const image = hydrateNamed(
+      parsed.images,
+      {
         ...defaults.image,
         ...parsed.image,
         models: uniq([...(parsed.image?.models ?? []), ...defaults.image.models])
       },
-      tts: {
+      '默认生图',
+      parsed.activeImageId,
+      'img'
+    )
+    const tts = hydrateTts(
+      parsed.ttsProfiles,
+      {
         ...defaults.tts,
         ...parsed.tts,
         models: uniq([...(parsed.tts?.models ?? []), ...defaults.tts.models])
       },
-      video: {
+      parsed.activeTtsId
+    )
+    const video = hydrateVideo(
+      parsed.videos,
+      {
         ...defaults.video,
         ...parsed.video,
         baseUrl: migrateVideoBaseUrl(parsed.video?.baseUrl || defaults.video.baseUrl),
@@ -245,11 +399,43 @@ function load(): AppSettings {
         promptStyle:
           parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
       },
-      music: {
+      parsed.activeVideoId
+    )
+    const music = hydrateNamed(
+      parsed.musics,
+      {
         ...defaults.music,
         ...parsed.music,
         models: uniq([...(parsed.music?.models ?? []), ...defaults.music.models])
-      }
+      },
+      '默认配乐',
+      parsed.activeMusicId,
+      'mus'
+    )
+
+    return {
+      ...defaults,
+      ...parsed,
+      theme: 'dark',
+      aiMode: 'real',
+      llm: llm.active,
+      llms: llm.list,
+      activeLlmId: llm.activeId,
+      vision: vision.active,
+      visions: vision.list,
+      activeVisionId: vision.activeId,
+      image: image.active,
+      images: image.list,
+      activeImageId: image.activeId,
+      tts: tts.active,
+      ttsProfiles: tts.list,
+      activeTtsId: tts.activeId,
+      video: video.active,
+      videos: video.list,
+      activeVideoId: video.activeId,
+      music: music.active,
+      musics: music.list,
+      activeMusicId: music.activeId
     }
   } catch {
     return defaults
@@ -271,25 +457,41 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, ...patch }
   }
 
-  function syncActive(next: LlmProfile, list?: LlmProfile[]) {
+  function syncLlm(next: LlmProfile, list?: LlmProfile[]) {
     const llms = (list ?? config.value.llms).map((p) => (p.id === next.id ? next : p))
-    config.value = {
-      ...config.value,
-      llms,
-      activeLlmId: next.id,
-      llm: asEndpoint(next)
-    }
+    config.value = { ...config.value, llms, activeLlmId: next.id, llm: asEndpoint(next) }
+  }
+
+  function syncVision(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    const visions = (list ?? config.value.visions).map((p) => (p.id === next.id ? next : p))
+    config.value = { ...config.value, visions, activeVisionId: next.id, vision: asEndpoint(next) }
+  }
+
+  function syncImage(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    const images = (list ?? config.value.images).map((p) => (p.id === next.id ? next : p))
+    config.value = { ...config.value, images, activeImageId: next.id, image: asEndpoint(next) }
+  }
+
+  function syncTts(next: TtsProfile, list?: TtsProfile[]) {
+    const ttsProfiles = (list ?? config.value.ttsProfiles).map((p) => (p.id === next.id ? next : p))
+    config.value = { ...config.value, ttsProfiles, activeTtsId: next.id, tts: asTts(next) }
+  }
+
+  function syncVideo(next: VideoProfile, list?: VideoProfile[]) {
+    const videos = (list ?? config.value.videos).map((p) => (p.id === next.id ? next : p))
+    config.value = { ...config.value, videos, activeVideoId: next.id, video: asVideo(next) }
+  }
+
+  function syncMusic(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    const musics = (list ?? config.value.musics).map((p) => (p.id === next.id ? next : p))
+    config.value = { ...config.value, musics, activeMusicId: next.id, music: asEndpoint(next) }
   }
 
   function patchLlm(patch: Partial<LlmProfile>) {
     const id = config.value.activeLlmId
     const cur =
       config.value.llms.find((p) => p.id === id) || profileFromEndpoint(config.value.llm, '默认 LLM', id)
-    syncActive({
-      ...cur,
-      ...patch,
-      models: uniq(patch.models ?? cur.models)
-    })
+    syncLlm({ ...cur, ...patch, models: uniq(patch.models ?? cur.models) })
   }
 
   function addLlm(seed: {
@@ -310,20 +512,20 @@ export const useSettingsStore = defineStore('settings', () => {
       },
       seed.name
     )
-    syncActive(profile, [...config.value.llms, profile])
+    syncLlm(profile, [...config.value.llms, profile])
+    return profile.id
   }
 
   function selectLlm(id: string) {
     const profile = config.value.llms.find((p) => p.id === id)
-    if (profile) syncActive(profile)
+    if (profile) syncLlm(profile)
   }
 
-  /** 切到某套接入，并指定其中的模型名 */
   function selectLlmModel(profileId: string, model: string) {
     const profile = config.value.llms.find((p) => p.id === profileId)
     const name = model.trim()
     if (!profile || !name) return
-    syncActive({
+    syncLlm({
       ...profile,
       model: name,
       models: uniq([...(profile.models ?? []), name, profile.model])
@@ -334,7 +536,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (config.value.llms.length <= 1) return
     const llms = config.value.llms.filter((p) => p.id !== id)
     const next = llms.find((p) => p.id === config.value.activeLlmId) || llms[0]
-    syncActive(next, llms)
+    syncLlm(next, llms)
   }
 
   function renameLlm(name: string) {
@@ -343,24 +545,288 @@ export const useSettingsStore = defineStore('settings', () => {
     patchLlm({ name: n })
   }
 
-  function patchVision(patch: Partial<ServiceEndpoint>) {
-    config.value = { ...config.value, vision: { ...config.value.vision, ...patch } }
+  function patchVision(patch: Partial<NamedEndpoint>) {
+    const id = config.value.activeVisionId
+    const cur =
+      config.value.visions.find((p) => p.id === id) ||
+      profileFromEndpoint(config.value.vision, '默认视觉', id)
+    syncVision({ ...cur, ...patch, models: uniq(patch.models ?? cur.models) })
   }
 
-  function patchImage(patch: Partial<ServiceEndpoint>) {
-    config.value = { ...config.value, image: { ...config.value.image, ...patch } }
+  function addVision(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    model: string
+    models: string[]
+    provider?: string
+  }) {
+    const profile = profileFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        model: seed.model,
+        models: seed.models,
+        provider: seed.provider
+      },
+      seed.name
+    )
+    syncVision(profile, [...config.value.visions, profile])
+    return profile.id
   }
 
-  function patchTts(patch: Partial<TtsEndpoint>) {
-    config.value = { ...config.value, tts: { ...config.value.tts, ...patch } }
+  function selectVision(id: string) {
+    const profile = config.value.visions.find((p) => p.id === id)
+    if (profile) syncVision(profile)
   }
 
-  function patchVideo(patch: Partial<VideoEndpoint>) {
-    config.value = { ...config.value, video: { ...config.value.video, ...patch } }
+  function selectVisionModel(profileId: string, model: string) {
+    const profile = config.value.visions.find((p) => p.id === profileId)
+    const name = model.trim()
+    if (!profile || !name) return
+    syncVision({
+      ...profile,
+      model: name,
+      models: uniq([...(profile.models ?? []), name, profile.model])
+    })
   }
 
-  function patchMusic(patch: Partial<ServiceEndpoint>) {
-    config.value = { ...config.value, music: { ...config.value.music, ...patch } }
+  function removeVision(id: string) {
+    if (config.value.visions.length <= 1) return
+    const visions = config.value.visions.filter((p) => p.id !== id)
+    const next = visions.find((p) => p.id === config.value.activeVisionId) || visions[0]
+    syncVision(next, visions)
+  }
+
+  function renameVision(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchVision({ name: n })
+  }
+
+  function patchImage(patch: Partial<NamedEndpoint>) {
+    const id = config.value.activeImageId
+    const cur =
+      config.value.images.find((p) => p.id === id) ||
+      profileFromEndpoint(config.value.image, '默认生图', id)
+    syncImage({ ...cur, ...patch, models: uniq(patch.models ?? cur.models) })
+  }
+
+  function addImage(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    model: string
+    models: string[]
+    provider?: string
+  }) {
+    const profile = profileFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        model: seed.model,
+        models: seed.models,
+        provider: seed.provider
+      },
+      seed.name
+    )
+    syncImage(profile, [...config.value.images, profile])
+    return profile.id
+  }
+
+  function selectImage(id: string) {
+    const profile = config.value.images.find((p) => p.id === id)
+    if (profile) syncImage(profile)
+  }
+
+  function selectImageModel(profileId: string, model: string) {
+    const profile = config.value.images.find((p) => p.id === profileId)
+    const name = model.trim()
+    if (!profile || !name) return
+    syncImage({
+      ...profile,
+      model: name,
+      models: uniq([...(profile.models ?? []), name, profile.model])
+    })
+  }
+
+  function removeImage(id: string) {
+    if (config.value.images.length <= 1) return
+    const images = config.value.images.filter((p) => p.id !== id)
+    const next = images.find((p) => p.id === config.value.activeImageId) || images[0]
+    syncImage(next, images)
+  }
+
+  function renameImage(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchImage({ name: n })
+  }
+
+  function patchTts(patch: Partial<TtsProfile>) {
+    const id = config.value.activeTtsId
+    const cur =
+      config.value.ttsProfiles.find((p) => p.id === id) || ttsFromEndpoint(config.value.tts, '默认配音', id)
+    syncTts({ ...cur, ...patch, models: uniq(patch.models ?? cur.models) })
+  }
+
+  function addTts(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    model: string
+    models: string[]
+    provider?: string
+    voice?: string
+  }) {
+    const profile = ttsFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        model: seed.model,
+        models: seed.models,
+        provider: seed.provider,
+        voice: seed.voice || config.value.tts.voice || 'longanhuan_v3.6'
+      },
+      seed.name
+    )
+    syncTts(profile, [...config.value.ttsProfiles, profile])
+    return profile.id
+  }
+
+  function selectTts(id: string) {
+    const profile = config.value.ttsProfiles.find((p) => p.id === id)
+    if (profile) syncTts(profile)
+  }
+
+  function selectTtsModel(profileId: string, model: string) {
+    const profile = config.value.ttsProfiles.find((p) => p.id === profileId)
+    const name = model.trim()
+    if (!profile || !name) return
+    syncTts({
+      ...profile,
+      model: name,
+      models: uniq([...(profile.models ?? []), name, profile.model])
+    })
+  }
+
+  function removeTts(id: string) {
+    if (config.value.ttsProfiles.length <= 1) return
+    const ttsProfiles = config.value.ttsProfiles.filter((p) => p.id !== id)
+    const next = ttsProfiles.find((p) => p.id === config.value.activeTtsId) || ttsProfiles[0]
+    syncTts(next, ttsProfiles)
+  }
+
+  function renameTts(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchTts({ name: n })
+  }
+
+  function patchVideo(patch: Partial<VideoProfile>) {
+    const id = config.value.activeVideoId
+    const cur =
+      config.value.videos.find((p) => p.id === id) || videoFromEndpoint(config.value.video, '默认视频', id)
+    syncVideo({ ...cur, ...patch })
+  }
+
+  function addVideo(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    workflowId: string
+    promptStyle?: VideoPromptStyle
+    provider?: string
+  }) {
+    const profile = videoFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        workflowId: seed.workflowId,
+        promptStyle: seed.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
+        provider: seed.provider
+      },
+      seed.name
+    )
+    syncVideo(profile, [...config.value.videos, profile])
+    return profile.id
+  }
+
+  function selectVideo(id: string) {
+    const profile = config.value.videos.find((p) => p.id === id)
+    if (profile) syncVideo(profile)
+  }
+
+  function removeVideo(id: string) {
+    if (config.value.videos.length <= 1) return
+    const videos = config.value.videos.filter((p) => p.id !== id)
+    const next = videos.find((p) => p.id === config.value.activeVideoId) || videos[0]
+    syncVideo(next, videos)
+  }
+
+  function renameVideo(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchVideo({ name: n })
+  }
+
+  function patchMusic(patch: Partial<NamedEndpoint>) {
+    const id = config.value.activeMusicId
+    const cur =
+      config.value.musics.find((p) => p.id === id) ||
+      profileFromEndpoint(config.value.music, '默认配乐', id)
+    syncMusic({ ...cur, ...patch, models: uniq(patch.models ?? cur.models) })
+  }
+
+  function addMusic(seed: {
+    name: string
+    baseUrl: string
+    apiKey?: string
+    model: string
+    models: string[]
+    provider?: string
+  }) {
+    const profile = profileFromEndpoint(
+      {
+        baseUrl: seed.baseUrl,
+        apiKey: seed.apiKey ?? '',
+        model: seed.model,
+        models: seed.models,
+        provider: seed.provider
+      },
+      seed.name
+    )
+    syncMusic(profile, [...config.value.musics, profile])
+    return profile.id
+  }
+
+  function selectMusic(id: string) {
+    const profile = config.value.musics.find((p) => p.id === id)
+    if (profile) syncMusic(profile)
+  }
+
+  function selectMusicModel(profileId: string, model: string) {
+    const profile = config.value.musics.find((p) => p.id === profileId)
+    const name = model.trim()
+    if (!profile || !name) return
+    syncMusic({
+      ...profile,
+      model: name,
+      models: uniq([...(profile.models ?? []), name, profile.model])
+    })
+  }
+
+  function removeMusic(id: string) {
+    if (config.value.musics.length <= 1) return
+    const musics = config.value.musics.filter((p) => p.id !== id)
+    const next = musics.find((p) => p.id === config.value.activeMusicId) || musics[0]
+    syncMusic(next, musics)
+  }
+
+  function renameMusic(name: string) {
+    const n = name.trim()
+    if (!n) return
+    patchMusic({ name: n })
   }
 
   function addModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
@@ -370,29 +836,49 @@ export const useSettingsStore = defineStore('settings', () => {
       patchLlm({ models: uniq([...config.value.llm.models, n]), model: n })
       return
     }
-    const cur = config.value[kind]
-    const models = uniq([...cur.models, n])
-    config.value = {
-      ...config.value,
-      [kind]: { ...cur, models, model: n }
+    if (kind === 'vision') {
+      patchVision({ models: uniq([...config.value.vision.models, n]), model: n })
+      return
     }
+    if (kind === 'image') {
+      patchImage({ models: uniq([...config.value.image.models, n]), model: n })
+      return
+    }
+    if (kind === 'tts') {
+      patchTts({ models: uniq([...config.value.tts.models, n]), model: n })
+      return
+    }
+    patchMusic({ models: uniq([...config.value.music.models, n]), model: n })
   }
 
   function removeModel(kind: 'llm' | 'vision' | 'image' | 'tts' | 'music', name: string) {
+    const drop = (models: string[], current: string) => {
+      const next = models.filter((m) => m !== name)
+      if (!next.length) return null
+      return { models: next, model: current === name ? next[0] : current }
+    }
     if (kind === 'llm') {
-      const models = config.value.llm.models.filter((m) => m !== name)
-      if (!models.length) return
-      patchLlm({
-        models,
-        model: config.value.llm.model === name ? models[0] : config.value.llm.model
-      })
+      const next = drop(config.value.llm.models, config.value.llm.model)
+      if (next) patchLlm(next)
       return
     }
-    const cur = config.value[kind]
-    const models = cur.models.filter((m) => m !== name)
-    if (!models.length) return
-    const model = cur.model === name ? models[0] : cur.model
-    config.value = { ...config.value, [kind]: { ...cur, models, model } }
+    if (kind === 'vision') {
+      const next = drop(config.value.vision.models, config.value.vision.model)
+      if (next) patchVision(next)
+      return
+    }
+    if (kind === 'image') {
+      const next = drop(config.value.image.models, config.value.image.model)
+      if (next) patchImage(next)
+      return
+    }
+    if (kind === 'tts') {
+      const next = drop(config.value.tts.models, config.value.tts.model)
+      if (next) patchTts(next)
+      return
+    }
+    const next = drop(config.value.music.models, config.value.music.model)
+    if (next) patchMusic(next)
   }
 
   return {
@@ -405,10 +891,34 @@ export const useSettingsStore = defineStore('settings', () => {
     removeLlm,
     renameLlm,
     patchVision,
+    addVision,
+    selectVision,
+    selectVisionModel,
+    removeVision,
+    renameVision,
     patchImage,
+    addImage,
+    selectImage,
+    selectImageModel,
+    removeImage,
+    renameImage,
     patchTts,
+    addTts,
+    selectTts,
+    selectTtsModel,
+    removeTts,
+    renameTts,
     patchVideo,
+    addVideo,
+    selectVideo,
+    removeVideo,
+    renameVideo,
     patchMusic,
+    addMusic,
+    selectMusic,
+    selectMusicModel,
+    removeMusic,
+    renameMusic,
     addModel,
     removeModel
   }

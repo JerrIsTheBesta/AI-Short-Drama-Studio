@@ -64,19 +64,19 @@ function flattenText(value: unknown): string {
   return String(value)
 }
 
-/** 推理模型常把正文放进 reasoning_content，content 会是空字符串。 */
+function hasJsonObject(text: string) {
+  return /[{｛]/.test(text)
+}
+
+/** 推理模型常把正文放进 reasoning_content；必须优先用带 JSON 的字段，不能把思考过程当成答案。 */
 function pickMessageContent(message: any): string {
-  const candidates = [
-    message?.content,
-    message?.reasoning_content,
-    message?.reasoning,
-    message?.reasoningContent
-  ]
-  for (const item of candidates) {
-    const text = flattenText(item).trim()
-    if (text) return flattenText(item)
-  }
-  return ''
+  const content = flattenText(message?.content).trim()
+  const reasoning = flattenText(
+    message?.reasoning_content ?? message?.reasoning ?? message?.reasoningContent
+  ).trim()
+  if (hasJsonObject(content)) return content
+  if (hasJsonObject(reasoning)) return reasoning
+  return content || reasoning
 }
 
 function hasImageParts(messages: LLMMessage[]): boolean {
@@ -105,7 +105,7 @@ export async function blobToChatImageUrl(
   return canvas.toDataURL('image/jpeg', quality)
 }
 
-/** LLM 通用调用（APIYI OpenAI 兼容 /chat/completions） */
+/** LLM 通用调用（OpenAI 兼容 /chat/completions） */
 export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   if (getAIMode() === 'mock') {
     return mockLLM(req)
@@ -134,7 +134,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     body.response_format = { type: 'json_object' }
   }
 
-  const post = async (payload: Record<string, unknown>) => {
+  const post = async (payload: Record<string, unknown>, signal = control.signal) => {
     const resp = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -142,7 +142,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
         Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify(payload),
-      signal: control.signal
+      signal
     })
     const errText = resp.ok ? '' : await resp.text()
     return { resp, errText }
@@ -178,6 +178,32 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       if (!resp.ok) throw new Error(`[LLM] ${resp.status} ${errText}`)
       data = await resp.json()
       content = pickMessageContent(data.choices?.[0]?.message)
+    }
+    if (req.jsonMode && !hasJsonObject(content)) {
+      const followControl = controlledSignal(req.signal, Math.min(timeoutMs, 240_000))
+      try {
+        const follow = {
+          ...body,
+          temperature: 0,
+          max_tokens: Math.max(Number(body.max_tokens) || 0, 4000),
+          messages: [
+            ...req.messages,
+            {
+              role: 'user',
+              content:
+                '上一次只写了思考过程，没有 JSON。现在从第一个字符开始只输出一个 JSON 对象，禁止解释、禁止思考过程。必须以 { 开头、以 } 结尾。'
+            }
+          ]
+        }
+        ;({ resp, errText } = await post(follow, followControl.signal))
+        if (resp.ok) {
+          data = await resp.json()
+          const next = pickMessageContent(data.choices?.[0]?.message)
+          if (next.trim()) content = next
+        }
+      } finally {
+        followControl.cleanup()
+      }
     }
     return {
       content,

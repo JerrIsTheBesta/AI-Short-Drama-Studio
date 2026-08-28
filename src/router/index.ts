@@ -15,6 +15,12 @@ const routes: RouteRecordRaw[] = [
     meta: { step: null, label: '画布' }
   },
   {
+    path: '/smart-speech',
+    name: 'smart-speech',
+    component: () => import('@/views/SmartSpeechView.vue'),
+    meta: { step: null, label: '智能口播' }
+  },
+  {
     path: '/script',
     name: 'script',
     component: () => import('@/views/ScriptView.vue'),
@@ -63,7 +69,7 @@ const routes: RouteRecordRaw[] = [
     meta: { step: null, label: '📦 资源库' }
   },
   {
-    path: '/settings',
+    path: '/settings/:section?',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),
     meta: { step: null, label: '设置' }

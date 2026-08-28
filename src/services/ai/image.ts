@@ -1,12 +1,11 @@
 /**
- * AI 图片生成服务（APIYI Seedream）
+ * AI 图片生成（OpenAI 兼容 Images API）
  *
- * Seedream 统一生成-编辑架构：
- *   POST /v1/images/generations
+ * 统一：
+ *   POST /images/generations
  *   - 文生图：不传 image
  *   - 单图/多图编辑：传 image[]（URL 或 data:image/...;base64,...）+ sequential_image_generation:"disabled"
  *
- * 默认模型：seedream-4-5-251128（4K + 强文字渲染）
  * 响应优先 b64_json（纯 base64，无 data: 前缀），兼容 url
  */
 
@@ -29,7 +28,7 @@ export interface ImageGenInput {
   referenceImages?: Blob[]
   /** 每张参考图的语义（会写进 prompt，告诉模型第几张是什么） */
   referenceLabels?: string[]
-  /** 覆盖设置页作图模型，例如视频复刻用 gpt-image-2 */
+  /** 覆盖设置页作图模型，例如视频复刻用 gpt-image-1 */
   model?: string
   signal?: AbortSignal
 }
@@ -66,7 +65,7 @@ async function imageResponseToBlob(
     throw new Error('图片 API 响应无 data[0]')
   }
 
-  // 情况 1：b64_json（Seedream / apiyi 推荐）
+  // 情况 1：b64_json（Seedream / 兼容接口常用）
   if (item.b64_json) {
     const raw = String(item.b64_json).replace(/\s/g, '')
     const bytes = atob(raw)

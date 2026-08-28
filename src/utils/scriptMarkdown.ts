@@ -372,3 +372,38 @@ export function applyProjectPlayMarkdown(p: Project, markdown: string): void {
     }
   }
 }
+
+function cleanMarkdownTitle(value: string): string {
+  return value
+    .replace(/^#+\s*/, '')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 清理外部 Markdown 的 BOM 和换行，便于安全导入。 */
+export function normalizeImportedMarkdown(text: string): string {
+  return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim()
+}
+
+/** 优先从一级标题推断剧本名，否则使用导入文件名。 */
+export function inferMarkdownTitle(markdown: string, filename = ''): string {
+  const normalized = normalizeImportedMarkdown(markdown)
+  const heading = normalized.match(/^\s*#\s+(.+?)\s*$/m)?.[1]
+  if (heading) return cleanMarkdownTitle(heading).slice(0, 80)
+  const baseName = filename.replace(/\.(?:md|markdown|txt)$/i, '')
+  return cleanMarkdownTitle(baseName).slice(0, 80) || '未命名剧本'
+}
+
+/** 导出单份剧本 Markdown；正文已有一级标题时不重复添加。 */
+export function buildScriptMarkdown(topic: string, content: string): string {
+  const normalized = normalizeImportedMarkdown(content)
+  if (/^\s*#\s+/m.test(normalized)) return `${normalized}\n`
+  const title = cleanMarkdownTitle(topic) || '未命名剧本'
+  return `# ${title}\n\n${normalized}\n`
+}
+
+export function scriptExportFilename(topic: string): string {
+  const title = cleanMarkdownTitle(topic) || '未命名剧本'
+  return `${title.slice(0, 60)}.md`
+}

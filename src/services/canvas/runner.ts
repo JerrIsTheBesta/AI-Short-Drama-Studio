@@ -357,7 +357,10 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
     blobs.push(b)
     labels.push(bundle.labels[i])
   }
-  const prompt = shotBoardPrompt(shot, style, look)
+  const filmChapter =
+    project.current.pipelineMode !== 'remake' &&
+    project.current.script?.workflowMode === 'film-chapter'
+  const prompt = shotBoardPrompt(shot, style, look, { filmChapter })
   onProgress?.(blobs.length ? `画故事看板（${blobs.length} 张参考）...` : '画故事看板...')
   const size = imageGenSize('shot')
   const result = await generateImage(

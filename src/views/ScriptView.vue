@@ -5,6 +5,13 @@ import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
+import { desktop, isDesktop } from '@/services/desktop'
+import {
+  buildScriptMarkdown,
+  inferMarkdownTitle,
+  normalizeImportedMarkdown,
+  scriptExportFilename
+} from '@/utils/scriptMarkdown'
 import type { Script, VisualStyle, AspectRatio } from '@/types'
 
 const MAX_PRODUCT_IMAGES = 5
@@ -22,6 +29,7 @@ const shotDuration = ref(5)
 const keywords = ref('')
 const productIds = ref<string[]>([])
 const productUrls = ref<Record<string, string>>({})
+const workflowMode = ref<Script['workflowMode']>()
 
 const presets = [
   {
@@ -79,7 +87,8 @@ onMounted(async () => {
     style.value = s.style
     aspectRatio.value = s.aspectRatio
     shotDuration.value = s.shotDuration
-    keywords.value = s.keywords.join(', ')
+    keywords.value = Array.isArray(s.keywords) ? s.keywords.join(', ') : ''
+    workflowMode.value = s.workflowMode
     productIds.value = [...(s.referenceAssetIds ?? [])].slice(0, MAX_PRODUCT_IMAGES)
     for (const id of productIds.value) {
       const url = await assets.getUrl(id)
@@ -123,7 +132,13 @@ async function saveAndNext() {
     style: style.value,
     aspectRatio: aspectRatio.value,
     shotDuration: shotDuration.value,
+    workflowMode: workflowMode.value,
     aesthetic: prev?.aesthetic,
+    h3Aesthetic: prev?.h3Aesthetic,
+    styleBrief: prev?.styleBrief,
+    colorPalette: prev?.colorPalette,
+    lightingNote: prev?.lightingNote,
+    playReady: workflowMode.value === 'film-chapter' ? true : prev?.playReady,
     referenceAssetIds: productIds.value,
     createdAt: prev?.createdAt ?? Date.now()
   }
@@ -133,6 +148,66 @@ async function saveAndNext() {
   await project.save()
   toast.success('文案已保存')
   router.push('/storyboard')
+}
+
+function applyImportedMarkdown(text: string, filename: string) {
+  const normalized = normalizeImportedMarkdown(text)
+  if (!normalized) {
+    toast.warn('剧本文件是空的')
+    return
+  }
+  content.value = normalized
+  topic.value = inferMarkdownTitle(normalized, filename)
+  workflowMode.value = 'film-chapter'
+  style.value = 'cinematic'
+  aspectRatio.value = '16:9'
+  toast.success('已导入 Markdown 剧本，并启用原创电影章节流程')
+}
+
+async function importMarkdown() {
+  if (project.current?.pipelineMode === 'remake') {
+    toast.warn('视频复刻项目不导入原创电影剧本，请新建普通项目')
+    return
+  }
+  if (isDesktop()) {
+    const paths = await desktop().pickFiles([
+      { name: '剧本', extensions: ['md', 'markdown', 'txt'] }
+    ])
+    const path = paths[0]
+    if (!path) return
+    applyImportedMarkdown(await desktop().readText(path), path.split(/[\\/]/).pop() || '')
+    return
+  }
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.md,.markdown,.txt,text/markdown,text/plain'
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    applyImportedMarkdown(await file.text(), file.name)
+  }
+  input.click()
+}
+
+async function exportMarkdown() {
+  const markdown = buildScriptMarkdown(topic.value, content.value)
+  const filename = scriptExportFilename(topic.value)
+  if (isDesktop()) {
+    const path = await desktop().saveTextFile({
+      defaultName: filename,
+      text: markdown,
+      filters: [{ name: 'Markdown 剧本', extensions: ['md'] }]
+    })
+    if (path) toast.success(`剧本已导出：${path}`)
+    return
+  }
+  const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+  toast.success('剧本已导出')
 }
 
 async function generateAndNext() {
@@ -197,6 +272,12 @@ async function removeProductImage(id: string) {
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/')">← 返回</GradientButton>
+        <GradientButton
+          v-if="project.current?.pipelineMode !== 'remake'"
+          type="ghost"
+          @click="importMarkdown"
+        >导入 Markdown</GradientButton>
+        <GradientButton type="ghost" @click="exportMarkdown">导出剧本</GradientButton>
         <GradientButton icon="✨" @click="generateAndNext">保存并生成分镜</GradientButton>
       </div>
     </header>
@@ -253,6 +334,22 @@ async function removeProductImage(id: string) {
               rows="12"
               placeholder="把视频要讲的内容写在这里。可以分段落，每一段会对应一个或多个分镜..."
             />
+          </label>
+
+          <label
+            v-if="project.current?.pipelineMode !== 'remake'"
+            class="workflow-option"
+          >
+            <input
+              v-model="workflowMode"
+              type="checkbox"
+              true-value="film-chapter"
+              :false-value="undefined"
+            />
+            <span>
+              <b>原创电影章节流程</b>
+              <small>角色定妆 → 场景锚点 → 彩色四/八宫格故事板 → H3 分镜提示词 → 视频质检</small>
+            </span>
           </label>
 
           <label class="field">
@@ -374,6 +471,28 @@ async function removeProductImage(id: string) {
   display: flex;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+.workflow-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: var(--space-3);
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+  cursor: pointer;
+}
+.workflow-option input {
+  margin-top: 3px;
+}
+.workflow-option span {
+  display: grid;
+  gap: 3px;
+}
+.workflow-option small {
+  color: var(--color-text-3);
+  line-height: 1.5;
 }
 
 .layout {

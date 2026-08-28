@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useSettingsStore } from '@/stores'
+import { llmChoiceKey, namedModelGroups, parseLlmChoiceKey, useSettingsStore } from '@/stores'
 
 withDefaults(
   defineProps<{
@@ -11,17 +11,17 @@ withDefaults(
 
 const settings = useSettingsStore()
 
-const models = computed(() => {
-  const cfg = settings.config.image
-  return [...new Set([cfg.model, ...(cfg.models ?? [])].map((m) => m.trim()).filter(Boolean))]
-})
+const groups = computed(() => namedModelGroups(settings.config.images ?? []))
 
 const model = computed({
   get() {
-    return settings.config.image.model
+    const id = settings.config.activeImageId
+    const name = settings.config.image.model
+    return id && name ? llmChoiceKey(id, name) : ''
   },
   set(v: string) {
-    if (v) settings.patchImage({ model: v })
+    const parsed = parseLlmChoiceKey(v)
+    if (parsed) settings.selectImageModel(parsed.profileId, parsed.model)
   }
 })
 </script>
@@ -30,8 +30,10 @@ const model = computed({
   <label class="img-model">
     <span>{{ label }}</span>
     <select v-model="model">
-      <option v-if="!models.length" value="">请先在设置里添加出图模型</option>
-      <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+      <option v-if="!groups.some((g) => g.models.length)" value="">请先在设置里添加出图模型</option>
+      <optgroup v-for="g in groups" :key="g.id" :label="g.name">
+        <option v-for="m in g.models" :key="g.id + m" :value="llmChoiceKey(g.id, m)">{{ m }}</option>
+      </optgroup>
     </select>
   </label>
 </template>
@@ -56,7 +58,7 @@ const model = computed({
   height: 28px;
   padding: 0 26px 0 8px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 4px;
   background-color: var(--color-bg-2);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;

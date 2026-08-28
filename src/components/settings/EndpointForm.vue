@@ -95,7 +95,7 @@ function onAdd() {
 
     <label>这个接入下的模型</label>
     <p class="hint">
-      同一套地址和 Key 可以挂很多个模型名。聚合平台把各家模型名填进来；DeepSeek 官方也可以同时留 chat、reasoner。点一项设为当前使用。
+      同一套地址和 Key 可以挂多个模型名。点一项设为当前使用。
     </p>
     <div class="chips">
       <button
@@ -173,7 +173,7 @@ select {
   width: 100%;
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 4px;
   color: var(--color-text-1);
   padding: 8px 10px;
   font: inherit;
@@ -192,7 +192,7 @@ select {
   margin: 0;
   padding: 4px 8px;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: 4px;
   background: var(--color-bg-2);
   color: var(--color-text-2);
   font-size: 11px;
@@ -240,7 +240,7 @@ select {
 .mini {
   font-size: 12px;
   padding: 0 12px;
-  border-radius: 8px;
+  border-radius: 4px;
   color: var(--color-text-2);
   background: var(--color-bg-3);
   white-space: nowrap;

@@ -8,8 +8,8 @@
   "scripts": {
     "dev": "vite",
     "web": "vite --mode web",
-    "build": "vue-tsc --noEmit && vite build",
-    "electron:build": "vue-tsc --noEmit && vite build && node scripts/clean-unpacked.mjs && electron-builder",
+    "build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs",
+    "electron:build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/clean-unpacked.mjs && electron-builder",
     "preview": "vite preview --host",
     "type-check": "vue-tsc --noEmit"
   },
@@ -22,7 +22,10 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!**/.env",
+      "!**/.env.*",
+      "!**/*.local"
     ],
     "extraResources": [
       {

@@ -62,6 +62,9 @@ function defaultSettings(): ProjectSettings {
     keepAmbientAudio: true,
     captionBg: false,
     burnCaptions: true,
+    captionHighlight: false,
+    captionHighlightColor: '#ffd84d',
+    captionHighlightScale: 1.2,
     ttsVoice: 'longanhuan_v3.6'
   }
 }

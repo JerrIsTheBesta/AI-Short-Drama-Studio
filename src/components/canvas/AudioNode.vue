@@ -7,6 +7,7 @@ import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
+import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import type { ShotAudioMode } from '@/types'
 
@@ -182,7 +183,8 @@ function openDetail() {
           @input="setVoiceover(($event.target as HTMLTextAreaElement).value)"
         />
         <div class="panel-foot">
-          <span>{{ canTts ? '后期独立配音' : '人声走 H3 视频' }}</span>
+          <TtsModelSelect v-if="canTts" />
+          <span v-else>{{ canTts ? '后期独立配音' : '人声走 H3 视频' }}</span>
           <button type="button" class="ghost" @click="openDetail">详情</button>
           <button
             v-if="canTts"

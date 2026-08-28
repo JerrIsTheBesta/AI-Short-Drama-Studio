@@ -13,6 +13,11 @@ export type DesktopAPI = {
   remove: (filePath: string) => Promise<void>
   join: (...parts: string[]) => Promise<string>
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
+  saveTextFile: (opts: {
+    defaultName: string
+    text: string
+    filters?: { name: string; extensions: string[] }[]
+  }) => Promise<string | null>
   pickDirectory: () => Promise<string | null>
   openPath: (filePath: string) => Promise<string>
   autodlFetch: (opts: {
@@ -51,6 +56,7 @@ const api: DesktopAPI = {
   remove: (filePath) => ipcRenderer.invoke('desktop:remove', filePath),
   join: (...parts) => ipcRenderer.invoke('desktop:join', parts),
   pickFiles: (filters) => ipcRenderer.invoke('desktop:pickFiles', filters),
+  saveTextFile: (opts) => ipcRenderer.invoke('desktop:saveTextFile', opts),
   pickDirectory: () => ipcRenderer.invoke('desktop:pickDirectory'),
   openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath),
   autodlFetch: (opts) => ipcRenderer.invoke('desktop:autodlFetch', opts),

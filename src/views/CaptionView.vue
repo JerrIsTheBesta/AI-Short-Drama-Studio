@@ -2,11 +2,12 @@
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
-import { buildCuesFromClips, parseSRT, toSRT } from '@/services/ffmpeg'
+import { buildCuesFromClips, parseSRT, renderCaptionPng, toSRT } from '@/services/ffmpeg'
 import { generateSpeech, TTS_VOICES } from '@/services/ai'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
+import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import type { CaptionStyle, Shot, ShotAudioMode } from '@/types'
 import { ensureTimelineFromShots } from '@/utils/timeline'
 import { effectiveShotAudioMode } from '@/utils/shot'
@@ -38,6 +39,27 @@ const style = computed<CaptionStyle>(() => project.current?.settings.captionStyl
 const burnCaptions = computed({
   get: () => project.current?.settings.burnCaptions !== false,
   set: (v: boolean) => project.setSettings({ burnCaptions: v })
+})
+const captionHighlight = computed({
+  get: () => project.current?.settings.captionHighlight === true,
+  set: (v: boolean) => {
+    project.setSettings({ captionHighlight: v })
+    nextTick(() => drawPreview())
+  }
+})
+const highlightColor = computed({
+  get: () => project.current?.settings.captionHighlightColor || '#ffd84d',
+  set: (v: string) => {
+    project.setSettings({ captionHighlightColor: v })
+    nextTick(() => drawPreview())
+  }
+})
+const highlightScale = computed({
+  get: () => project.current?.settings.captionHighlightScale ?? 1.2,
+  set: (v: number) => {
+    project.setSettings({ captionHighlightScale: v })
+    nextTick(() => drawPreview())
+  }
 })
 const ttsVoice = computed({
   get: () => {
@@ -282,12 +304,15 @@ function updateStyle(patch: Partial<CaptionStyle>) {
   project.setSettings({
     captionStyle: { ...project.current.settings.captionStyle, ...patch }
   })
+  nextTick(() => drawPreview())
 }
 
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
+let previewSequence = 0
 
-function drawPreview() {
+async function drawPreview() {
   if (!previewCanvas.value) return
+  const sequence = ++previewSequence
   const canvas = previewCanvas.value
   const ctx = canvas.getContext('2d')!
   const w = canvas.width
@@ -302,23 +327,22 @@ function drawPreview() {
     lines.value.find((l) => l.text.trim())?.text ||
     srtText.value.split('\n').find((l) => l && !/^\d+$/.test(l) && !l.includes('-->')) ||
     '字幕预览'
-  const fontSize = Math.round(h * style.value.fontSizeRatio)
-  ctx.font = `${style.value.bold ? 'bold ' : ''}${fontSize}px sans-serif`
-  ctx.textAlign = 'center'
-
-  if (project.current?.settings.captionBg) {
-    const textW = ctx.measureText(text).width
-    ctx.fillStyle = `rgba(0,0,0,${style.value.bgOpacity})`
-    ctx.fillRect((w - textW) / 2 - 12, h - fontSize - 30, textW + 24, fontSize + 12)
-  }
-
-  if (style.value.strokeWidth > 0) {
-    ctx.lineWidth = style.value.strokeWidth
-    ctx.strokeStyle = style.value.strokeColor
-    ctx.strokeText(text, w / 2, h - 30)
-  }
-  ctx.fillStyle = style.value.color
-  ctx.fillText(text, w / 2, h - 30)
+  const overlay = await renderCaptionPng(
+    text,
+    style.value,
+    w,
+    h,
+    !!project.current?.settings.captionBg,
+    {
+      enabled: captionHighlight.value,
+      color: highlightColor.value,
+      scale: highlightScale.value
+    }
+  )
+  if (sequence !== previewSequence || overlay.size === 0) return
+  const bitmap = await createImageBitmap(overlay)
+  if (sequence === previewSequence) ctx.drawImage(bitmap, 0, 0, w, h)
+  bitmap.close()
 }
 
 function next() {
@@ -342,6 +366,9 @@ function next() {
         <p>按每段台词配音，并调整字幕样式。导出时人声叠到对应片段上。</p>
       </div>
       <div class="head-actions">
+        <label class="voice-pick">
+          <TtsModelSelect />
+        </label>
         <label class="voice-pick">
           <span>音色</span>
           <select v-model="ttsVoice" class="input" style="width: auto; min-width: 160px;">
@@ -431,6 +458,10 @@ function next() {
                 <input v-model="burnCaptions" type="checkbox" />
                 <span>烧录到视频</span>
               </label>
+              <label class="check">
+                <input v-model="captionHighlight" type="checkbox" />
+                <span>自动划重点</span>
+              </label>
               <button class="mini-btn" @click="showSrt = !showSrt">{{ showSrt ? '收起' : '展开编辑' }}</button>
               <button class="mini-btn" @click="importSRT">导入</button>
               <button class="mini-btn" @click="exportSRT">导出</button>
@@ -511,6 +542,33 @@ function next() {
               @change="updateStyle({ color: ($event.target as HTMLInputElement).value })"
               class="input small"
             />
+          </label>
+
+          <label class="field row-field">
+            <span>重点词</span>
+            <input v-model="highlightColor" type="color" class="color" :disabled="!captionHighlight" />
+            <input
+              v-model="highlightColor"
+              type="text"
+              class="input small"
+              :disabled="!captionHighlight"
+            />
+          </label>
+
+          <label class="field">
+            <span>重点词放大</span>
+            <div class="row">
+              <input
+                v-model.number="highlightScale"
+                type="range"
+                min="1.05"
+                max="1.5"
+                step="0.05"
+                class="range"
+                :disabled="!captionHighlight"
+              />
+              <span class="num-text">{{ Math.round(highlightScale * 100) }}%</span>
+            </div>
           </label>
 
           <label class="field">

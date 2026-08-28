@@ -11,6 +11,7 @@ import storyboardPanelRaw from './storyboard-panel.md?raw'
 import shotVideoRaw from './shot-video.md?raw'
 import storyboardRaw from './storyboard-director.md?raw'
 import h3PromptRaw from './h3-prompt-writing.md?raw'
+import filmChapterRaw from './film-chapter-production.md?raw'
 
 export interface Skill {
   id: string
@@ -22,6 +23,8 @@ export interface Skill {
 
 export interface SkillSelectContext {
   userText: string
+  pipelineMode?: string
+  workflowMode?: string
   hasShots: boolean
   missingSheets: boolean
   missingPlates: boolean
@@ -74,6 +77,7 @@ function toSkill(raw: string): Skill {
 }
 
 export const ALL_SKILLS: Skill[] = [
+  toSkill(filmChapterRaw),
   toSkill(pipelineRaw),
   toSkill(storyboardRaw),
   toSkill(characterRaw),
@@ -104,6 +108,7 @@ function triggeredByText(skill: Skill, text: string): boolean {
  */
 export function selectSkills(ctx: SkillSelectContext): Skill[] {
   const text = ctx.userText
+  const filmChapter = ctx.pipelineMode !== 'remake' && ctx.workflowMode === 'film-chapter'
   const picked = new Map<string, Skill>()
   const add = (id: string) => {
     const s = BY_ID.get(id)
@@ -111,8 +116,11 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   }
 
   for (const skill of ALL_SKILLS) {
+    if (skill.id === 'film-chapter-production' && ctx.pipelineMode === 'remake') continue
     if (triggeredByText(skill, text)) add(skill.id)
   }
+
+  if (filmChapter) add('film-chapter-production')
 
   if (/拆分镜|拆镜|故事板|出分镜|生成分镜|续写|接着写/.test(text)) {
     add('storyboard-director')
@@ -122,13 +130,13 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   ) {
     add('character-consistency')
   }
-  if (/故事看板|看板图|线稿/.test(text)) {
+  if (!filmChapter && /故事看板|看板图|线稿/.test(text)) {
     add('storyboard-panel')
     add('character-consistency')
   }
   if (/配图|出图|关键帧|画面|第.+镜/.test(text)) {
     add('shot-image')
-    add('storyboard-panel')
+    if (!filmChapter) add('storyboard-panel')
     add('character-consistency')
   }
   if (/视频|图生视频|运镜|Comfy|H3|配音/.test(text)) {
@@ -139,10 +147,10 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
     add('qa-verify')
   }
   if (/全部做完|全部生成|都生成|全做|一口气|整条流水线|从头到尾|缺的都补|全流程/.test(text)) {
-    add('pipeline-batch')
+    if (!filmChapter) add('pipeline-batch')
     if (!ctx.hasShots) add('storyboard-director')
     add('character-consistency')
-    add('storyboard-panel')
+    if (!filmChapter) add('storyboard-panel')
     add('shot-image')
     add('shot-video')
     add('h3-prompt-writing')

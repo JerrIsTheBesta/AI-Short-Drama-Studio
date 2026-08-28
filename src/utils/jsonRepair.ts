@@ -33,6 +33,8 @@ export function stripModelWrappers(content: string): string {
     .replace(/<analysis>[\s\S]*?<\/analysis>/gi, '')
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/g, '')
+    .replace(/｛/g, '{')
+    .replace(/｝/g, '}')
     .trim()
 }
 

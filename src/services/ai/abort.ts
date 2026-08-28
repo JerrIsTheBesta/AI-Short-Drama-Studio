@@ -1,5 +1,5 @@
 /** 写完整剧本 / 提炼节点：长 JSON 很容易超过 2 分钟 */
-export const PLAY_LLM_TIMEOUT_MS = 360_000
+export const PLAY_LLM_TIMEOUT_MS = 480_000
 
 export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException('任务已取消', 'AbortError')

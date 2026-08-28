@@ -1,6 +1,6 @@
 /**
- * 设置页常用接入方式。都按 OpenAI 兼容 /chat/completions 来填，
- * 选好后自动带上 Base URL 和常用模型名，用户只需填 Key。
+ * 设置页内置接入：只放大厂官方。中转 / 聚合请用「自定义」。
+ * LLM / 视觉按 OpenAI 兼容 /chat/completions 填。
  */
 
 export interface ProviderPreset {
@@ -30,8 +30,8 @@ export const CUSTOM_PROVIDER: ProviderPreset = {
 export const LLM_PROVIDERS: ProviderPreset[] = [
   {
     id: 'deepseek',
-    name: 'DeepSeek 官方',
-    hint: '写剧本 / 智能体推荐。官方 OpenAI 兼容接口。',
+    name: 'DeepSeek',
+    hint: '写剧本 / 智能体。官方 OpenAI 兼容接口。',
     baseUrl: 'https://api.deepseek.com',
     models: ['deepseek-v4-flash', 'deepseek-chat', 'deepseek-reasoner'],
     defaultModel: 'deepseek-v4-flash'
@@ -45,32 +45,20 @@ export const LLM_PROVIDERS: ProviderPreset[] = [
     defaultModel: 'gpt-4o-mini'
   },
   {
-    id: 'apiyi',
-    name: 'APIYI 聚合',
-    hint: '一套 Key 调多家模型，国内常用中转。',
-    baseUrl: 'https://api.apiyi.com/v1',
-    models: ['deepseek-v4-flash', 'deepseek-chat', 'gpt-4o', 'qwen-plus'],
-    defaultModel: 'deepseek-v4-flash'
-  },
-  {
-    id: 'siliconflow',
-    name: '硅基流动',
-    hint: 'DeepSeek / Qwen 等开源模型，按量计费。',
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    models: [
-      'deepseek-ai/DeepSeek-V3',
-      'deepseek-ai/DeepSeek-R1',
-      'Qwen/Qwen2.5-72B-Instruct'
-    ],
-    defaultModel: 'deepseek-ai/DeepSeek-V3'
-  },
-  {
     id: 'dashscope',
     name: '阿里云百炼',
-    hint: 'Qwen 兼容模式。写剧本也可用。',
+    hint: '通义千问官方兼容模式。',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen3-max'],
     defaultModel: 'qwen-plus'
+  },
+  {
+    id: 'volcengine',
+    name: '字节跳动 火山方舟',
+    hint: '豆包官方 OpenAI 兼容。',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-seed-1-6-250615', 'doubao-1-5-pro-32k', 'doubao-1-5-lite-32k'],
+    defaultModel: 'doubao-1-5-pro-32k'
   },
   {
     id: 'moonshot',
@@ -83,40 +71,23 @@ export const LLM_PROVIDERS: ProviderPreset[] = [
   {
     id: 'zhipu',
     name: '智谱 GLM',
-    hint: '智谱 OpenAI 兼容接口。',
+    hint: '智谱官方 OpenAI 兼容接口。',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     models: ['glm-4.5', 'glm-4-plus', 'glm-4-flash'],
     defaultModel: 'glm-4-flash'
   },
   {
-    id: 'openrouter',
-    name: 'OpenRouter',
-    hint: '一个入口选很多家模型，模型名带厂商前缀。',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    models: ['deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'qwen/qwen-2.5-72b-instruct'],
-    defaultModel: 'deepseek/deepseek-chat'
-  },
-  {
-    id: 'ollama',
-    name: 'Ollama 本地',
-    hint: '本机 11434。Key 可填 ollama。',
-    baseUrl: 'http://127.0.0.1:11434/v1',
-    models: ['qwen2.5', 'llama3.1', 'deepseek-r1'],
-    defaultModel: 'qwen2.5',
-    keyPlaceholder: 'ollama'
+    id: 'minimax',
+    name: 'MiniMax',
+    hint: '海螺官方 OpenAI 兼容。',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    models: ['MiniMax-Text-01', 'MiniMax-M1'],
+    defaultModel: 'MiniMax-Text-01'
   },
   CUSTOM_PROVIDER
 ]
 
 export const VISION_PROVIDERS: ProviderPreset[] = [
-  {
-    id: 'apiyi',
-    name: 'APIYI 聚合',
-    hint: '看图 / 质检推荐。',
-    baseUrl: 'https://api.apiyi.com/v1',
-    models: ['qwen3-vl-plus', 'qwen3.8-max'],
-    defaultModel: 'qwen3-vl-plus'
-  },
   {
     id: 'dashscope',
     name: '阿里云百炼',
@@ -134,24 +105,32 @@ export const VISION_PROVIDERS: ProviderPreset[] = [
     defaultModel: 'gpt-4o'
   },
   {
-    id: 'siliconflow',
-    name: '硅基流动',
-    hint: '开源视觉模型。',
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    models: ['Qwen/Qwen2.5-VL-72B-Instruct', 'Qwen/Qwen2-VL-72B-Instruct'],
-    defaultModel: 'Qwen/Qwen2.5-VL-72B-Instruct'
+    id: 'volcengine',
+    name: '字节跳动 火山方舟',
+    hint: '豆包视觉官方兼容。',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-1-5-vision-pro-32k', 'doubao-seed-1-6-vision-250815'],
+    defaultModel: 'doubao-1-5-vision-pro-32k'
+  },
+  {
+    id: 'zhipu',
+    name: '智谱 GLM',
+    hint: 'GLM 多模态看图。',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-4.5v', 'glm-4v-plus'],
+    defaultModel: 'glm-4v-plus'
   },
   CUSTOM_PROVIDER
 ]
 
 export const IMAGE_PROVIDERS: ProviderPreset[] = [
   {
-    id: 'apiyi',
-    name: 'APIYI 聚合',
-    hint: 'Seedream / GPT Image 常用。',
-    baseUrl: 'https://api.apiyi.com/v1',
-    models: ['seedream-4-5-251128', 'gpt-image-2', 'dall-e-3', 'flux-1-pro'],
-    defaultModel: 'seedream-4-5-251128'
+    id: 'volcengine',
+    name: '字节跳动 火山方舟',
+    hint: 'Seedream 官方生图。',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-seedream-4-0-250828', 'doubao-seedream-3-0-t2i-250415'],
+    defaultModel: 'doubao-seedream-4-0-250828'
   },
   {
     id: 'openai',
@@ -162,12 +141,28 @@ export const IMAGE_PROVIDERS: ProviderPreset[] = [
     defaultModel: 'gpt-image-1'
   },
   {
-    id: 'siliconflow',
-    name: '硅基流动',
-    hint: 'Flux 等开源生图。',
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    models: ['black-forest-labs/FLUX.1-schnell', 'black-forest-labs/FLUX.1-dev'],
-    defaultModel: 'black-forest-labs/FLUX.1-schnell'
+    id: 'dashscope',
+    name: '阿里云百炼',
+    hint: '通义万相 / Qwen-Image 官方。',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-image-plus', 'wan2.5-t2i-preview'],
+    defaultModel: 'qwen-image-plus'
+  },
+  {
+    id: 'zhipu',
+    name: '智谱 GLM',
+    hint: 'CogView 官方生图。',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['cogview-4', 'cogview-3-flash'],
+    defaultModel: 'cogview-4'
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    hint: '海螺官方生图。',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    models: ['image-01'],
+    defaultModel: 'image-01'
   },
   CUSTOM_PROVIDER
 ]
@@ -188,10 +183,31 @@ export const MUSIC_PROVIDERS: ProviderPreset[] = [
   {
     id: 'minimax',
     name: 'MiniMax',
-    hint: '整片配乐。',
+    hint: '整片配乐官方接口。',
     baseUrl: 'https://api.minimaxi.com/v1',
     models: ['music-3.0'],
     defaultModel: 'music-3.0'
+  },
+  CUSTOM_PROVIDER
+]
+
+export const VIDEO_PROVIDERS: ProviderPreset[] = [
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    hint: '海螺图生视频官方接口。工作流 ID 可留空或按控制台填写。',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    models: ['MiniMax-Hailuo-2.3'],
+    defaultModel: 'MiniMax-Hailuo-2.3',
+    keyPlaceholder: 'MiniMax API Key'
+  },
+  {
+    id: 'dashscope',
+    name: '阿里云百炼',
+    hint: '万相视频。节点里选「万相 3.0 Prime」时与配音共用这套百炼 Key。',
+    baseUrl: 'https://dashscope.aliyuncs.com/api/v1',
+    models: ['wan2.6-t2v', 'wan2.5-t2v-preview'],
+    defaultModel: 'wan2.6-t2v'
   },
   CUSTOM_PROVIDER
 ]

@@ -345,15 +345,21 @@ export function videoExtraRefIds(shot: Shot): ID[] {
 export function videoExtraRefLead(shot: Shot, project: Project): string {
   const extras = videoExtraRefIds(shot).slice(0, 2)
   if (!shot.boardAssetId && !extras.length) return ''
+  const filmChapter =
+    project.pipelineMode !== 'remake' && project.script?.workflowMode === 'film-chapter'
   const parts = [
     shot.boardAssetId
-      ? '图一是本镜六格黑白动作看板，不是视频首帧。按左上到右下执行动作时间线，禁止复制分格、边框、线稿或拼贴。'
+      ? filmChapter
+        ? '图一是本镜彩色四/八宫格电影故事看板，不是视频首帧。按左上到右下执行动作时间线，禁止复制宫格、边框或拼贴。'
+        : '图一是本镜六格黑白动作看板，不是视频首帧。按左上到右下执行动作时间线，禁止复制分格、边框、线稿或拼贴。'
       : '图一是本镜主参考图。'
   ]
   extras.forEach((id, i) => {
     if (id === shot.boardAssetId) {
       parts.push(
-        `图${i + 2}是本镜六格黑白动作看板，只参考从左上到右下的动作顺序、道具状态和结束姿势；不要复制分格边框、线稿、拼贴版式或同时出现六个画面。`
+        filmChapter
+          ? `图${i + 2}是本镜彩色电影故事看板，只参考从左上到右下的动作顺序、构图、道具状态和结束姿势；不要复制宫格边框、拼贴版式或同时出现多个画面。`
+          : `图${i + 2}是本镜六格黑白动作看板，只参考从左上到右下的动作顺序、道具状态和结束姿势；不要复制分格边框、线稿、拼贴版式或同时出现六个画面。`
       )
     } else {
       parts.push(`图${i + 2}是${refSlotLabel(id, project)}，用来锁人物或道具，不要当成新出场的人。`)
@@ -382,6 +388,8 @@ export function composeShotImagePrompt(
   const aesthetic = project.script?.aesthetic?.trim()
   const parts = [basePrompt.trim()]
   const dialogueSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  const filmChapter =
+    project.pipelineMode !== 'remake' && project.script?.workflowMode === 'film-chapter'
   if ((shot.audioMode || 'h3-dialogue') === 'h3-dialogue' && dialogueSpeaker) {
     parts.push(
       `这是「${dialogueSpeaker}」的出镜对白镜头。单画面起始构图必须已经明确落在${dialogueSpeaker}身上，让${dialogueSpeaker}成为唯一、无歧义的主视觉，脸和嘴清楚可见；可以用中近景、近景、过肩构图或以${dialogueSpeaker}为主体的双人构图，但其他人只能作为闭嘴倾听或反应者，不能与${dialogueSpeaker}争夺视觉中心。`
@@ -389,7 +397,9 @@ export function composeShotImagePrompt(
   }
   if (shot.boardAssetId) {
     parts.push(
-      '附件中的六格故事看板按左上到右下展示同一镜头的动作过程。视频起始帧采用第一格的开场构图、站位、朝向和道具状态，后续动作顺序由文字提示承接；只生成一张完整上色的单画面起始帧，绝对不要复制六格边框、线稿、编号或拼贴版式。'
+      filmChapter
+        ? '附件中的彩色四/八宫格电影故事看板按左上到右下展示动作过程。视频起始帧采用第一格的开场构图、站位、朝向、天气和道具状态，后续动作顺序由文字提示承接；只生成一张完整的单画面起始帧，绝对不要复制宫格边框、编号或拼贴版式。'
+        : '附件中的六格故事看板按左上到右下展示同一镜头的动作过程。视频起始帧采用第一格的开场构图、站位、朝向和道具状态，后续动作顺序由文字提示承接；只生成一张完整上色的单画面起始帧，绝对不要复制六格边框、线稿、编号或拼贴版式。'
     )
   }
   if (chars.length) {

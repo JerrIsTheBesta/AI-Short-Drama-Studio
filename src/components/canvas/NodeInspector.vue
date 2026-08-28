@@ -9,11 +9,13 @@ import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
+import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
 import { canBuildExport } from '@/utils/timeline'
-import type { CanvasNode, ShotAudioMode } from '@/types'
+import { normalizeVideoGenModel, type CanvasNode, type ShotAudioMode, type VideoGenModel } from '@/types'
 
 const props = defineProps<{
   node: CanvasNode | null
@@ -150,6 +152,13 @@ const extractLabel = computed(() =>
 const isImageNode = computed(() => {
   const t = props.node?.type
   return t === 'subject' || t === 'subjectProps' || t === 'scene' || t === 'shotBoard' || t === 'shotImage'
+})
+
+const videoModel = computed({
+  get: () => normalizeVideoGenModel(props.node?.data.videoModel),
+  set: (v: VideoGenModel) => {
+    if (props.node) project.patchCanvasNode(props.node.id, { videoModel: v })
+  }
 })
 
 const canRun = computed(() => {
@@ -726,6 +735,7 @@ function resetVideoPrompt() {
           placeholder="这一镜要说的话"
           @input="project.updateShot(shot.id, { voiceover: ($event.target as HTMLTextAreaElement).value })"
         />
+        <TtsModelSelect v-if="effectiveShotAudioMode(shot) === 'tts'" />
       </template>
 
       <div v-if="historyIds.length" class="hist">
@@ -746,6 +756,7 @@ function resetVideoPrompt() {
       </div>
 
       <ImageModelSelect v-if="isImageNode" />
+      <VideoModelSelect v-if="node.type === 'shotVideo' || node.type === 'videoGen'" v-model="videoModel" />
       <template v-if="node.type === 'script' && isPlayReady(project.current?.script)">
         <label>续写方向（可选）</label>
         <textarea

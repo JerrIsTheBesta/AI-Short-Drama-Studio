@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { normalizeVideoGenModel, type VideoGenModel } from '@/types'
+import { useSettingsStore } from '@/stores'
 
 const props = withDefaults(
   defineProps<{
@@ -10,22 +12,36 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{ 'update:modelValue': [value: VideoGenModel] }>()
+const settings = useSettingsStore()
 
-const options: { id: VideoGenModel; label: string }[] = [
-  { id: 'h3', label: 'H3' },
-  { id: 'wan-prime', label: '万相 3.0 Prime' }
-]
+const value = computed(() => {
+  if (normalizeVideoGenModel(props.modelValue) === 'wan-prime') return 'wan-prime'
+  return settings.config.activeVideoId || 'h3'
+})
 
 function onChange(event: Event) {
-  emit('update:modelValue', normalizeVideoGenModel((event.target as HTMLSelectElement).value))
+  const v = (event.target as HTMLSelectElement).value
+  if (v === 'wan-prime') {
+    emit('update:modelValue', 'wan-prime')
+    return
+  }
+  settings.selectVideo(v)
+  emit('update:modelValue', 'h3')
 }
 </script>
 
 <template>
   <label class="vid-model">
     <span>{{ label }}</span>
-    <select :value="normalizeVideoGenModel(props.modelValue)" @change="onChange">
-      <option v-for="m in options" :key="m.id" :value="m.id">{{ m.label }}</option>
+    <select :value="value" @change="onChange">
+      <optgroup v-if="settings.config.videos.length" label="已配置的视频接入">
+        <option v-for="p in settings.config.videos" :key="p.id" :value="p.id">
+          {{ p.name }}
+        </option>
+      </optgroup>
+      <optgroup label="内置">
+        <option value="wan-prime">万相 3.0 Prime</option>
+      </optgroup>
     </select>
   </label>
 </template>
@@ -51,7 +67,7 @@ function onChange(event: Event) {
   height: 28px;
   padding: 0 26px 0 8px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 4px;
   background-color: var(--color-bg-2);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;

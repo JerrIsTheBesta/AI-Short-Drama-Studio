@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useLibraryStore, LIBRARY_PUBLIC_ID } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -7,7 +7,7 @@ import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import { isDesktop, desktop } from '@/services/desktop'
-import { projectCoverUrl } from '@/services/storage'
+import { pickCoverAssetId, projectCoverUrl } from '@/services/storage'
 import { runVideoRemake } from '@/services/canvas/runner'
 import { openLightbox } from '@/composables/useLightbox'
 import type { AspectRatio } from '@/types'
@@ -66,12 +66,26 @@ watch(
   }
 )
 
+const coverKeys = ref<Record<string, string>>({})
+
+function revokeCover(url?: string) {
+  if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+}
+
 watch(
-  () => project.allProjects.map((p) => p.id).join(','),
+  () => project.allProjects.map((p) => `${p.id}:${pickCoverAssetId(p) || ''}`).join('|'),
   async () => {
-    const next: Record<string, string> = { ...covers.value }
+    const next: Record<string, string> = {}
+    const nextKeys: Record<string, string> = {}
     for (const p of project.allProjects) {
-      if (next[p.id]) continue
+      const key = pickCoverAssetId(p) || ''
+      nextKeys[p.id] = key
+      if (key && coverKeys.value[p.id] === key && covers.value[p.id]) {
+        next[p.id] = covers.value[p.id]
+        continue
+      }
+      revokeCover(covers.value[p.id])
+      if (!key) continue
       try {
         const url = await projectCoverUrl(p)
         if (url) next[p.id] = url
@@ -79,10 +93,18 @@ watch(
         /* 某个项目素材读失败就跳过 */
       }
     }
+    for (const [id, url] of Object.entries(covers.value)) {
+      if (!next[id]) revokeCover(url)
+    }
+    coverKeys.value = nextKeys
     covers.value = next
   },
   { immediate: true }
 )
+
+onBeforeUnmount(() => {
+  for (const url of Object.values(covers.value)) revokeCover(url)
+})
 
 const filteredProjects = computed(() => {
   const kw = search.value.trim().toLowerCase()
@@ -107,7 +129,7 @@ const totalDuration = computed(() => {
 
 function openProject(id: string) {
   project.load(id).then(() => {
-    router.push('/studio')
+    router.push(project.current?.pipelineMode === 'smart-speech' ? '/smart-speech' : '/studio')
   })
 }
 
@@ -409,6 +431,9 @@ async function moveSelectedLibrary() {
           桌面端无限画布 + 智能体：人设、分镜、配图、视频都在一张图上连起来。资源存在本地文件夹。
         </p>
         <div class="hero-actions">
+          <GradientButton size="lg" icon="◉" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
+            智能口播
+          </GradientButton>
           <GradientButton size="lg" icon="✨" @click="showCreateModal = true">
             创建新项目
           </GradientButton>
@@ -505,6 +530,7 @@ async function moveSelectedLibrary() {
             <div class="proj-meta-top">
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
               <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">一图生视频</Tag>
+              <Tag v-else-if="p.pipelineMode === 'smart-speech'" type="success" size="sm">智能口播</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
                 🎬 {{ p.shots.length }} 个分镜
               </Tag>

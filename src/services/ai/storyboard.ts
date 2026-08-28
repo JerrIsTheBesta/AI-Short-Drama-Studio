@@ -489,7 +489,7 @@ async function realStoryboard(
 
   if (input.productImages?.length) {
     log(`→ 调用视觉工具分析 ${input.productImages.length} 张参考图`)
-    onProgress?.(`先识别 ${input.productImages.length} 张参考图；完成后立即并行提炼…`)
+    onProgress?.(`先识别 ${input.productImages.length} 张参考图；看完再按人物 → 场景 → 分镜分步提炼…`)
     const visualContent: LLMContentPart[] = [
       ...input.productImages.slice(0, 5).map((url) => ({
         type: 'image_url' as const,
@@ -535,8 +535,11 @@ async function realStoryboard(
     const play = input.content?.trim() || ''
     const common = `主题：${input.topic || '（未填）'}\n比例：${input.aspectRatio}\n单镜时长参考：${input.shotDuration} 秒\n\n完整剧本：\n${play}`
     const startAt = input.extractStartAt || 'subjects'
+    const stopAfter = input.extractStopAfter || startAt
     const stageOrder = { subjects: 0, scenes: 1, shots: 2 } as const
-    onProgress?.(`分阶段提炼：从${startAt === 'subjects' ? '人物' : startAt === 'scenes' ? '场景' : '分镜'}继续…`)
+    onProgress?.(
+      `按步骤提炼：先人物，再场景，再分镜。本轮只做${startAt === 'subjects' ? '人物' : startAt === 'scenes' ? '场景' : '分镜'}。`
+    )
 
     const runPart = async (
       label: string,
@@ -544,20 +547,33 @@ async function realStoryboard(
       maxTokens: number,
       timeoutMs: number
     ): Promise<{ raw: any; model?: string }> => {
-      try {
-        const response = await callLLM({
+      const ask = async (extraUser?: string) =>
+        callLLM({
           messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: common }
+            { role: 'system', content: `${system}\n禁止输出思考过程或自然语言。第一个字符必须是 {，最后一个字符必须是 }。` },
+            { role: 'user', content: extraUser ? `${common}\n\n${extraUser}` : common }
           ],
           model: parallelModel,
-          temperature: 0.25,
+          temperature: extraUser ? 0 : 0.25,
           jsonMode: true,
           maxTokens,
           signal: input.signal,
           timeoutMs
         })
-        const raw = parseJsonRobust(response.content)
+      try {
+        const response = await ask()
+        let raw: any
+        try {
+          raw = parseJsonRobust(response.content)
+        } catch {
+          onProgress?.(`${label}未收到 JSON，正在补要一次…`)
+          const salvage = await ask(
+            '上一轮只写了思考、没有 JSON。现在立刻只输出 JSON 对象，不要任何解释。'
+          )
+          raw = parseJsonRobust(salvage.content)
+          onProgress?.(`✓ ${label}提炼完成`)
+          return { raw, model: salvage.model }
+        }
         onProgress?.(`✓ ${label}提炼完成`)
         return { raw, model: response.model }
       } catch (error) {
@@ -584,7 +600,7 @@ async function realStoryboard(
 
     if (stageOrder[startAt] <= stageOrder.subjects) {
       onProgress?.('第 1/3 步：只提炼人物角色…')
-      subjectPart = await runPart('人物', subjectSystem, 2800, 45_000)
+      subjectPart = await runPart('人物', subjectSystem, 4000, PLAY_LLM_TIMEOUT_MS)
       const rows = Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : []
       if (!rows.length) throw new Error('提炼人物失败：模型返回的 subjects 为空')
       const normalized = normalizeStoryboard(
@@ -593,7 +609,7 @@ async function realStoryboard(
       )
       await input.onExtractStage?.('subjects', { subjects: normalized.subjects, scenes: [], shots: [] })
       onProgress?.(`✓ 已保存 ${normalized.subjects?.length || 0} 个角色`)
-      if (input.extractStopAfter === 'subjects') {
+      if (stopAfter === 'subjects') {
         onProgress?.('人物阶段完成。下一步由你确认后再提炼场景。')
         return {
           result: { subjects: normalized.subjects, scenes: [], shots: [] },
@@ -606,7 +622,7 @@ async function realStoryboard(
 
     if (stageOrder[startAt] <= stageOrder.scenes) {
       onProgress?.('第 2/3 步：只提炼场景锚点…')
-      scenePart = await runPart('场景', sceneSystem, 3200, 60_000)
+      scenePart = await runPart('场景', sceneSystem, 4000, PLAY_LLM_TIMEOUT_MS)
       const rows = Array.isArray(scenePart.raw?.scenes) ? scenePart.raw.scenes : []
       if (!rows.length) throw new Error('提炼场景失败：模型返回的 scenes 为空；人物节点已经保留')
       const normalized = normalizeStoryboard(
@@ -615,7 +631,7 @@ async function realStoryboard(
       )
       await input.onExtractStage?.('scenes', { ...normalized, shots: [] })
       onProgress?.(`✓ 已保存 ${normalized.scenes?.length || 0} 个场景`)
-      if (input.extractStopAfter === 'scenes') {
+      if (stopAfter === 'scenes') {
         onProgress?.('场景阶段完成。下一步由你确认后再拆分镜。')
         return {
           result: { ...normalized, shots: [] },
@@ -627,7 +643,7 @@ async function realStoryboard(
     }
 
     onProgress?.('第 3/3 步：按已保存的人物和场景拆分镜…')
-    shotPart = await runPart('分镜', shotSystem, 9000, 150_000)
+    shotPart = await runPart('分镜', shotSystem, 9000, PLAY_LLM_TIMEOUT_MS)
 
     const rawShots = Array.isArray(shotPart.raw?.shots) ? shotPart.raw.shots : []
     if (!rawShots.length) {
@@ -1387,10 +1403,14 @@ export async function generateStoryboard(
 
   if (mode === 'real') {
       onProgress?.(
-      input.mode === 'extract'
-        ? `正在从剧本提炼人物 / 场景 / 分镜…`
-        : `正在按「${look.medium}」拆能拍的镜头...`
-    )
+        input.mode === 'extract'
+          ? (input.extractStopAfter || input.extractStartAt) === 'scenes'
+            ? '第 2 步：只提炼场景锚点…'
+            : (input.extractStopAfter || input.extractStartAt) === 'shots'
+              ? '第 3 步：按已保存的人物和场景拆分镜…'
+              : '第 1 步：只提炼人物角色…'
+          : `正在按「${look.medium}」拆能拍的镜头...`
+      )
     try {
       const { result, model } = await realStoryboard(resolved, onProgress)
       onProgress?.(

@@ -337,7 +337,9 @@ export function composeH3VideoPrompt(input: H3PromptInput): string {
   const englishEnough = notes.length > 80 && !/[㐀-鿿]/.test(notes)
   const desc = englishEnough
     ? applyDialogue(notes, input, spoken)
-    : fallbackDescription(input, spoken)
+    // 中文导演描述会使用确定性的英文画面模板，但仍必须经过对白注入；
+    // 否则 voiceover 有值而最终 prompt 没有 <d>，会被自检正确拦下。
+    : applyDialogue(fallbackDescription(input, spoken), input, spoken)
   return assembleOfficial(desc, defaultSoundscape(input, spoken), 'N/A', input)
 }
 

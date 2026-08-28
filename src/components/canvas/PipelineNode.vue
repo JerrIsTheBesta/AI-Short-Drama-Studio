@@ -11,10 +11,11 @@ import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
+import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveImagePrompt, effectiveShotAudioMode, needsExternalTts, pushHistory, editableVideoPrompt } from '@/utils/shot'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
-import type { CanvasNodeType, ID } from '@/types'
+import { normalizeVideoGenModel, type CanvasNodeType, type ID, type VideoGenModel } from '@/types'
 
 const props = defineProps<{
   id: string
@@ -143,6 +144,12 @@ const isImageNode = computed(
     type.value === 'subjectProps' ||
     type.value === 'scene'
 )
+const videoModel = computed({
+  get: () => normalizeVideoGenModel(nodeMeta.value?.data.videoModel),
+  set: (v: VideoGenModel) => {
+    project.patchCanvasNode(props.id, { videoModel: v })
+  }
+})
 const showPrompt = computed(
   () =>
     type.value === 'shotImage' ||
@@ -784,6 +791,7 @@ const cropStyle = computed(() => ({
       />
       <div class="prompt-foot">
         <ImageModelSelect v-if="isImageNode" />
+        <VideoModelSelect v-else-if="type === 'shotVideo'" v-model="videoModel" />
         <span v-else>{{ metaLine }}</span>
         <label v-if="type === 'shotVideo' && shot" class="dur-edit">
           <select

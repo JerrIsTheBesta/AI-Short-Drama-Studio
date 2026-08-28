@@ -11,7 +11,13 @@ const route = useRoute()
 const project = useProjectStore()
 const assets = useAssetsStore()
 
-const showLayout = computed(() => route.name !== 'home' && route.name !== 'studio')
+const showLayout = computed(
+  () =>
+    route.name !== 'home' &&
+    route.name !== 'studio' &&
+    route.name !== 'smart-speech' &&
+    route.name !== 'settings'
+)
 
 onMounted(async () => {
   await assets.refresh()

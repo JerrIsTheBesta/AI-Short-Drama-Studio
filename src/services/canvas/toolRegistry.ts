@@ -399,7 +399,7 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'extract_cast', phase: 0, timeoutMs: 720_000, estimate: oneLlm,
+    name: 'extract_cast', phase: 0, timeoutMs: 1_080_000, estimate: oneLlm,
     async execute(_action, ctx) {
       const { runExtractStoryboard, runGeneratePlay } = await import('./runner')
       const { isPlayReady } = await import('@/services/ai')

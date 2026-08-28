@@ -145,6 +145,57 @@ export interface Shot {
 
 export type ShotAudioMode = 'h3-dialogue' | 'h3-voiceover' | 'tts' | 'none'
 
+/** 智能口播的三类生产模式 */
+export type SpeechWorkflowMode = 'digital-human' | 'human-edit' | 'human-aigc'
+
+export type SpeechWorkflowStage =
+  | 'ready'
+  | 'editing'
+  | 'packaging'
+  | 'quality-check'
+  | 'complete'
+  | 'failed'
+
+export interface SpeechWorkflowOptions {
+  removePauses: boolean
+  removeStumbles: boolean
+  beauty: boolean
+  captions: boolean
+  titles: boolean
+  keywordCallouts: boolean
+  soundEffects: boolean
+  bgm: boolean
+  aigcInserts: boolean
+}
+
+/** 智能口播项目的原始输入与流程状态；生成产物仍复用 Shot / Timeline / Asset。 */
+export interface SpeechWorkflow {
+  mode: SpeechWorkflowMode
+  stage: SpeechWorkflowStage
+  imageAssetId?: ID
+  /** 数字人声音样本，只用于声音复刻，不是成片口播音轨。 */
+  voiceSampleAssetId?: ID
+  /** @deprecated 早期项目把声音样本误记为 audioAssetId，读取时兼容。 */
+  audioAssetId?: ID
+  clonedVoiceId?: string
+  clonedVoiceModel?: string
+  generatedVideoAssetIds?: ID[]
+  generatedSpeechAssetIds?: ID[]
+  /** 当前未完成段的语音已落库，重试时直接复用。 */
+  pendingSegmentIndex?: number
+  pendingSpeechAssetId?: ID
+  /** 已提交到 H3 的远端任务，暂停/超时/重启后继续轮询，不重复提交。 */
+  activeVideoTaskId?: string
+  activeVideoTaskSegmentIndex?: number
+  videoAssetIds: ID[]
+  referenceAssetIds: ID[]
+  options: SpeechWorkflowOptions
+  progress?: string
+  error?: string
+  createdAt: number
+  updatedAt: number
+}
+
 /** 项目文案 */
 export interface Script {
   id: ID
@@ -160,6 +211,8 @@ export interface Script {
   aspectRatio: AspectRatio
   /** 每个分镜目标时长 */
   shotDuration: number
+  /** 独立制作手册；电影章节与普通短视频、视频复刻互不串线 */
+  workflowMode?: 'film-chapter'
   /**
    * 项目级整体氛围（中文，1-2 段）
    * 例如：「武侠电影感，典雅东方气质，暖黄灯笼光切开冷雨薄雾……」
@@ -225,6 +278,12 @@ export interface ProjectSettings {
   captionBg: boolean
   /** 导出时是否把字幕烧进画面 */
   burnCaptions: boolean
+  /** 自动识别字幕重点词并在同一行内变色、放大 */
+  captionHighlight?: boolean
+  /** 重点词颜色 */
+  captionHighlightColor?: string
+  /** 重点词字号倍数 */
+  captionHighlightScale?: number
   /** 口播音色（百炼 qwen-audio-3.0-tts-flash / SpeechSynthesizer） */
   ttsVoice?: string
 }
@@ -344,7 +403,9 @@ export interface Project {
    * remake：上传参考视频复刻镜头，产品必须换成用户图
    * img2video：一图生视频，自由画布（图片节点 + 视频节点）
    */
-  pipelineMode?: 'standard' | 'remake' | 'img2video'
+  pipelineMode?: 'standard' | 'remake' | 'img2video' | 'smart-speech'
+  /** 智能口播入口创建的专用流程配置 */
+  speechWorkflow?: SpeechWorkflow
   /** 视频复刻的参考视频 */
   sourceVideoAssetId?: ID
   createdAt: number

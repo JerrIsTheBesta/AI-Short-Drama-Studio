@@ -101,11 +101,27 @@ export async function assetAbsPath(id: string): Promise<string | undefined> {
   return library.libraryAssetAbsPath(id)
 }
 
-/** 封面：一图生视频用节点出图；否则场景底板 → 人设 → 分镜配图 */
-export function pickCoverAssetId(p: Project): string | undefined {
-  if (p.pipelineMode === 'img2video') {
-    return (p.canvas?.nodes ?? []).find((n) => n.data.outputAssetId)?.data.outputAssetId
+function firstImg2VideoCoverId(p: Project): string | undefined {
+  const nodes = [...(p.canvas?.nodes ?? [])]
+    .filter((n) => n.type === 'imageGen' || n.type === 'videoGen')
+    .sort((a, b) => {
+      const ay = Math.round(a.position.y / 140)
+      const by = Math.round(b.position.y / 140)
+      return ay - by || a.position.x - b.position.x
+    })
+  const first = nodes[0]
+  const firstRef = first?.data.referenceAssetIds?.[0]
+  if (firstRef) return firstRef
+  for (const n of nodes) {
+    const ref = n.data.referenceAssetIds?.[0]
+    if (ref) return ref
   }
+  return nodes.find((n) => n.data.outputAssetId)?.data.outputAssetId
+}
+
+/** 封面：一图生视频用第一个节点的第一张参考图；否则场景底板 → 人设 → 分镜配图 */
+export function pickCoverAssetId(p: Project): string | undefined {
+  if (p.pipelineMode === 'img2video') return firstImg2VideoCoverId(p)
   const plate = (p.scenes ?? []).find((s) => s.plateAssetId)?.plateAssetId
   if (plate) return plate
   const sheet = (p.subjects ?? []).find((s) => s.designSheetAssetId)?.designSheetAssetId
@@ -116,11 +132,15 @@ export function pickCoverAssetId(p: Project): string | undefined {
 export async function projectCoverUrl(p: Project): Promise<string | undefined> {
   const id = pickCoverAssetId(p)
   if (!id) return undefined
-  if (useFs() && p.folderPath) {
-    const abs = await fsStore.assetAbsPathInDir(p.folderPath, id)
-    return abs ? assetFileUrl(abs) : undefined
+  if (useFs()) {
+    if (p.folderPath) {
+      const abs = await fsStore.assetAbsPathInDir(p.folderPath, id)
+      if (abs) return assetFileUrl(abs)
+    }
+    const lib = await library.libraryAssetAbsPath(id)
+    if (lib) return assetFileUrl(lib)
   }
-  const blob = await idb.loadAssetBlob(id)
+  const blob = (await idb.loadAssetBlob(id)) || (await library.loadLibraryAssetBlob(id))
   if (!blob) return undefined
   return URL.createObjectURL(blob)
 }

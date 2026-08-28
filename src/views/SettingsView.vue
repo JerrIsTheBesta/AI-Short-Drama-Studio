@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore } from '@/stores'
-import GlassCard from '@/components/common/GlassCard.vue'
-import GradientButton from '@/components/common/GradientButton.vue'
-import Tag from '@/components/common/Tag.vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
+import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore, endpointReady } from '@/stores'
 import StudioSettings from '@/components/canvas/StudioSettings.vue'
+import SetupAgent from '@/components/settings/SetupAgent.vue'
+import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
 
 const router = useRouter()
+const route = useRoute()
 const project = useProjectStore()
 const settings = useSettingsStore()
 const assets = useAssetsStore()
@@ -39,16 +39,12 @@ async function runDiagnostics() {
   diag.value.userAgent = navigator.userAgent
   diag.value.crossOriginIsolated = self.crossOriginIsolated
   diag.value.sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined'
-
-  // 探测本地
   try {
     const r = await fetch('/ffmpeg/ffmpeg-core.js', { method: 'HEAD' })
     diag.value.localCore = r.ok
   } catch {
     diag.value.localCore = false
   }
-
-  // 探测 CDN
   diag.value.jsDelivrReachable = await ping('https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js')
   diag.value.unpkgReachable = await ping('https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js')
   diag.value.npmmirrorReachable = await ping('https://registry.npmmirror.com/@ffmpeg/core@0.12.6/files/dist/umd/ffmpeg-core.js')
@@ -117,7 +113,6 @@ function importProjectData() {
       const data = JSON.parse(text)
       if (Array.isArray(data.projects)) {
         for (const p of data.projects) {
-          // @ts-ignore
           await import('@/services/storage').then((m) => m.saveProject(p))
         }
         await project.refreshList()
@@ -168,503 +163,405 @@ const storagePct = computed(() => {
   return (storage.value.usage / storage.value.quota) * 100
 })
 
-type SettingsTab = 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'system'
-const tabs: { id: SettingsTab; label: string }[] = [
-  { id: 'llm', label: 'LLM' },
-  { id: 'vision', label: '视觉' },
-  { id: 'image', label: '生图' },
-  { id: 'tts', label: '配音' },
-  { id: 'video', label: '视频' },
-  { id: 'system', label: '系统' }
+type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'system'
+const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'system']
+
+const nav = [
+  { id: 'agent' as const, label: '接入助手', desc: '用 LLM 写入其余能力' },
+  { id: 'llm' as const, label: '语言模型', desc: '剧本、智能体、接入助手' },
+  { id: 'vision' as const, label: '视觉理解', desc: '看图与质检' },
+  { id: 'image' as const, label: '图像生成', desc: '人设、场景、看板' },
+  { id: 'tts' as const, label: '配音', desc: '后期口播 TTS' },
+  { id: 'video' as const, label: '视频', desc: '图生视频与配乐' },
+  { id: 'system' as const, label: '系统', desc: '引擎、存储、关于' }
 ]
-const tab = ref<SettingsTab>('llm')
+
+const section = computed<SettingsSection>(() => {
+  const raw = String(route.params.section || 'agent')
+  return SECTIONS.includes(raw as SettingsSection) ? (raw as SettingsSection) : 'agent'
+})
+
+const currentNav = computed(() => nav.find((n) => n.id === section.value) || nav[0])
+
+function go(id: SettingsSection) {
+  router.push(`/settings/${id}`)
+}
+
+function goBack() {
+  if (window.history.length > 1) router.back()
+  else router.push('/')
+}
+
+function navReady(id: SettingsSection) {
+  const c = settings.config
+  if (id === 'llm') return endpointReady(c.llm)
+  if (id === 'vision') return endpointReady(c.vision)
+  if (id === 'image') return endpointReady(c.image)
+  if (id === 'tts') return endpointReady(c.tts)
+  if (id === 'video') return endpointReady(c.video)
+  return false
+}
 </script>
 
 <template>
-  <div class="page">
-    <header class="page-head">
-      <div>
-        <h1>设置</h1>
-        <p>按模块配置。改完立刻生效，不用重启。</p>
+  <div class="settings">
+    <header class="top">
+      <button type="button" class="back" @click="goBack">返回</button>
+      <div class="brand">
+        <img src="/logo.png" alt="" />
+        <div>
+          <h1>设置</h1>
+          <p>{{ currentNav.desc }}。改完立刻生效，密钥只留在本机。</p>
+        </div>
       </div>
-      <GradientButton type="ghost" @click="router.back()">← 返回</GradientButton>
     </header>
 
-    <nav class="tabs" aria-label="设置模块">
-      <button
-        v-for="t in tabs"
-        :key="t.id"
-        type="button"
-        :class="{ on: tab === t.id }"
-        @click="tab = t.id"
-      >
-        {{ t.label }}
-      </button>
-    </nav>
+    <div class="body">
+      <nav class="side" aria-label="设置分区">
+        <p class="group">配置</p>
+        <RouterLink
+          v-for="item in nav.slice(0, 6)"
+          :key="item.id"
+          :to="`/settings/${item.id}`"
+          active-class=""
+          exact-active-class=""
+          :class="{ on: section === item.id }"
+        >
+          <span class="lab">{{ item.label }}</span>
+          <i v-if="item.id !== 'agent'" class="dot" :class="{ on: navReady(item.id) }" />
+        </RouterLink>
+        <p class="group">应用</p>
+        <RouterLink
+          to="/settings/system"
+          active-class=""
+          exact-active-class=""
+          :class="{ on: section === 'system' }"
+        >
+          <span class="lab">系统</span>
+        </RouterLink>
+      </nav>
 
-    <GlassCard v-if="tab !== 'system'" padding="lg">
-      <StudioSettings :module="tab" />
-    </GlassCard>
+      <main class="main">
+        <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
+        <StudioSettings v-if="section !== 'agent' && section !== 'system'" :module="section" />
 
-    <div v-else class="sys-grid">
-      <GlassCard padding="lg">
-        <h2>引擎状态</h2>
-        <p class="card-desc">FFmpeg 在浏览器里跑，首次使用时会下载约 30MB 核心</p>
-
-        <div class="engine-row">
-          <div>
-            <div class="engine-name">FFmpeg.wasm</div>
-            <div class="engine-state">
-              <Tag v-if="ffmpegReady" type="success" size="sm">已就绪</Tag>
-              <Tag v-else type="warning" size="sm">未加载</Tag>
+        <div v-else-if="section === 'system'" class="sys">
+          <section class="panel">
+            <h2>引擎状态</h2>
+            <p class="card-desc">FFmpeg 在浏览器里跑，首次使用时会下载约 30MB 核心</p>
+            <div class="engine-row">
+              <div>
+                <div class="engine-name">FFmpeg.wasm</div>
+                <Tag v-if="ffmpegReady" type="success" size="sm">已就绪</Tag>
+                <Tag v-else type="warning" size="sm">未加载</Tag>
+              </div>
+              <button
+                v-if="!ffmpegReady"
+                type="button"
+                class="mini"
+                :disabled="ffmpegLoading"
+                @click="warmupFFmpeg"
+              >
+                {{ ffmpegLoading ? '加载中…' : '预加载' }}
+              </button>
+              <button v-else type="button" class="link" @click="resetAndRetry">重置</button>
             </div>
-          </div>
-          <GradientButton
-            v-if="!ffmpegReady"
-            type="secondary"
-            size="sm"
-            icon="📦"
-            :loading="ffmpegLoading"
-            @click="warmupFFmpeg"
-          >
-            预加载
-          </GradientButton>
-          <Tag v-else type="success" size="sm">✓</Tag>
-        </div>
+            <p class="muted">用于视频拼接、转场、字幕烧录、最终导出。</p>
+            <details class="diag">
+              <summary>诊断信息</summary>
+              <div class="diag-row"><span>cross-origin isolation</span><Tag :type="diag.crossOriginIsolated ? 'success' : 'error'" size="sm">{{ diag.crossOriginIsolated ? '启用' : '未启用' }}</Tag></div>
+              <div class="diag-row"><span>SharedArrayBuffer</span><Tag :type="diag.sharedArrayBuffer ? 'success' : 'error'" size="sm">{{ diag.sharedArrayBuffer ? '支持' : '不支持' }}</Tag></div>
+              <div class="diag-row"><span>本地 core</span><Tag :type="diag.localCore ? 'success' : 'warning'" size="sm">{{ diag.localCore ? '存在' : '缺失' }}</Tag></div>
+              <div class="diag-row"><span>jsDelivr</span><Tag :type="diag.jsDelivrReachable ? 'success' : 'error'" size="sm">{{ diag.jsDelivrReachable ? '可达' : '不可达' }}</Tag></div>
+              <div class="diag-row"><span>unpkg</span><Tag :type="diag.unpkgReachable ? 'success' : 'error'" size="sm">{{ diag.unpkgReachable ? '可达' : '不可达' }}</Tag></div>
+              <div class="diag-row"><span>npmmirror</span><Tag :type="diag.npmmirrorReachable ? 'success' : 'error'" size="sm">{{ diag.npmmirrorReachable ? '可达' : '不可达' }}</Tag></div>
+              <button type="button" class="link" @click="runDiagnostics">重新检测</button>
+            </details>
+          </section>
 
-        <div class="engine-info">
-          <p>
-            FFmpeg 用于视频拼接、转场、字幕烧录、最终导出。<br />
-            推荐首次进入「剪辑」或「导出」页面时让它预加载。
-          </p>
-        </div>
-
-        <details class="diag-details">
-          <summary>🔍 诊断信息（点击展开）</summary>
-          <div class="diag-grid">
-            <div class="diag-row">
-              <span>cross-origin isolation</span>
-              <Tag :type="diag.crossOriginIsolated ? 'success' : 'error'" size="sm">
-                {{ diag.crossOriginIsolated ? '✓ 启用' : '✗ 未启用' }}
-              </Tag>
+          <section class="panel">
+            <h2>存储</h2>
+            <p class="card-desc">项目、素材都存在浏览器 IndexedDB</p>
+            <div class="storage-bar"><div class="storage-bar-fill" :style="{ width: storagePct + '%' }" /></div>
+            <div class="storage-info">
+              <span>已用 {{ formatSize(storage.usage) }} / 配额 {{ formatSize(storage.quota) }}</span>
+              <span>{{ storagePct.toFixed(1) }}%</span>
             </div>
-            <div class="diag-row">
-              <span>SharedArrayBuffer</span>
-              <Tag :type="diag.sharedArrayBuffer ? 'success' : 'error'" size="sm">
-                {{ diag.sharedArrayBuffer ? '✓ 支持' : '✗ 不支持' }}
-              </Tag>
+            <div class="ss">
+              <div><b>{{ assetStats.image }}</b><span>图片</span></div>
+              <div><b>{{ assetStats.video }}</b><span>视频</span></div>
+              <div><b>{{ assetStats.audio }}</b><span>音频</span></div>
+              <div><b>{{ assetStats.total }}</b><span>总数</span></div>
             </div>
-            <div class="diag-row">
-              <span>本地 core 文件</span>
-              <Tag :type="diag.localCore ? 'success' : 'warning'" size="sm">
-                {{ diag.localCore ? '✓ 存在' : '✗ 缺失' }}
-              </Tag>
+          </section>
+
+          <section class="panel">
+            <h2>项目管理</h2>
+            <p class="card-desc">导出 / 导入 / 清理</p>
+            <div class="proj">
+              <button type="button" class="mini" @click="exportProjectData">导出所有项目数据</button>
+              <button type="button" class="mini" @click="importProjectData">导入项目数据</button>
+              <button type="button" class="danger" @click="clearAll">清空所有数据</button>
             </div>
-            <div class="diag-row">
-              <span>jsDelivr CDN</span>
-              <Tag :type="diag.jsDelivrReachable ? 'success' : 'error'" size="sm">
-                {{ diag.jsDelivrReachable ? '✓ 可达' : '✗ 不可达' }}
-              </Tag>
-            </div>
-            <div class="diag-row">
-              <span>unpkg CDN</span>
-              <Tag :type="diag.unpkgReachable ? 'success' : 'error'" size="sm">
-                {{ diag.unpkgReachable ? '✓ 可达' : '✗ 不可达' }}
-              </Tag>
-            </div>
-            <div class="diag-row">
-              <span>npmmirror 国内镜像</span>
-              <Tag :type="diag.npmmirrorReachable ? 'success' : 'error'" size="sm">
-                {{ diag.npmmirrorReachable ? '✓ 可达' : '✗ 不可达' }}
-              </Tag>
-            </div>
-          </div>
-          <div class="diag-tip">
-            💡 <b>加载失败最常见原因</b>：CDN 资源没带 <code>Cross-Origin-Resource-Policy</code> 头，
-            被 COEP 策略拦了。<br />
-            解决：把 core 文件下载到 <code>public/ffmpeg/</code>（已下好），用本地源。
-          </div>
-          <button class="refresh-diag" @click="runDiagnostics">↻ 重新检测</button>
-        </details>
-      </GlassCard>
+          </section>
 
-      <GlassCard padding="lg">
-        <h2>💾 存储</h2>
-        <p class="card-desc">项目、素材都存在浏览器 IndexedDB</p>
-
-        <div class="storage-bar">
-          <div class="storage-bar-fill" :style="{ width: storagePct + '%' }" />
+          <section class="panel">
+            <h2>关于</h2>
+            <p class="card-desc">开源桌面端：从剧本到成片</p>
+            <div class="about-row"><span>版本</span><b>v0.1.1</b></div>
+            <div class="about-row"><span>前端</span><b>Vue 3 + Vite + TypeScript</b></div>
+            <div class="about-row"><span>视频引擎</span><b>FFmpeg.wasm 0.12</b></div>
+            <div class="about-row"><span>存储</span><b>IndexedDB / 本地文件夹</b></div>
+          </section>
         </div>
-        <div class="storage-info">
-          <span>已用 {{ formatSize(storage.usage) }} / 配额 {{ formatSize(storage.quota) }}</span>
-          <span>{{ storagePct.toFixed(1) }}%</span>
-        </div>
-
-        <div class="storage-stats">
-          <div class="ss-item">
-            <div class="ss-num">{{ assetStats.image }}</div>
-            <div class="ss-label">图片</div>
-          </div>
-          <div class="ss-item">
-            <div class="ss-num">{{ assetStats.video }}</div>
-            <div class="ss-label">视频</div>
-          </div>
-          <div class="ss-item">
-            <div class="ss-num">{{ assetStats.audio }}</div>
-            <div class="ss-label">音频</div>
-          </div>
-          <div class="ss-item">
-            <div class="ss-num">{{ assetStats.total }}</div>
-            <div class="ss-label">总数</div>
-          </div>
-        </div>
-      </GlassCard>
-
-      <GlassCard padding="lg">
-        <h2>📦 项目管理</h2>
-        <p class="card-desc">导出 / 导入 / 清理</p>
-
-        <div class="proj-actions">
-          <GradientButton
-            type="secondary"
-            icon="📤"
-            block
-            @click="exportProjectData"
-          >导出所有项目数据（JSON）</GradientButton>
-          <GradientButton
-            type="secondary"
-            icon="📥"
-            block
-            @click="importProjectData"
-          >导入项目数据</GradientButton>
-          <GradientButton
-            type="danger"
-            icon="🗑"
-            block
-            @click="clearAll"
-          >清空所有数据</GradientButton>
-        </div>
-      </GlassCard>
-
-      <GlassCard padding="lg">
-        <h2>ℹ 关于</h2>
-        <p class="card-desc">剧流 Studio · 从剧本到视频</p>
-        <div class="about">
-          <div class="about-row">
-            <span>版本</span><b>v0.1.0</b>
-          </div>
-          <div class="about-row">
-            <span>前端</span><b>Vue 3 + Vite + TypeScript</b>
-          </div>
-          <div class="about-row">
-            <span>视频引擎</span><b>FFmpeg.wasm 0.12</b>
-          </div>
-          <div class="about-row">
-            <span>存储</span><b>IndexedDB</b>
-          </div>
-        </div>
-      </GlassCard>
+      </main>
     </div>
   </div>
 </template>
 
 <style scoped>
-.page {
-  padding: var(--space-6);
-  max-width: 920px;
-  margin: 0 auto;
-}
-.page-head {
+.settings {
+  height: 100%;
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: var(--space-4);
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-bg-0);
 }
-.tabs {
+.top {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: var(--space-4);
-}
-.tabs button {
-  margin: 0;
-  padding: 8px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-bg-2);
-  color: var(--color-text-3);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.tabs button.on {
-  border-color: var(--color-accent);
-  background: var(--color-accent);
-  color: #fff;
-}
-.sys-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: var(--space-4);
-}
-.page-head h1 {
-  font-size: 24px;
-  font-weight: 700;
-  margin: 0 0 var(--space-1);
-}
-.page-head p {
-  font-size: 13px;
-  color: var(--color-text-3);
-  margin: 0;
-}
-h2 {
-  font-size: 16px;
-  font-weight: 700;
-  margin: 0 0 var(--space-1);
-}
-.card-desc {
-  font-size: 12px;
-  color: var(--color-text-3);
-  margin: 0 0 var(--space-4);
-}
-.ai-mode-row {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--space-3);
+  gap: 16px;
+  height: 56px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  flex-shrink: 0;
 }
-.ai-mode-row > span {
-  font-size: 13px;
-  color: var(--color-text-2);
-  font-weight: 500;
-}
-.mode-toggle {
-  display: flex;
-  background: var(--color-bg-2);
-  border-radius: var(--radius-md);
-  padding: 2px;
+.back {
+  margin: 0;
+  padding: 6px 10px;
   border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-2);
+  font-size: 13px;
 }
-.mode-toggle button {
-  padding: 6px 12px;
+.back:hover {
+  color: var(--color-text-1);
+  background: var(--color-fill);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.brand img {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+.brand h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.brand p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.side {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  padding: 12px 8px;
+  overflow-y: auto;
+}
+.group {
+  margin: 10px 8px 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--color-text-4);
+  text-transform: uppercase;
+}
+.group:first-child {
+  margin-top: 2px;
+}
+.side a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin: 0 0 2px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-3);
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+}
+.side a:hover {
+  background: var(--color-fill);
+  color: var(--color-text-1);
+}
+.side a.on {
+  background: var(--grad-primary-soft);
+  color: var(--color-text-1);
+  font-weight: 600;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-4);
+  flex-shrink: 0;
+}
+.dot.on {
+  background: var(--color-success);
+}
+.main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 24px 28px 40px;
+}
+.sys {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  max-width: 920px;
+}
+.panel {
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-1);
+}
+.panel h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.card-desc,
+.muted {
+  margin: 0 0 12px;
   font-size: 12px;
   color: var(--color-text-3);
-  border-radius: var(--radius-sm);
-  font-weight: 500;
-  transition: all var(--duration-fast);
+  line-height: 1.5;
 }
-.mode-toggle button:hover {
-  color: var(--color-text-1);
-}
-.mode-toggle button.active {
-  background: var(--grad-primary);
-  color: white;
-}
-.env-config {
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
-}
-.env-hint {
-  font-size: 12px;
-  color: var(--color-text-2);
-  line-height: 1.6;
-  margin: 0 0 var(--space-2);
-}
-.env-hint code,
-.env-hint pre code {
-  background: var(--color-bg-1);
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-accent-2);
-}
-.env-block {
-  display: block;
-  background: var(--color-bg-1) !important;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3) !important;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-text-1);
-  white-space: pre-wrap;
-  margin: var(--space-2) 0 !important;
-  line-height: 1.6;
-  overflow-x: auto;
-}
-.mock-mode ul {
-  margin: var(--space-2) 0 0;
-  padding-left: 18px;
-  font-size: 12px;
-  color: var(--color-text-2);
-  line-height: 1.7;
-}
-
 .engine-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-3);
+  gap: 8px;
+  padding: 10px;
   background: var(--color-bg-2);
-  border-radius: var(--radius-md);
-  margin-bottom: var(--space-3);
+  border-radius: 4px;
+  margin-bottom: 10px;
 }
 .engine-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   margin-bottom: 4px;
 }
-.engine-info {
+.mini,
+.danger,
+.link {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
   font-size: 12px;
-  color: var(--color-text-3);
-  line-height: 1.6;
 }
-
-.engine-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-.link-btn {
-  font-size: 12px;
-  color: var(--color-text-3);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-}
-.link-btn:hover {
-  background: var(--color-fill);
+.mini {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
   color: var(--color-text-1);
 }
-
-.diag-details {
-  margin-top: var(--space-3);
-  background: var(--color-bg-2);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  overflow: hidden;
+.link {
+  color: var(--color-accent);
+  background: transparent;
 }
-.diag-details summary {
-  padding: 10px 12px;
+.danger {
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: transparent;
+  color: #fca5a5;
+}
+.diag {
+  margin-top: 8px;
   font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-2);
+}
+.diag summary {
   cursor: pointer;
-  user-select: none;
-  list-style: none;
-}
-.diag-details summary::-webkit-details-marker {
-  display: none;
-}
-.diag-details summary::before {
-  content: '▶';
-  display: inline-block;
-  margin-right: 6px;
-  font-size: 9px;
-  transition: transform var(--duration-fast);
-}
-.diag-details[open] summary::before {
-  transform: rotate(90deg);
-}
-.diag-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 0 12px 8px;
+  color: var(--color-text-2);
 }
 .diag-row {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-  color: var(--color-text-3);
   padding: 4px 0;
+  color: var(--color-text-3);
 }
-.diag-tip {
-  font-size: 11px;
-  color: var(--color-text-2);
-  line-height: 1.7;
-  padding: 0 12px 8px;
-}
-.diag-tip code {
-  background: var(--color-bg-1);
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--color-accent-2);
-}
-.refresh-diag {
-  margin: 0 12px 12px;
-  font-size: 11px;
-  color: var(--color-accent-2);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-}
-.refresh-diag:hover {
-  background: var(--grad-primary-soft);
-}
-
 .storage-bar {
-  height: 8px;
+  height: 6px;
   background: var(--color-bg-2);
-  border-radius: var(--radius-full);
+  border-radius: 2px;
   overflow: hidden;
-  margin-bottom: var(--space-2);
+  margin-bottom: 8px;
 }
 .storage-bar-fill {
   height: 100%;
-  background: var(--grad-primary);
-  transition: width 0.3s var(--ease-out);
+  background: var(--color-accent);
 }
 .storage-info {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: var(--color-text-3);
-  margin-bottom: var(--space-3);
+  color: var(--color-text-4);
+  margin-bottom: 10px;
 }
-.storage-stats {
-  display: flex;
-  gap: var(--space-3);
+.ss {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
 }
-.ss-item {
-  flex: 1;
-  background: var(--color-bg-2);
-  border-radius: var(--radius-sm);
-  padding: 10px;
+.ss div {
   text-align: center;
+  padding: 8px;
+  background: var(--color-bg-2);
+  border-radius: 4px;
 }
-.ss-num {
-  font-size: 20px;
-  font-weight: 700;
-  background: var(--grad-primary);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  margin-bottom: 2px;
+.ss b {
+  display: block;
+  font-size: 18px;
 }
-.ss-label {
+.ss span {
   font-size: 11px;
-  color: var(--color-text-3);
+  color: var(--color-text-4);
 }
-
-.proj-actions {
+.proj {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-}
-
-.about {
-  font-size: 12px;
+  gap: 8px;
 }
 .about-row {
   display: flex;
   justify-content: space-between;
   padding: 6px 0;
   border-bottom: 1px solid var(--color-border);
+  font-size: 12px;
   color: var(--color-text-3);
 }
 .about-row:last-child {

@@ -88,11 +88,11 @@ export function getMusicConfig() {
 }
 
 export function getRemakeVisionModel() {
-  return envDefaults().remakeVisionModel || 'qwen3.8-max'
+  return envDefaults().remakeVisionModel || 'qwen-vl-max'
 }
 
 export function getRemakeImageModel() {
-  return envDefaults().remakeImageModel || 'gpt-image-2'
+  return envDefaults().remakeImageModel || 'gpt-image-1'
 }
 
 /** 出图模型：设置页当前选中的；没配时复刻项目回落到 GPT Image */

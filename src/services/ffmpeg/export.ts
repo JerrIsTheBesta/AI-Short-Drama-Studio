@@ -24,6 +24,9 @@ export interface ExportInput {
   burnCaptions?: boolean
   captionCues?: SubtitleCue[]
   captionBg?: boolean
+  captionHighlight?: boolean
+  captionHighlightColor?: string
+  captionHighlightScale?: number
   bgm?: Blob
   bgmVolume?: number
   /** 分镜原片环境音音量（0=静音，建议 0.35–0.7） */
@@ -236,6 +239,11 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
         width,
         height,
         !!input.captionBg,
+        {
+          enabled: !!input.captionHighlight,
+          color: input.captionHighlightColor,
+          scale: input.captionHighlightScale
+        },
         input.onProgress
       )
       log(`✓ 字幕烧录完成（${captionCues.length} 条）`)
@@ -348,6 +356,11 @@ async function burnCaptionsOverlay(
   width: number,
   height: number,
   captionBg: boolean,
+  highlight: {
+    enabled: boolean
+    color?: string
+    scale?: number
+  },
   onProgress?: (msg: string) => void
 ): Promise<string> {
   const outName = 'with_caption.mp4'
@@ -357,7 +370,7 @@ async function burnCaptionsOverlay(
     const text = cues[i].text.trim()
     if (!text) continue
     onProgress?.(`绘制字幕 ${layers.length + 1}/${cues.length}...`)
-    const png = await renderCaptionPng(text, style, width, height, captionBg)
+    const png = await renderCaptionPng(text, style, width, height, captionBg, highlight)
     if (!png.size) continue
     const file = `cap_${i}.png`
     await writeFile(ffmpeg, file, png)

@@ -1,4 +1,4 @@
-/** 从 Vite .env 读默认值（不含 Pinia，避免和 settings store 循环依赖） */
+/** 从 Vite .env 读本机开发默认值。打包构建会清空这些值，不会写进安装包。 */
 
 function envStr(key: string, fallback = ''): string {
   const v = (import.meta.env as Record<string, string | undefined>)[key]
@@ -20,8 +20,8 @@ export function migrateVideoBaseUrl(url: string): string {
 }
 
 export function migrateVideoWorkflowId(id: string): string {
-  if (!id || isLegacyVideoConfig(id)) return VIDEO_DEFAULT_WORKFLOW_ID
-  return id
+  if (isLegacyVideoConfig(id)) return VIDEO_DEFAULT_WORKFLOW_ID
+  return (id || '').trim()
 }
 
 export function envRealMode(): boolean {
@@ -38,16 +38,19 @@ export function envDefaults() {
       model: envStr('VITE_LLM_MODEL', 'deepseek-v4-flash')
     },
     vision: {
-      baseUrl: envStr('VITE_VISION_BASE_URL', envStr('VITE_IMAGE_BASE_URL', 'https://api.apiyi.com/v1')),
+      baseUrl: envStr(
+        'VITE_VISION_BASE_URL',
+        envStr('VITE_IMAGE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+      ),
       apiKey: envStr('VITE_VISION_API_KEY') || envStr('VITE_IMAGE_API_KEY'),
-      model: envStr('VITE_VISION_MODEL', 'qwen3-vl-plus')
+      model: envStr('VITE_VISION_MODEL', 'qwen-vl-max')
     },
-    remakeVisionModel: envStr('VITE_REMAKE_VISION_MODEL', 'qwen3.8-max'),
-    remakeImageModel: envStr('VITE_REMAKE_IMAGE_MODEL', 'gpt-image-2'),
+    remakeVisionModel: envStr('VITE_REMAKE_VISION_MODEL', 'qwen-vl-max'),
+    remakeImageModel: envStr('VITE_REMAKE_IMAGE_MODEL', 'gpt-image-1'),
     image: {
-      baseUrl: envStr('VITE_IMAGE_BASE_URL', 'https://api.apiyi.com/v1'),
+      baseUrl: envStr('VITE_IMAGE_BASE_URL', 'https://ark.cn-beijing.volces.com/api/v3'),
       apiKey: envStr('VITE_IMAGE_API_KEY'),
-      model: envStr('VITE_IMAGE_MODEL', 'seedream-4-5-251128')
+      model: envStr('VITE_IMAGE_MODEL', 'doubao-seedream-4-0-250828')
     },
     tts: {
       baseUrl: envStr('VITE_TTS_BASE_URL', 'https://dashscope.aliyuncs.com/api/v1'),
@@ -56,9 +59,9 @@ export function envDefaults() {
       voice: envStr('VITE_TTS_VOICE', 'longanhuan_v3.6')
     },
     video: {
-      baseUrl: migrateVideoBaseUrl(envStr('VITE_VIDEO_BASE_URL', VIDEO_AUTODL_ROOT)),
+      baseUrl: migrateVideoBaseUrl(envStr('VITE_VIDEO_BASE_URL', 'https://api.minimaxi.com/v1')),
       apiKey: envStr('VITE_VIDEO_API_KEY'),
-      workflowId: migrateVideoWorkflowId(envStr('VITE_VIDEO_WORKFLOW_ID', VIDEO_DEFAULT_WORKFLOW_ID))
+      workflowId: migrateVideoWorkflowId(envStr('VITE_VIDEO_WORKFLOW_ID', 'MiniMax-Hailuo-2.3'))
     },
     music: {
       baseUrl: envStr('VITE_MUSIC_BASE_URL', 'https://api.minimaxi.com/v1'),

@@ -118,6 +118,8 @@ function skillSelectContext(userText: string) {
   const shots = p?.shots ?? []
   return {
     userText,
+    pipelineMode: p?.pipelineMode,
+    workflowMode: p?.script?.workflowMode,
     hasShots: shots.length > 0,
     missingSheets: subjects.some((s) => !s.designSheetAssetId || !s.propSheetAssetId),
     missingPlates: scenes.some((s) => !s.plateAssetId),
@@ -504,7 +506,7 @@ function wrapUpReply(
   if (didImg && !didVid) {
     const next = nextPipelineStep(p)
     return {
-      reply: continueQuestion(next, '六格故事看板已经铺到画布上了。\n') + failLine,
+      reply: continueQuestion(next, '故事看板已经铺到画布上了。\n') + failLine,
       chips: nextChips(next)
     }
   }
