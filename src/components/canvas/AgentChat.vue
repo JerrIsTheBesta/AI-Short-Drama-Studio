@@ -188,10 +188,13 @@ function onProgress(ev: AgentEvent) {
   } else if (ev.kind === 'log') {
     thinking.value = ev.label.includes('想')
     const running = [...trace.value].reverse().find((s) => s.kind === 'step' && s.status === 'running')
-    if (running && ev.step === running.key) {
+    const landed = /已上画布|已写入画布|已交付 \d+ 个可编辑分镜/.test(ev.label)
+    if (running && (ev.step === running.key || !ev.step)) {
       running.detail = ev.label
-    } else if (running && !ev.step) {
-      running.detail = ev.label
+      if (landed) {
+        running.status = 'done'
+        running.label = ev.label
+      }
     } else {
       trace.value = [
         ...trace.value,
@@ -206,10 +209,12 @@ function applyCanvasActivity(ev: CanvasActivity) {
   if (ev.source === 'agent' && busy.value) return
   canvasLive.value = true
   if (!busy.value) log.value = ev.message || ev.label
+  const landed = /已上画布|已写入画布/.test(ev.message || ev.label || '')
   upsertCanvasStep(ev.nodeId, {
     kind: 'step',
-    label: ev.label,
-    status: ev.kind === 'done' ? 'done' : ev.kind === 'error' ? 'fail' : 'running',
+    label: landed && ev.message ? ev.message : ev.label,
+    status:
+      ev.kind === 'done' || landed ? 'done' : ev.kind === 'error' ? 'fail' : 'running',
     detail: ev.message
   })
   if (ev.kind === 'done' || ev.kind === 'error') {
@@ -367,7 +372,7 @@ async function send() {
             <i />
             <div>
               <p>{{ s.label }}</p>
-              <small v-if="s.detail && s.status === 'running'">{{ s.detail }}</small>
+              <small v-if="s.detail">{{ s.detail }}</small>
             </div>
           </li>
         </ol>

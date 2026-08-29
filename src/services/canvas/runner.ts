@@ -6,42 +6,64 @@ import {
   generateStoryboard,
   generatePlay,
   storyboardToShots,
+  applyAestheticToScript,
   isPlayReady,
-  characterSheetPrompt,
-  characterPropSheetPrompt,
-  shotBoardPrompt,
-  scenePlatePrompt,
   composeVideoPrompt,
-  compileH3OfficialPrompt,
+  buildH3ImageSlots,
   spokenTextOnly,
   enrichVideoPerformance,
   reviewImageQuality,
   reviewVideoQuality,
   reviewSpeechQuality,
   analyzeRemakeVideo,
-  remakeShotsFromAnalysis
+  remakeShotsFromAnalysis,
+  DIGITAL_HUMAN_VISUAL_LOCK,
+  DIGITAL_HUMAN_AESTHETIC,
+  DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+  DIGITAL_HUMAN_SPEAKER_HINT,
+  DIGITAL_HUMAN_SPEAKER_NAME,
+  DIGITAL_HUMAN_SCENE_NAME,
+  DIGITAL_HUMAN_SCENE_DESCRIPTION,
+  DIGITAL_HUMAN_SCENE_ANCHOR,
+  DIGITAL_HUMAN_IMAGE_ASSIGNMENT
 } from '@/services/ai'
+import { replaceVideoAudio } from '@/services/ffmpeg'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
-import { collectShotRefIds, collectShotBoardRefIds, collectShotVideoEntries, packVideoRefEntries, composeShotImagePrompt, boundSubjectIds, sceneForShot, subjectsForShot } from '@/utils/consistency'
+import { collectShotRefIds, collectShotBoardRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
+import { resolveShotPlace } from '@/utils/shotPlace'
+import {
+  extractPlayDirectives,
+  extractSceneSlice
+} from '@/utils/scriptMarkdown'
 import { countAddedPlayScenes } from '@/utils/playContinue'
 import {
-  effectiveImagePrompt,
   needsExternalTts,
   pushHistory,
   resolveH3VoiceMode
 } from '@/utils/shot'
 import { rebuildCanvasGraph } from './layout'
 import { emitCanvasActivity } from './canvasBridge'
-import { extractStageLabel } from './pipeline'
+import { extractStageLabel, extractStageNoun, nextExtractStage, type ExtractStage } from './pipeline'
 import { friendlyAiError } from '@/services/ai/abort'
 import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
+import {
+  boardSendPrompt,
+  defaultVideoSendPrompt,
+  scenePropSendPrompt,
+  sceneSendPrompt,
+  shotImageSendPrompt,
+  subjectSendPrompt,
+  videoSendPrompt
+} from '@/utils/nodePrompt'
 import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
 import { mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
-import type { CanvasNode, Scene, Shot, Subject } from '@/types'
+import type { CanvasNode, ID, Scene, Shot, Subject, VideoGenModel } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel } from '@/types'
+import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 
 export type RunProgress = (nodeId: string, msg: string) => void
 export type NodeRunOpts = { hd?: boolean }
@@ -116,6 +138,8 @@ function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof us
       return `资产图「${subjects.find((s) => s.id === node.data.subjectId)?.name || '角色'}」`
     case 'scene':
       return `场景锚点「${scenes.find((s) => s.id === node.data.sceneId)?.name || '场景'}」`
+    case 'sceneProps':
+      return `关键道具「${scenes.find((s) => s.id === node.data.sceneId)?.name || '场景'}」`
     case 'shotBoard':
       return `故事看板 ${shotNo(node.data.shotId)}`
     case 'shotImage':
@@ -182,6 +206,19 @@ async function extraRefBlobs(ids: string[] | undefined, label: string) {
   return { blobs, labels }
 }
 
+type SharedImageCategory = '角色' | '场景' | '道具' | '其他'
+
+async function saveGeneratedImageToSharedLibrary(
+  blob: Blob,
+  category: SharedImageCategory,
+  filename: string,
+  prompt: string,
+  onProgress?: (msg: string) => void
+) {
+  onProgress?.(`保存到共用资产库 · ${category}...`)
+  return useLibraryStore().addCategorized(blob, category, 'ai-generated', { filename, prompt })
+}
+
 export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
@@ -198,7 +235,10 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
     ...(useProduct ? product.map(() => `角色「${latest.name}」参考照片，外貌必须一致`) : []),
     ...extras.labels
   ].slice(0, 10)
-  const prompt = characterSheetPrompt(latest, style, refs.length > 0, look)
+  const prompt = subjectSendPrompt(latest, project.current)
+  if (!latest.sheetPrompt?.trim()) {
+    project.updateSubject(latest.id, { sheetPrompt: prompt })
+  }
   onProgress?.(refs.length ? `生成四视图（${refs.length} 张参考）...` : '生成四视图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
@@ -223,6 +263,7 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
   onProgress?.('校验人设图片文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`四视图文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '角色', asset.filename, prompt, onProgress)
   project.updateSubject(latest.id, {
     designSheetAssetId: asset.id,
     designSheetHistoryIds: pushHistory(
@@ -235,8 +276,8 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
   return asset
 }
 
-export async function generateSubjectPropSheet(
-  sub: Subject,
+export async function generateScenePropSheet(
+  scn: Scene,
   onProgress?: (msg: string) => void,
   signal?: AbortSignal
 ) {
@@ -244,25 +285,29 @@ export async function generateSubjectPropSheet(
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  const latest = (project.current.subjects ?? []).find((s) => s.id === sub.id) || sub
+  const latest = (project.current.scenes ?? []).find((s) => s.id === scn.id) || scn
+  if (!sceneHasKeyProps(latest)) throw new Error('当前场景没有关键道具；请先填写 1—4 件明显或推动剧情的道具')
   const look = lookFromScript(project.current.script)
   const style = look.style
-  const prompt = characterPropSheetPrompt(latest, style, look)
+  const prompt = scenePropSendPrompt(latest, project.current)
+  if (!latest.propSheetPrompt?.trim()) {
+    project.updateScene(latest.id, { propSheetPrompt: prompt })
+  }
   const refs: Blob[] = []
   const labels: string[] = []
-  if (latest.designSheetAssetId) {
-    const four = await assets.getBlob(latest.designSheetAssetId)
-    if (four) {
-      refs.push(four)
-      labels.push(`四视图「${latest.name}」，资产图里的物件必须能戴在/拿在这个人身上`)
+  if (latest.plateAssetId) {
+    const plate = await assets.getBlob(latest.plateAssetId)
+    if (plate) {
+      refs.push(plate)
+      labels.push(`场景锚点「${latest.name}」，关键道具的时代、材质与配色必须匹配这个场景`)
     }
   }
-  const extras = await extraRefBlobs(latest.propReferenceAssetIds, `资产补充参考，物件外观必须一致`)
+  const extras = await extraRefBlobs(latest.propReferenceAssetIds, `关键道具补充参考，物件外观必须一致`)
   refs.push(...extras.blobs)
   labels.push(...extras.labels)
   const clippedRefs = refs.slice(0, 10)
   const clippedLabels = labels.slice(0, 10)
-  onProgress?.(clippedRefs.length ? `生成资产图（${clippedRefs.length} 张参考）...` : '生成资产图...')
+  onProgress?.(clippedRefs.length ? `生成关键道具图（${clippedRefs.length} 张参考）...` : '生成关键道具图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
     {
@@ -279,14 +324,15 @@ export async function generateSubjectPropSheet(
     onProgress
   )
   const asset = await assets.add(result.blob, 'image', 'ai-generated', {
-    filename: `props_${latest.name}_${Date.now().toString(36)}`,
+    filename: `scene_props_${latest.name}_${Date.now().toString(36)}`,
     prompt,
     projectId: project.current.id
   })
-  onProgress?.('校验资产图文件...')
+  onProgress?.('校验关键道具图文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
-  if (!quality.passed) throw new Error(`资产图文件无效：${quality.issues.join('；')}`)
-  project.updateSubject(latest.id, {
+  if (!quality.passed) throw new Error(`关键道具图文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '道具', asset.filename, prompt, onProgress)
+  project.updateScene(latest.id, {
     propSheetAssetId: asset.id,
     propSheetHistoryIds: pushHistory(latest.propSheetAssetId, asset.id, latest.propSheetHistoryIds)
   })
@@ -303,7 +349,10 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
   const look = lookFromScript(project.current.script)
   const style = look.style
   const extras = await extraRefBlobs(latest.referenceAssetIds, `场景「${latest.name}」参考，空间和光线必须一致`)
-  const prompt = scenePlatePrompt(latest, style, look)
+  const prompt = sceneSendPrompt(latest, project.current)
+  if (!latest.platePrompt?.trim()) {
+    project.updateScene(latest.id, { platePrompt: prompt })
+  }
   onProgress?.(extras.blobs.length ? `生成场景锚点图（${extras.blobs.length} 张参考）...` : '生成场景锚点图...')
   const size = imageGenSize('sheet')
   const result = await generateImage(
@@ -328,6 +377,7 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
   onProgress?.('校验场景图片文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`场景锚点图文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '场景', asset.filename, prompt, onProgress)
   project.updateScene(latest.id, {
     plateAssetId: asset.id,
     plateHistoryIds: pushHistory(latest.plateAssetId, asset.id, latest.plateHistoryIds)
@@ -357,13 +407,10 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
     blobs.push(b)
     labels.push(bundle.labels[i])
   }
-  const filmChapter =
-    project.current.pipelineMode !== 'remake' &&
-    project.current.script?.workflowMode === 'film-chapter'
-  const prompt = shotBoardPrompt(shot, style, look, {
-    filmChapter,
-    aspectRatio: project.current.settings.aspectRatio
-  })
+  const prompt = boardSendPrompt(shot, project.current)
+  if (!shot.boardPrompt?.trim()) {
+    project.updateShot(shot.id, { boardPrompt: prompt })
+  }
   onProgress?.(blobs.length ? `画故事看板（${blobs.length} 张参考）...` : '画故事看板...')
   const size = imageGenSize('shot')
   const result = await generateImage(
@@ -389,6 +436,7 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
   onProgress?.('校验故事看板文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`故事看板文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '其他', asset.filename, prompt, onProgress)
   project.assignShotBoard(shot.id, asset.id)
   await project.save()
   return asset
@@ -420,11 +468,10 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
     blobs.push(b)
     labels.push(bundle.labels[i])
   }
-  const prompt = composeShotImagePrompt(
-    shot,
-    project.current,
-    effectiveImagePrompt(shot) || shot.title
-  )
+  const prompt = shotImageSendPrompt(shot, project.current)
+  if (!shot.imagePrompt?.trim()) {
+    project.updateShot(shot.id, { imagePrompt: prompt })
+  }
   onProgress?.(blobs.length ? `图生图（${blobs.length} 张锁定参考）...` : '文生图...')
   const size = imageGenSize('shot')
   const result = await generateImage(
@@ -450,6 +497,7 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
   onProgress?.('校验关键帧文件...')
   const quality = await reviewImageQuality(result.blob, prompt, signal)
   if (!quality.passed) throw new Error(`关键帧文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '其他', asset.filename, prompt, onProgress)
   project.assignShotImage(shot.id, asset.id)
   await project.save()
   return asset
@@ -483,11 +531,199 @@ async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => voi
   return refreshShot(shot.id)
 }
 
+/**
+ * 智能口播单镜重做：只允许项目上传的人物图作为唯一视觉参考。
+ * 不能走电影分镜的“人设图 + 场景图 + 故事看板”收集器，否则会丢掉原人物并随机造人。
+ */
+async function regenerateDigitalHumanShot(
+  shot: Shot,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  const flow = p?.speechWorkflow
+  if (!p || p.pipelineMode !== 'smart-speech' || flow?.mode !== 'digital-human') {
+    throw new Error('当前不是数字人口播项目')
+  }
+  const referenceId = flow.imageAssetId
+  if (!referenceId) {
+    throw new Error('数字人口播人物参考图已丢失，已阻止随机生成人物。请重新上传人物图后再生成。')
+  }
+  const referenceBlob = await assets.getBlob(referenceId)
+  if (!referenceBlob) {
+    throw new Error('数字人口播人物参考图文件读取失败，已阻止提交生成任务。')
+  }
+  const spoken = spokenTextOnly(shot.voiceover || '')
+  if (!spoken) throw new Error('该镜头没有口播原文')
+  if (!shot.audioAssetId) {
+    throw new Error('该镜头缺少克隆语音，已阻止生成，避免得到错误声音的视频。')
+  }
+  const clonedSpeech = await assets.getBlob(shot.audioAssetId)
+  if (!clonedSpeech) throw new Error('该镜头的克隆语音文件读取失败')
+
+  if (shot.imageAssetId !== referenceId) {
+    project.updateShot(shot.id, { imageAssetId: referenceId })
+    await project.save()
+  }
+  onProgress?.('已锁定项目人物图（唯一参考），正在生成同人物口播…')
+  const result = await generateVideo(
+    {
+      imageBlob: referenceBlob,
+      prompt: DIGITAL_HUMAN_VISUAL_LOCK,
+      aesthetic: DIGITAL_HUMAN_AESTHETIC,
+      audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+      voiceover: spoken,
+      voiceMode: 'dialogue',
+      speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
+      speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
+      onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
+      sceneName: DIGITAL_HUMAN_SCENE_NAME,
+      sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
+      sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
+      shotTitle: 'Locked single-person talking head',
+      imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
+      duration: Math.min(15, Math.max(3, Math.ceil(shot.duration))),
+      width: p.settings.width,
+      height: p.settings.height,
+      aspectRatio: p.settings.aspectRatio,
+      cameraMovement: 'static',
+      mode: 'I2VA',
+      signal,
+      resumeTaskId: shot.videoTaskId,
+      onTaskSubmitted: async (taskId) => {
+        project.updateShot(shot.id, { videoTaskId: taskId })
+        await project.save()
+      }
+    },
+    onProgress
+  )
+  ensureNotCancelled(signal)
+  onProgress?.('重新写入本镜克隆语音…')
+  const finalBlob = await replaceVideoAudio(result.blob, clonedSpeech, onProgress)
+  const quality = await reviewVideoQuality(finalBlob, result.prompt, signal)
+  if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
+  const asset = await assets.add(finalBlob, 'video', 'ai-generated', {
+    filename: `digital_human_${shot.index + 1}_${Date.now().toString(36)}.mp4`,
+    prompt: result.prompt,
+    projectId: p.id,
+    shotId: shot.id
+  })
+  project.assignShotVideo(shot.id, asset.id)
+  project.updateShot(shot.id, { videoTaskId: undefined })
+  const generatedIds = [...(flow.generatedVideoAssetIds || [])]
+  generatedIds[shot.index] = asset.id
+  p.speechWorkflow = {
+    ...flow,
+    generatedVideoAssetIds: generatedIds,
+    progress: `第 ${shot.index + 1} 段已用原人物参考图重新生成。`,
+    updatedAt: Date.now()
+  }
+  await project.save()
+  return asset
+}
+
+async function loadRefImageBlob(id: ID, label: string): Promise<Blob> {
+  const assets = useAssetsStore()
+  const library = useLibraryStore()
+  const blob = (await assets.getBlob(id)) || (await library.getBlob(id))
+  if (!blob) throw new Error(`${label}读取失败`)
+  return blob
+}
+
+function canvasVideoModelForShot(shot: Shot): VideoGenModel {
+  const node = useProjectStore().current?.canvas?.nodes.find(
+    (n) => n.type === 'shotVideo' && n.data.shotId === shot.id
+  )
+  return normalizeVideoGenModel(node?.data.videoModel)
+}
+
+function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
+  return videoModel !== 'wan-prime' && normalizeH3GenMode(shot.h3GenMode) === 'fl2va'
+}
+
 export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
+  if (
+    project.current.pipelineMode === 'smart-speech' &&
+    project.current.speechWorkflow?.mode === 'digital-human'
+  ) {
+    return regenerateDigitalHumanShot(shot, onProgress, signal)
+  }
+  const videoModel = canvasVideoModelForShot(shot)
+  if (shotUsesFl2va(shot, videoModel)) {
+    const firstId = shot.firstFrameAssetId || shot.imageAssetId
+    const lastId = shot.lastFrameAssetId
+    if (!firstId) throw new Error('首尾帧模式需要首帧。请选择首帧，或先给本镜配图。')
+    if (!lastId) throw new Error('首尾帧模式需要尾帧。请选择尾帧。')
+    onProgress?.('读取首帧和尾帧…')
+    const firstBlob = await loadRefImageBlob(firstId, '首帧')
+    const lastBlob = await loadRefImageBlob(lastId, '尾帧')
+    const promptStyle = getVideoPromptStyle()
+    const cast = subjectsForShot(shot, project.current)
+    const scene = sceneForShot(shot, project.current)
+    const place = resolveShotPlace(shot, scene)
+    const spoken = spokenTextOnly(shot.voiceover || '')
+    const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+    const onScreenNames = cast.map((subject) => subject.name)
+    const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
+    let officialPrompt = videoSendPrompt(shot, project.current)
+    if (shot.compiledVideoPrompt == null) {
+      project.updateShot(shot.id, { compiledVideoPrompt: officialPrompt })
+    }
+    onProgress?.('使用节点上的完整提示词出视频（首尾帧）…')
+    const result = await generateVideo(
+      {
+        imageBlob: firstBlob,
+        lastFrameBlob: lastBlob,
+        prompt: officialPrompt,
+        promptAsIs: true,
+        aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
+        audioDescription: shot.audioDescription,
+        voiceover: spoken,
+        voiceMode,
+        speakerHint: shot.speakerHint,
+        speakerName: visibleSpeaker,
+        onScreenNames,
+        sceneName: place.name,
+        sceneLighting: place.lighting,
+        shotTitle: shot.title,
+        duration: shot.duration,
+        width: project.current.settings.width,
+        height: project.current.settings.height,
+        aspectRatio: project.current.settings.aspectRatio,
+        cameraMovement: shot.cameraMovement,
+        promptStyle,
+        videoModel: 'h3',
+        h3GenMode: 'fl2va',
+        mode: 'I2VA',
+        signal,
+        resumeTaskId: shot.videoTaskId,
+        onTaskSubmitted: async (taskId) => {
+          project.updateShot(shot.id, { videoTaskId: taskId })
+          await project.save()
+        }
+      },
+      onProgress
+    )
+    onProgress?.('校验视频文件...')
+    const quality = await reviewVideoQuality(result.blob, result.prompt, signal)
+    if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
+    const asset = await assets.add(result.blob, 'video', 'ai-generated', {
+      filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
+      prompt: result.prompt,
+      projectId: project.current.id,
+      shotId: shot.id
+    })
+    project.assignShotVideo(shot.id, asset.id)
+    project.updateShot(shot.id, { videoTaskId: undefined })
+    await project.save()
+    return asset
+  }
   shot = await ensureShotVideoRefs(shot, onProgress, signal)
 
   const allEntries = collectShotVideoEntries(shot, project.current)
@@ -497,65 +733,43 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     throw new Error('没有本镜故事看板，无法出视频。看板是这一镜的整体故事架构。')
   }
   const blobs: Blob[] = []
+  const library = useLibraryStore()
   for (const entry of packed) {
-    const blob = await assets.getBlob(entry.id)
+    const blob = (await assets.getBlob(entry.id)) || (await library.getBlob(entry.id))
     if (!blob) throw new Error(`${entry.name || entry.kind} 参考图读取失败`)
     blobs.push(blob)
   }
   const extraChars = allEntries.filter((entry) => entry.kind === 'character').length
     - packed.filter((entry) => entry.kind === 'character').length
-  if (extraChars > 0) {
-    onProgress?.(`本镜角色太多，已按最多 9 张传：先角色设计图，再场景，再故事看板`)
+  const extraDropped = allEntries.filter((entry) => entry.kind === 'extra').length
+    - packed.filter((entry) => entry.kind === 'extra').length
+  if (extraChars > 0 || extraDropped > 0) {
+    onProgress?.(`参考图已按最多 9 张打包：角色设计图、场景、故事看板，再加你补充的参考`)
   }
 
   const promptStyle = getVideoPromptStyle()
   const cast = subjectsForShot(shot, project.current)
   const scene = sceneForShot(shot, project.current)
-  onProgress?.('写细视频内容表现…')
-  const performance = await enrichVideoPerformance({
-    shot,
-    subjects: cast,
-    scene,
-    signal
-  })
-  if (performance && performance !== shot.videoPrompt) {
-    project.updateShot(shot.id, { videoPrompt: performance })
-  }
+  const place = resolveShotPlace(shot, scene)
   const spoken = spokenTextOnly(shot.voiceover || '')
   const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
   const onScreenNames = cast.map((subject) => subject.name)
   const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
-  const imageAssignments = packed.map((entry) => entry.label)
-  onProgress?.('按 H3 多图参考格式编译提示词…')
-  const officialPrompt = await compileH3OfficialPrompt({
-    prompt: performance,
-    aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
-    audioDescription: shot.audioDescription,
-    voiceover: spoken,
-    voiceMode,
-    speakerHint: shot.speakerHint,
-    speakerName: visibleSpeaker,
-    onScreenNames,
-    sceneName: scene?.name,
-    sceneDescription: scene?.description,
-    sceneLighting: scene?.lighting,
-    sceneAnchor: scene?.mainAnchor,
-    shotTitle: shot.title,
-    imageAssignments,
-    duration: shot.duration,
-    width: project.current.settings.width,
-    height: project.current.settings.height,
-    aspectRatio: project.current.settings.aspectRatio,
-    cameraMovement: shot.cameraMovement,
-    promptStyle,
-    signal
-  })
+  const imageSlots = buildH3ImageSlots(packed)
+  const imageAssignments = imageSlots.map((slot) => slot.job)
+  let officialPrompt = videoSendPrompt(shot, project.current)
+  if (shot.compiledVideoPrompt == null) {
+    project.updateShot(shot.id, { compiledVideoPrompt: officialPrompt })
+  }
+  onProgress?.('使用节点上的完整提示词出视频…')
   const slotNames = packed.map((entry, index) =>
     entry.kind === 'character'
       ? `图${index + 1}「${entry.name}」人设`
       : entry.kind === 'scene'
         ? `图${index + 1}场景`
-        : `图${index + 1}故事看板`
+        : entry.kind === 'extra'
+          ? `图${index + 1}补充参考`
+          : `图${index + 1}故事看板`
   )
   onProgress?.(`生成视频（${slotNames.join('、')}）…`)
   const result = await generateVideo(
@@ -563,6 +777,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       imageBlob: blobs[0],
       referenceImages: blobs.slice(1),
       prompt: officialPrompt,
+      promptAsIs: true,
       aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
       audioDescription: shot.audioDescription,
       voiceover: spoken,
@@ -570,19 +785,26 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       speakerHint: shot.speakerHint,
       speakerName: visibleSpeaker,
       onScreenNames,
-      sceneName: scene?.name,
-      sceneDescription: scene?.description,
-      sceneLighting: scene?.lighting,
-      sceneAnchor: scene?.mainAnchor,
+      sceneName: place.name,
+      sceneLighting: place.lighting,
       shotTitle: shot.title,
       imageAssignments,
+      imageSlots,
       duration: shot.duration,
       width: project.current.settings.width,
       height: project.current.settings.height,
       aspectRatio: project.current.settings.aspectRatio,
       cameraMovement: shot.cameraMovement,
       promptStyle,
-      signal
+      videoModel,
+      h3GenMode: 'reference',
+      mode: 'R2VA',
+      signal,
+      resumeTaskId: shot.videoTaskId,
+      onTaskSubmitted: async (taskId) => {
+        project.updateShot(shot.id, { videoTaskId: taskId })
+        await project.save()
+      }
     },
     onProgress
   )
@@ -600,25 +822,54 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       speakerHint: shot.speakerHint,
       speakerName: visibleSpeaker,
       onScreenNames,
-      sceneName: scene?.name,
-      sceneDescription: scene?.description,
-      sceneLighting: scene?.lighting,
-      sceneAnchor: scene?.mainAnchor,
+      sceneName: place.name,
+      sceneLighting: place.lighting,
       shotTitle: shot.title,
       imageAssignments,
+      imageSlots,
       duration: shot.duration,
       width: project.current.settings.width,
       height: project.current.settings.height,
       aspectRatio: project.current.settings.aspectRatio,
       cameraMovement: shot.cameraMovement,
-      promptStyle
+      promptStyle,
+      mode: 'R2VA'
     }),
     projectId: project.current.id,
     shotId: shot.id
   })
   project.assignShotVideo(shot.id, asset.id)
+  project.updateShot(shot.id, { videoTaskId: undefined })
   await project.save()
   return asset
+}
+
+/** 按本镜场记和章节剧本，用导演口吻重写视频内容表现。 */
+export async function rewriteShotPerformance(shot: Shot, signal?: AbortSignal): Promise<string> {
+  const project = useProjectStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const shots = project.current.shots
+  const shotIndex = shots.findIndex((item) => item.id === shot.id)
+  const scene = sceneForShot(shot, project.current)
+  const play = project.current.script?.content || ''
+  const performance = await enrichVideoPerformance({
+    shot,
+    force: true,
+    prevShot: shotIndex > 0 ? shots[shotIndex - 1] : undefined,
+    nextShot: shotIndex >= 0 ? shots[shotIndex + 1] : undefined,
+    subjects: subjectsForShot(shot, project.current),
+    scene,
+    chapterNotes: extractPlayDirectives(play),
+    sceneExcerpt: extractSceneSlice(play, scene?.name),
+    signal
+  })
+  const compiled = defaultVideoSendPrompt(
+    { ...shot, videoPrompt: performance },
+    project.current
+  )
+  project.updateShot(shot.id, { videoPrompt: performance, compiledVideoPrompt: compiled })
+  await project.save()
+  return compiled
 }
 
 export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
@@ -715,7 +966,8 @@ export async function runGeneratePlay(
       keywords: project.current.script.keywords,
       model: resolveLlmModel(model),
       playMode: continueMode ? 'continue' : 'write',
-      continueHint: opts?.hint
+      continueHint: opts?.hint,
+      workflowMode: project.current.script.workflowMode
     },
     onProgress,
     signal
@@ -751,18 +1003,99 @@ export async function runGeneratePlay(
     const added = countAddedPlayScenes(previousPlay, run.result.playMarkdown)
     onProgress?.(
       added > 0
-        ? `已续写 ${added} 场。已有节点未动，要同步请点「重新提炼节点」。`
-        : '剧本已更新。已有节点未动，要同步请点「重新提炼节点」。'
+        ? `已续写 ${added} 场。已有人物和场景未动，要同步新场请在「分镜」分组点重新提取。`
+        : '剧本已更新。已有节点未动，要同步请在对应分组点重新提取。'
     )
   }
   return run
 }
 
-/** 第二步：从完整剧本提炼人物 / 场景 / 分镜节点 */
+function normExtractName(name: string) {
+  return String(name || '').replace(/\s+/g, '').toLowerCase()
+}
+
+function mergeByName<T extends { id: string; name: string }>(
+  next: T[],
+  prev: T[],
+  prefix: string,
+  take: (fresh: T, old: T) => T
+): T[] {
+  const leftover = [...prev]
+  const out: T[] = []
+  for (const item of next) {
+    const idx = leftover.findIndex((row) => normExtractName(row.name) === normExtractName(item.name))
+    if (idx >= 0) out.push(take(item, leftover.splice(idx, 1)[0]))
+    else out.push(item)
+  }
+  const seen = new Set<string>()
+  return out.map((item) => {
+    if (!seen.has(item.id)) {
+      seen.add(item.id)
+      return item
+    }
+    let i = 1
+    while (seen.has(`${prefix}_${i}`)) i += 1
+    const id = `${prefix}_${i}`
+    seen.add(id)
+    return { ...item, id }
+  })
+}
+
+function mergeSubjectAssets(next: Subject[], prev: Subject[]): Subject[] {
+  return mergeByName(next, prev, 'sub', (fresh, old) => ({
+    ...fresh,
+    id: old.id,
+    designSheetAssetId: old.designSheetAssetId,
+    designSheetHistoryIds: old.designSheetHistoryIds,
+    propSheetAssetId: old.propSheetAssetId,
+    propSheetHistoryIds: old.propSheetHistoryIds,
+    referenceAssetIds: old.referenceAssetIds,
+    propReferenceAssetIds: old.propReferenceAssetIds
+  }))
+}
+
+function mergeSceneAssets(next: Scene[], prev: Scene[]): Scene[] {
+  return mergeByName(next, prev, 'scn', (fresh, old) => ({
+    ...fresh,
+    id: old.id,
+    plateAssetId: old.plateAssetId,
+    plateHistoryIds: old.plateHistoryIds,
+    propSheetAssetId: old.propSheetAssetId,
+    propSheetHistoryIds: old.propSheetHistoryIds,
+    referenceAssetIds: old.referenceAssetIds,
+    propReferenceAssetIds: old.propReferenceAssetIds
+  }))
+}
+
+function mergeShotAssets(next: Shot[], prev: Shot[]): Shot[] {
+  return next.map((shot, i) => {
+    const old = prev[i]
+    if (!old) return shot
+    return {
+      ...shot,
+      id: old.id,
+      boardAssetId: old.boardAssetId,
+      boardHistoryIds: old.boardHistoryIds,
+      imageAssetId: old.imageAssetId,
+      videoAssetId: old.videoAssetId,
+      audioAssetId: old.audioAssetId,
+      imageHistoryIds: old.imageHistoryIds,
+      videoHistoryIds: old.videoHistoryIds,
+      audioHistoryIds: old.audioHistoryIds,
+      referenceAssetIds: old.referenceAssetIds,
+      captionOverride: old.captionOverride,
+      notes: old.notes,
+      status: old.videoAssetId ? 'video-generated' : old.imageAssetId ? 'image-generated' : shot.status
+    }
+  })
+}
+
+/** 第二步：从完整剧本提炼人物 / 场景 / 分镜。可指定只重提其中一组，已生成的图和视频按名字/镜号保留。 */
 export async function runExtractStoryboard(
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
-  model?: string
+  model?: string,
+  stage?: ExtractStage
 ) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
@@ -770,6 +1103,18 @@ export async function runExtractStoryboard(
   if (!project.current?.script) throw new Error('请先填写文案')
   if (!isPlayReady(project.current.script) && !project.current.script.content?.trim()) {
     throw new Error('请先写完整剧本，再提炼节点')
+  }
+  const existingSubjects = project.current.subjects ?? []
+  const existingScenes = project.current.scenes ?? []
+  const extractStartAt = stage || nextExtractStage(project.current)
+  if (!extractStartAt) {
+    throw new Error('人物、场景和分镜都已提炼。要改某一组，请在对应分组上点「重新提取」。')
+  }
+  if (extractStartAt === 'shots' && !existingSubjects.length) {
+    throw new Error('请先提取人物，再拆分镜')
+  }
+  if (extractStartAt === 'shots' && !existingScenes.length) {
+    throw new Error('请先提取场景描点，再拆分镜')
   }
   const productImages: string[] = []
   for (const id of (project.current.script.referenceAssetIds ?? []).slice(0, 5)) {
@@ -782,57 +1127,46 @@ export async function runExtractStoryboard(
     }
   }
   const look = lookFromScript(project.current.script)
-  const hasShots = project.current.shots.length > 0
-  const existingSubjects = project.current.subjects ?? []
-  const existingScenes = project.current.scenes ?? []
-  const extractStartAt: 'subjects' | 'scenes' | 'shots' = hasShots
-    ? 'subjects'
-    : !existingSubjects.length
-      ? 'subjects'
-      : !existingScenes.length
-        ? 'scenes'
-        : 'shots'
+  const keepApproved = Boolean(stage && isPlayApproved(project.current))
   onProgress?.(
     extractStartAt === 'subjects'
-      ? '先拆人物；完成后立即保存到画布…'
+      ? `${stage ? '重新提取人物' : '先拆人物'}；已有场景和分镜会保留…`
       : extractStartAt === 'scenes'
-        ? '人物已保存；继续拆场景…'
-        : '人物和场景已保存；继续拆分镜…'
+        ? `${stage ? '重新提取场景描点' : '人物已保存；继续拆场景'}；已有人物和分镜会保留…`
+        : `${stage ? '重新提取分镜' : '人物和场景已保存；继续拆分镜'}；已生成的看板/配图/视频按镜号保留…`
   )
   let finalStagePersisted = false
   const persistStage = async (
-    stage: 'subjects' | 'scenes' | 'shots',
+    done: ExtractStage,
     partial: import('@/services/ai/storyboard').StoryboardResult
   ) => {
     if (!project.current) return
-    if (stage === 'subjects') {
-      project.setSubjects(partial.subjects ?? [])
-      if (hasShots) {
-        project.setScenes([])
-        project.setShots([])
+    if (done === 'subjects') {
+      project.setSubjects(mergeSubjectAssets(partial.subjects ?? [], project.current.subjects ?? []))
+    } else if (done === 'scenes') {
+      project.setScenes(mergeSceneAssets(partial.scenes ?? [], project.current.scenes ?? []))
+      if (project.current.script) {
+        const script = { ...project.current.script }
+        applyAestheticToScript(script, partial)
+        project.setScript(script)
       }
-    } else if (stage === 'scenes') {
-      project.setSubjects(partial.subjects ?? project.current.subjects ?? [])
-      project.setScenes(partial.scenes ?? [])
     } else {
       finalStagePersisted = true
       const stageShots = storyboardToShots(partial)
       if (project.current.pipelineMode === 'remake') {
         for (const shot of stageShots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
       }
-      project.setSubjects(partial.subjects ?? project.current.subjects ?? [])
-      project.setScenes(partial.scenes ?? project.current.scenes ?? [])
-      project.setShots(stageShots)
+      project.setShots(mergeShotAssets(stageShots, project.current.shots))
     }
-    project.setCanvas(rebuildCanvasGraph(project.current, false))
+    project.setCanvas(rebuildCanvasGraph(project.current, true))
+    const landed =
+      done === 'subjects'
+        ? `✓ 人物已上画布（${project.current.subjects?.length || 0} 个），本步完成`
+        : done === 'scenes'
+          ? `✓ 场景已上画布（${project.current.scenes?.length || 0} 个），本步完成`
+          : `✓ 分镜已上画布（${project.current.shots.length} 镜），本步完成`
+    onProgress?.(landed)
     await project.save()
-    onProgress?.(
-      stage === 'subjects'
-        ? `人物已写入画布（${project.current.subjects?.length || 0} 个）`
-        : stage === 'scenes'
-          ? `场景已写入画布（${project.current.scenes?.length || 0} 个）`
-          : `分镜已写入画布（${project.current.shots.length} 镜）`
-    )
   }
   const run = await generateStoryboard(
     {
@@ -849,26 +1183,18 @@ export async function runExtractStoryboard(
       extractStopAfter: extractStartAt,
       existingSubjects,
       existingScenes,
+      workflowMode: project.current.script.workflowMode,
       onExtractStage: persistStage
     },
     onProgress,
     signal
   )
-  if (extractStartAt !== 'shots') {
-    project.setPlayApproved(false)
-    await project.save()
-    return run
-  }
-  const shots = storyboardToShots(run.result)
-  if (project.current.pipelineMode === 'remake') {
-    for (const shot of shots) {
-      shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
+  if (extractStartAt === 'shots' && !finalStagePersisted) {
+    const shots = storyboardToShots(run.result)
+    if (project.current.pipelineMode === 'remake') {
+      for (const shot of shots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
     }
-  }
-  if (!finalStagePersisted) {
-    project.setShots(shots)
-    project.setSubjects(run.result.subjects ?? [])
-    project.setScenes(run.result.scenes ?? [])
+    project.setShots(mergeShotAssets(shots, project.current.shots))
   }
   if (project.current.script) {
     project.setScript({
@@ -882,10 +1208,41 @@ export async function runExtractStoryboard(
       ...(run.result.lightingNote ? { lightingNote: run.result.lightingNote } : {})
     })
   }
-  project.setCanvas(rebuildCanvasGraph(project.current, false))
-  project.setPlayApproved(false)
-  await project.save()
+  if (!finalStagePersisted || extractStartAt !== 'shots') {
+    project.setCanvas(rebuildCanvasGraph(project.current, true))
+  }
+  if (!keepApproved) project.setPlayApproved(false)
+  if (project.dirty) await project.save()
   return run
+}
+
+/** 分组标题栏「重新提取」：只重提这一组，不清空其它组。 */
+export async function runExtractGroup(
+  groupId: string,
+  onProgress?: RunProgress,
+  signal?: AbortSignal,
+  model?: string
+) {
+  const stage: ExtractStage | undefined =
+    groupId === 'group-subjects' ? 'subjects' : groupId === 'group-scenes' ? 'scenes' : groupId === 'group-shots' ? 'shots' : undefined
+  if (!stage) throw new Error('这个分组不能重新提取')
+  return withNodeJob(groupId, async () => {
+    ensureNotCancelled(signal)
+    const project = useProjectStore()
+    const source = onProgress ? 'agent' : 'canvas'
+    const label = `重新提取${extractStageNoun(stage)}`
+    const activity = trackActivity(groupId, label, source, (msg) => onProgress?.(groupId, msg))
+    patchNode(project, groupId, 'running')
+    try {
+      await runExtractStoryboard(activity.progress, signal, model, stage)
+      patchNode(project, groupId, 'success')
+      activity.done(`${extractStageNoun(stage)}已重新写入画布`)
+    } catch (e: any) {
+      patchNode(project, groupId, 'failed', e?.message ?? String(e))
+      activity.fail(e)
+      throw e
+    }
+  })
 }
 
 /** 剧本节点动作：默认只写剧本，提炼必须显式传入 extract */
@@ -1072,7 +1429,7 @@ export async function generateFreeformImage(
   onProgress?.('准备参考图...')
   const library = useLibraryStore()
   const blobs: Blob[] = []
-  for (const id of node.data.referenceAssetIds ?? []) {
+  for (const id of resolvedCanvasReferenceAssetIds(p, node)) {
     const b = (await assets.getBlob(id)) || (await library.getBlob(id))
     if (b) blobs.push(b)
   }
@@ -1094,6 +1451,7 @@ export async function generateFreeformImage(
     prompt,
     projectId: p.id
   })
+  await saveGeneratedImageToSharedLibrary(result.blob, '其他', asset.filename, prompt, onProgress)
   project.patchCanvasNode(nodeId, { outputAssetId: asset.id })
   await project.save()
   return asset
@@ -1113,35 +1471,85 @@ export async function generateFreeformVideo(
   if (!node) throw new Error('找不到节点')
   const prompt = node.data.prompt?.trim()
   if (!prompt) throw new Error('请先写提示词')
-  const ids = node.data.referenceAssetIds ?? []
-  if (!ids.length) throw new Error('请先选至少一张参考图')
-  onProgress?.('读取参考图...')
+  const ids = resolvedCanvasReferenceAssetIds(p, node)
+  const videoModel = node.data.videoModel === 'wan-prime' ? 'wan-prime' : 'h3'
+  const useFl2va = videoModel === 'h3' && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
+  const firstId = node.data.firstFrameAssetId || ids[0]
+  const lastId = node.data.lastFrameAssetId || ids[1]
+  if (useFl2va) {
+    if (!firstId) throw new Error('请先选首帧')
+    if (!lastId) throw new Error('请先选尾帧')
+  } else if (!ids.length) {
+    throw new Error('请先选至少一张参考图')
+  }
+  onProgress?.(useFl2va ? '读取首帧和尾帧...' : '读取参考图...')
   const library = useLibraryStore()
   const blobs: Blob[] = []
-  for (const id of ids) {
-    const b = (await assets.getBlob(id)) || (await library.getBlob(id))
-    if (b) blobs.push(b)
+  if (useFl2va) {
+    blobs.push(await loadRefImageBlob(firstId, '首帧'))
+    blobs.push(await loadRefImageBlob(lastId, '尾帧'))
+  } else {
+    for (const id of ids) {
+      const b = (await assets.getBlob(id)) || (await library.getBlob(id))
+      if (b) blobs.push(b)
+    }
+    if (!blobs.length) throw new Error('参考图读取失败')
+    if (blobs.length < ids.length) {
+      onProgress?.(`有 ${ids.length - blobs.length} 张参考图读不到，已跳过`)
+    }
   }
-  if (!blobs.length) throw new Error('参考图读取失败')
   if (p.folderPath) setActiveProjectDir(p.folderPath)
   const duration =
-    node.data.videoModel === 'wan-prime'
+    videoModel === 'wan-prime'
       ? Math.min(30, Math.max(2, Math.round(node.data.duration || 8)))
       : Math.min(15, Math.max(1, Math.round(node.data.duration || 8)))
-  onProgress?.('正在出视频...')
+  const imageSlots = blobs.map((_, i) => {
+    const index = i + 1
+    return {
+      index,
+      kind: 'extra' as const,
+      name: useFl2va
+        ? index === 1
+          ? 'first frame'
+          : 'last frame'
+        : index === 1
+          ? 'first frame'
+          : `user reference ${index}`,
+      job: useFl2va
+        ? index === 1
+          ? `<Picture 1> is the first frame of the target video.`
+          : `<Picture 2> is the last frame of the target video.`
+        : index === 1
+          ? `<Picture 1> is the first frame of the target video.`
+          : `<Picture ${index}> is an additional user reference. Match people, clothing, product, setting or style from this image. Do not treat it as another first frame.`
+    }
+  })
+  onProgress?.(
+    useFl2va ? '正在出视频（首尾帧）...' : `正在出视频（${blobs.length} 张参考图）...`
+  )
   const result = await generateVideo(
     {
       prompt,
+      promptAsIs: useFl2va,
       imageBlob: blobs[0],
-      referenceImages: blobs.slice(1, node.data.videoModel === 'wan-prime' ? 10 : 9),
+      lastFrameBlob: useFl2va ? blobs[1] : undefined,
+      referenceImages: useFl2va ? [] : blobs.slice(1, videoModel === 'wan-prime' ? 10 : 9),
+      imageSlots,
       duration,
       width: p.settings.width,
       height: p.settings.height,
       aspectRatio: p.settings.aspectRatio,
       voiceMode: 'none',
       promptStyle: 'scene-narrative',
-      videoModel: node.data.videoModel === 'wan-prime' ? 'wan-prime' : 'h3',
-      signal
+      videoModel,
+      h3GenMode: useFl2va ? 'fl2va' : 'reference',
+      mode: 'I2VA',
+      signal,
+      resumeTaskId: node.data.videoTaskId,
+      onTaskSubmitted: async (taskId) => {
+        project.patchCanvasNode(nodeId, { videoTaskId: taskId })
+        await project.save()
+      }
     },
     onProgress
   )
@@ -1150,7 +1558,7 @@ export async function generateFreeformVideo(
     prompt,
     projectId: p.id
   })
-  project.patchCanvasNode(nodeId, { outputAssetId: asset.id })
+  project.patchCanvasNode(nodeId, { outputAssetId: asset.id, videoTaskId: undefined })
   onProgress?.('视频已写入节点')
   await project.save()
   return asset
@@ -1195,10 +1603,10 @@ export async function runCanvasNode(
         const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
         if (!sub) throw new Error('找不到主体')
         await generateSubjectSheet(sub, report, signal)
-      } else if (node.type === 'subjectProps' && node.data.subjectId) {
-        const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
-        if (!sub) throw new Error('找不到主体')
-        await generateSubjectPropSheet(sub, report, signal)
+      } else if (node.type === 'sceneProps' && node.data.sceneId) {
+        const scn = (p.scenes ?? []).find((s) => s.id === node.data.sceneId)
+        if (!scn) throw new Error('找不到场景')
+        await generateScenePropSheet(scn, report, signal)
       } else if (node.type === 'shotBoard' && node.data.shotId) {
         const shot = p.shots.find((s) => s.id === node.data.shotId)
         if (!shot) throw new Error('找不到分镜')
@@ -1256,9 +1664,9 @@ export async function generateMissingSheets(onProgress?: (msg: string) => void, 
 export async function generateMissingPropSheets(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
-  const props = (p.subjects ?? [])
-    .filter((s) => !s.propSheetAssetId)
-    .map((s) => `subjectProps:${s.id}`)
+  const props = (p.scenes ?? [])
+    .filter((s) => sceneHasKeyProps(s) && !s.propSheetAssetId)
+    .map((s) => `sceneProps:${s.id}`)
   await mapPool(props, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }
 

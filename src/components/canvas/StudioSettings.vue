@@ -247,7 +247,7 @@ function createVideo(providerId: string) {
             @click="settings.patchVideo({ promptStyle: 'scene-narrative' })"
           >
             <strong>场景叙事</strong>
-            <span>按 H3 官方 I2VA 英文三段式出片。图槽传角色设计图、场景图和本镜故事看板。台词只进 &lt;d&gt; 标签。</span>
+            <span>选 H3 时按官方 Ref2VA 六段出片：人设/场景/看板不是首帧。[Shot 1] 不加时间戳。台词只进 &lt;d&gt; 标签。选万相不套这套格式。</span>
           </button>
           <button
             type="button"

@@ -22,7 +22,7 @@ const newName = ref('')
 const newTopic = ref('')
 const newStyle = ref<'cinematic' | 'anime' | 'photorealistic' | '3d-render'>('cinematic')
 const newAspectRatio = ref<AspectRatio>('16:9')
-const pipelineMode = ref<'standard' | 'remake' | 'img2video'>('standard')
+const pipelineMode = ref<'standard' | 'drama' | 'remake' | 'img2video'>('standard')
 const remakeVideo = ref<File | null>(null)
 const remakeVideoUrl = ref('')
 const remakeProducts = ref<File[]>([])
@@ -129,7 +129,8 @@ const totalDuration = computed(() => {
 
 function openProject(id: string) {
   project.load(id).then(() => {
-    router.push(project.current?.pipelineMode === 'smart-speech' ? '/smart-speech' : '/studio')
+    const mode = project.current?.pipelineMode
+    router.push(mode === 'smart-speech' ? '/smart-speech' : mode === 'drama' ? '/script' : '/studio')
   })
 }
 
@@ -204,6 +205,7 @@ async function createProject() {
   }
   creating.value = true
   createProgress.value = '创建项目…'
+  const creatingMode = pipelineMode.value
   let createdId = ''
   try {
     const p = await project.createNamed(newName.value.trim())
@@ -218,6 +220,22 @@ async function createProject() {
       aspectRatio: newAspectRatio.value,
       shotDuration: 5,
       createdAt: Date.now()
+    }
+    if (pipelineMode.value === 'drama') {
+      const now = Date.now()
+      const firstChapterId = 'ch_' + now.toString(36)
+      p.chapters = [{
+        id: firstChapterId,
+        title: '第 1 章',
+        content: '',
+        order: 0,
+        status: 'draft',
+        createdAt: now,
+        updatedAt: now
+      }]
+      p.selectedChapterIds = [firstChapterId]
+      p.productionChapterIds = []
+      p.script.workflowMode = 'film-chapter'
     }
     if (pipelineMode.value === 'img2video') {
       p.playApproved = true
@@ -239,12 +257,14 @@ async function createProject() {
 
     showCreateModal.value = false
     resetCreateForm()
-    router.push('/studio')
+    router.push(creatingMode === 'drama' ? '/script' : '/studio')
   } catch (e: any) {
     toast.error(e?.message || '创建失败，素材已保存，可进画布重试')
     showCreateModal.value = false
     resetCreateForm()
-    if (createdId && project.current?.id === createdId) router.push('/studio')
+    if (createdId && project.current?.id === createdId) {
+      router.push(project.current.pipelineMode === 'drama' ? '/script' : '/studio')
+    }
   }
 }
 
@@ -527,6 +547,7 @@ async function moveSelectedLibrary() {
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
               <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">一图生视频</Tag>
               <Tag v-else-if="p.pipelineMode === 'smart-speech'" type="success" size="sm">智能口播</Tag>
+              <Tag v-else-if="p.pipelineMode === 'drama'" type="accent" size="sm">AI 短剧 · {{ p.chapters?.length || 0 }} 章</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
                 🎬 {{ p.shots.length }} 个分镜
               </Tag>
@@ -691,6 +712,8 @@ async function moveSelectedLibrary() {
                   ? '上传参考视频和产品图，AI 会按镜头复刻脚本；配音后期合成，视频里不出口播。'
                   : pipelineMode === 'img2video'
                     ? '自由画布：添加图片生成节点和图生视频节点，参考图可用来自本页或公共资产库。'
+                    : pipelineMode === 'drama'
+                      ? '先进入剧本工作台，可以长期创作多个章节；准备好后再选择章节制作分镜和视频。'
                     : '起个好名字，下一步可以填具体文案'
             }}
           </p>
@@ -711,6 +734,14 @@ async function moveSelectedLibrary() {
                 >
                   <div class="mode-title">普通创作</div>
                   <div class="mode-desc">从主题/文案写剧本</div>
+                </button>
+                <button
+                  class="mode-pick"
+                  :class="{ active: pipelineMode === 'drama' }"
+                  @click="pipelineMode = 'drama'"
+                >
+                  <div class="mode-title">AI 短剧</div>
+                  <div class="mode-desc">多章节写作，选章节后再做视频</div>
                 </button>
                 <button
                   class="mode-pick"
@@ -829,7 +860,7 @@ async function moveSelectedLibrary() {
           <div class="modal-actions">
             <GradientButton type="ghost" :disabled="creating" @click="closeCreateModal">取消</GradientButton>
             <GradientButton icon="✨" :loading="creating" :disabled="creating" @click="createProject">
-              {{ pipelineMode === 'remake' ? '创建并分析视频' : '创建并开始' }}
+              {{ pipelineMode === 'remake' ? '创建并分析视频' : pipelineMode === 'drama' ? '创建并写剧本' : '创建并开始' }}
             </GradientButton>
           </div>
         </GlassCard>
@@ -1253,7 +1284,7 @@ async function moveSelectedLibrary() {
 }
 .mode-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: var(--space-2);
 }
 .mode-pick {

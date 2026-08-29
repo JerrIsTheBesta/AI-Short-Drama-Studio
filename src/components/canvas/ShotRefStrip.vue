@@ -73,14 +73,38 @@ function addExtraIds(ids: ID[]) {
     if (!merged.includes(id) && id !== skip) merged.push(id)
   }
   setExtraIds(merged)
+  if (props.shot && ids.length) {
+    const drop = new Set(ids)
+    const omitted = (props.shot.omittedRefAssetIds ?? []).filter((x) => !drop.has(x))
+    if (omitted.length !== (props.shot.omittedRefAssetIds ?? []).length) {
+      project.updateShot(props.shot.id, { omittedRefAssetIds: omitted })
+    }
+  }
 }
 
-function removeExtra(id: ID) {
-  setExtraIds(currentExtraIds().filter((x) => x !== id))
+function removeExtra(id: ID, ev?: Event) {
+  ev?.preventDefault()
+  ev?.stopPropagation()
+  const extras = currentExtraIds()
+  if (extras.includes(id)) setExtraIds(extras.filter((x) => x !== id))
+  if (props.shot) {
+    const omitted = [...new Set([...(props.shot.omittedRefAssetIds ?? []), id])]
+    project.updateShot(props.shot.id, { omittedRefAssetIds: omitted })
+  }
+  toast.success('已移除这张参考图')
 }
 
-function onPickerConfirm(ids: ID[]) {
-  addExtraIds(ids)
+async function onPickerConfirm(ids: ID[]) {
+  const resolved: ID[] = []
+  for (const id of ids) {
+    try {
+      const copied = await assets.adopt(id, 'image', { projectId: project.current?.id, shotId: props.shot?.id })
+      resolved.push(copied.id)
+    } catch {
+      resolved.push(id)
+    }
+  }
+  addExtraIds(resolved)
   pickerOpen.value = false
 }
 
@@ -132,7 +156,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="ref-strip" @mousedown.stop @click.stop>
+  <div class="ref-strip nodrag nopan nowheel" @pointerdown.stop @mousedown.stop @click.stop>
     <div class="ref-head">
       <span>参考图</span>
       <div class="ref-acts">
@@ -157,11 +181,10 @@ onBeforeUnmount(() => {
         <div v-else class="ph">图</div>
         <em>{{ slot.label }}</em>
         <button
-          v-if="!slot.locked"
           type="button"
-          class="del"
-          title="移除"
-          @click="removeExtra(slot.id)"
+          class="del nodrag nopan nowheel"
+          title="移除这张参考图"
+          @pointerdown.stop.prevent="removeExtra(slot.id, $event)"
         >
           ×
         </button>
@@ -169,7 +192,7 @@ onBeforeUnmount(() => {
       <button type="button" class="ref-add" title="添加参考图" @click="pickerOpen = true">＋</button>
     </div>
     <p v-if="mode === 'image' && unboundCast" class="hint">
-      这镜还没绑人物，人设图不会进配图。重新提炼节点，或在画面描述里写出角色名字。
+      这镜还没绑人物，人设图不会进配图。到「人物」分组点重新提取，或在画面描述里写出角色名字。
     </p>
     <p v-else-if="mode === 'video' && !slots.length" class="hint">出视频要传本镜角色设计图、场景图和故事看板。缺哪张就先补哪张，不要用人设+场景配图。</p>
     <AssetPicker
@@ -187,7 +210,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .ref-strip {
   margin-top: 8px;
-  padding-top: 8px;
+  padding-top: 10px;
+  overflow: visible;
   border-top: 1px solid var(--color-border);
 }
 .ref-head {
@@ -221,17 +245,20 @@ onBeforeUnmount(() => {
 .ref-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 10px;
+  overflow: visible;
+  padding-top: 6px;
 }
 .ref-item {
   position: relative;
-  width: 52px;
+  width: 48px;
   flex-shrink: 0;
+  overflow: visible;
 }
 .ref-item img,
 .ref-item .ph {
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   border-radius: 8px;
   object-fit: cover;
   display: block;
@@ -257,19 +284,30 @@ onBeforeUnmount(() => {
 }
 .ref-item .del {
   position: absolute;
-  top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
+  top: -6px;
+  right: -6px;
+  z-index: 4;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
   margin: 0;
   padding: 0;
-  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid #fff;
   border-radius: 50%;
-  background: var(--color-text-1);
-  color: #fff;
-  font-size: 11px;
-  line-height: 16px;
+  background: #e5484d;
+  color: #fff !important;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
   cursor: pointer;
+  pointer-events: auto;
+}
+.ref-item .del:hover {
+  background: #c63c41;
 }
 .ref-add {
   width: 52px;

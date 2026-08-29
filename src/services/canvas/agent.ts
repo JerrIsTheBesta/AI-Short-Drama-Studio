@@ -2,6 +2,7 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
+import { sceneHasKeyProps } from '@/utils/consistency'
 import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
@@ -15,6 +16,7 @@ import {
   isGreetingOrChitchat,
   greetingReply,
   nextPipelineStep,
+  extractStageFromText,
   TOOL_LABEL,
   type PipelineStep
 } from './pipeline'
@@ -62,8 +64,8 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 硬性规则：
 1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
-3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本（不创建人物/场景/分镜节点）；用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
-3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。
+3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本（必须含故事背景、人物外貌与状态、环境与场景、分场动作和对白；禁止口播/画面/时长四格表；不创建人物/场景/分镜节点）；用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
+3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
 4. 已有完整剧本时：
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
    - 用户明确说「重新写剧本」，或在讲一个和当前剧本无关的新故事（新题材、新人物、新画风）→ 必须先 seed_script（text=用户这几轮的故事原文，含画风时长题材人物），再 generate_play。禁止 continue_play，禁止拿旧剧本当草稿。
@@ -77,11 +79,12 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "generate_play", "text": "可选，与 seed_script 相同的故事原文" }
 { "tool": "continue_play", "text": "续写方向，可选。例如再写两场、写父亲回家之后" }
 { "tool": "extract_cast" }
+{ "tool": "extract_cast", "extractStage": "subjects|scenes|shots" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
 { "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "看板画面与动作，可选", "videoPrompt": "场景叙事：画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
-{ "tool": "generate_prop_sheet", "subjectId": "sub_1" }
+{ "tool": "generate_prop_sheet", "sceneId": "scn_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
 { "tool": "generate_shot_board", "shotId": "shot_xxx" }
 { "tool": "generate_video", "shotId": "shot_xxx" }
@@ -121,8 +124,8 @@ function skillSelectContext(userText: string) {
     pipelineMode: p?.pipelineMode,
     workflowMode: p?.script?.workflowMode,
     hasShots: shots.length > 0,
-    missingSheets: subjects.some((s) => !s.designSheetAssetId || !s.propSheetAssetId),
-    missingPlates: scenes.some((s) => !s.plateAssetId),
+    missingSheets: subjects.some((s) => !s.designSheetAssetId),
+    missingPlates: scenes.some((s) => !s.plateAssetId || (sceneHasKeyProps(s) && !s.propSheetAssetId)),
     missingImages: shots.some((s) => !s.boardAssetId),
     missingVideos: shots.some((s) => !s.videoAssetId)
   }
@@ -318,12 +321,17 @@ export async function runAgentTurn(
   const results = loop.results
 
   if (project.current) {
-    try {
-      project.setCanvas(rebuildCanvasGraph(project.current, true))
-    } catch {
-      project.setCanvas(rebuildCanvasGraph(project.current, false))
+    const alreadyOnCanvas = results.some(
+      (r) => r.ok && (r.tool === 'extract_cast' || r.tool === 'generate_play' || r.tool === 'continue_play')
+    )
+    if (!alreadyOnCanvas) {
+      try {
+        project.setCanvas(rebuildCanvasGraph(project.current, true))
+      } catch {
+        project.setCanvas(rebuildCanvasGraph(project.current, false))
+      }
     }
-    await project.save()
+    if (project.dirty) await project.save()
   }
 
   if (loop.stopped) {
@@ -436,11 +444,11 @@ function wrapUpReply(
     const hasShots = Boolean(p?.shots.length)
     return {
       reply: hasShots
-        ? `已经顺着当前剧后续写，原场次保留。\n新场还没进画布节点。回「重新提炼节点」把新场拆出来；或者说「继续」走下一步。${failLine}`
+        ? `已经顺着当前剧后续写，原场次保留。\n新场还没进画布节点。到「分镜」分组点重新提取，或回「重新提取分镜」。${failLine}`
         : `已经顺着当前剧后续写，原场次保留。\n看完可再改字，回「继续」先拆人物（不会同时拆场景和分镜）。${failLine}`,
       chips: hasShots
         ? [
-            { label: '重新提炼节点', text: '重新提炼节点' },
+            { label: '重新提取分镜', text: '重新提取分镜' },
             { label: '再续写', text: '续写剧本' },
             { label: '先看看', text: '先看看' }
           ]
@@ -453,7 +461,7 @@ function wrapUpReply(
   }
   if (didPlay && !(p?.shots.length)) {
     return {
-      reply: `完整剧本已经写到画布左侧了（还没拆节点）。\n看完可改字，再回「继续」只拆人物；场景和分镜要再各走一步。说「全流程」会自动跑完。${failLine}`,
+      reply: `完整剧本已经写到画布左侧了（还没拆节点）。请先看背景、人物和环境写得对不对，再回「继续」只拆人物；场景和分镜要再各走一步。说「全流程」会自动跑完。${failLine}`,
       chips: [
         { label: '先拆人物', text: '继续' },
         { label: '续写', text: '续写剧本' },
@@ -556,7 +564,7 @@ function sanitizeActions(actions: any[], userText: string): any[] {
   const t = userText
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本|续写|接着写|再写/.test(t)
   const askedSheet = /人设|角色图|四视图/.test(t)
-  const askedProp = /资产图/.test(t)
+  const askedProp = /资产图|道具图|关键道具/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
   const askedPanel = /故事看板|看板图|线稿分镜/.test(t)
   const askedImage = /配图|出图|关键帧|画面/.test(t)
@@ -668,12 +676,12 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   const namedSubs = (p.subjects ?? []).filter((s) => s.name && t.includes(s.name))
   const namedScns = (p.scenes ?? []).filter((s) => s.name && t.includes(s.name))
 
-  const askedExtract = /提炼节点|提炼人物|提炼场景|拆节点|出节点/.test(t)
+  const askedExtract = /提炼节点|提炼人物|提炼场景|拆节点|出节点|重新提取|重新提炼/.test(t)
   const askedContinuePlay = /续写|接着写|再写[一两三四\d]*场|加一场|往后写|续一[场段]|写下去/.test(t)
   const askedPlay = /写剧本|完整剧本|重新写剧本/.test(t) && !askedContinuePlay
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|拆剧本/.test(t)
   const askedSheet = /人设|角色图|四视图/.test(t)
-  const askedProp = /资产图/.test(t)
+  const askedProp = /资产图|道具图|关键道具/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
   const askedPanel = /故事看板|看板图|线稿分镜/.test(t)
   const askedImage = /配图|出图|关键帧|把图画上|缺的图/.test(t)
@@ -700,7 +708,8 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   if (!newStory && askedContinuePlay && playReady) {
     actions.push({ tool: 'continue_play', text: t })
   } else if (!newStory && (askedExtract || (askedBoard && playReady && !p.shots.length))) {
-    actions.push({ tool: 'extract_cast' })
+    const extractStage = extractStageFromText(t)
+    actions.push({ tool: 'extract_cast', ...(extractStage ? { extractStage } : {}) })
   } else if (!newStory && (askedPlay || askedBoard || looksLikeBrief)) {
     actions.push({ tool: 'generate_play' })
   }
@@ -710,8 +719,8 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   } else if (askedSheet) {
     actions.push({ tool: 'generate_all_sheets' })
   }
-  if (namedSubs.length && askedProp && !askedSheet) {
-    for (const s of namedSubs) actions.push({ tool: 'generate_prop_sheet', subjectId: s.id })
+  if (namedScns.length && askedProp && !askedSheet) {
+    for (const s of namedScns) actions.push({ tool: 'generate_prop_sheet', sceneId: s.id })
   } else if (askedProp && !askedSheet) {
     actions.push({ tool: 'generate_all_prop_sheets' })
   }

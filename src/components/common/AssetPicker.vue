@@ -20,6 +20,8 @@ const props = defineProps<{
   /** 本页可用的图片 ID（一图生视频） */
   pageIds?: ID[]
   showLibrary?: boolean
+  /** 打开时默认页签。不传则：有本页图片时看本页，否则看资产库。 */
+  defaultTab?: 'page' | 'library'
 }>()
 
 const emit = defineEmits<{
@@ -66,18 +68,34 @@ const list = computed(() => {
   return items
 })
 
+const pageTabLabel = computed(() => (props.pageIds?.length ? '本页图片' : '项目图片'))
+const pickerHint = computed(() => {
+  if (!showTabs.value) return '已生成/上传的素材都在这里'
+  return props.pageIds?.length
+    ? '可从本页图片、公共资产或自己的分类文件夹选用'
+    : '可从本项目图片、公共资产或自己的分类文件夹选用'
+})
+
 const emptyTitle = computed(() => {
-  if (tab.value !== 'library') return '本页还没有图片'
-  if (libraryFolder.value === LIBRARY_PUBLIC_ID) return '公共资产还是空的'
-  return `「${library.folderName(libraryFolder.value)}」还是空的`
+  if (tab.value === 'library') {
+    if (libraryFolder.value === LIBRARY_PUBLIC_ID) return '公共资产还是空的'
+    return `「${library.folderName(libraryFolder.value)}」还是空的`
+  }
+  if (kind.value === 'video') return '项目里还没有视频'
+  return props.pageIds?.length ? '本页还没有图片' : '项目里还没有图片'
 })
 
 const emptyDesc = computed(() => {
-  if (tab.value !== 'library') return '先用图片节点出图，或点节点上的＋上传参考图'
-  if (libraryFolder.value === LIBRARY_PUBLIC_ID) {
-    return '去首页资产库上传，或把项目里生成的图加入公共库'
+  if (tab.value === 'library') {
+    if (libraryFolder.value === LIBRARY_PUBLIC_ID) {
+      return '去首页资产库上传，或把项目里生成的图加入公共库'
+    }
+    return '去首页资产库创建分类，再把公共资产转移进来'
   }
-  return '去首页资产库创建分类，再把公共资产转移进来'
+  if (kind.value === 'video') return '先在画布上出视频，或去资产库上传'
+  return props.pageIds?.length
+    ? '先用图片节点出图，或点节点上的＋上传参考图'
+    : '先生成或上传图片，也可切到资产库选用可复用的图'
 })
 
 watch(
@@ -85,7 +103,8 @@ watch(
   async (open) => {
     if (!open) return
     picked.value = new Set(props.selectedIds ?? [])
-    tab.value = props.pageIds?.length || !showTabs.value ? 'page' : 'library'
+    tab.value =
+      props.defaultTab ?? (props.pageIds?.length || !showTabs.value ? 'page' : 'library')
     libraryFolder.value = LIBRARY_PUBLIC_ID
     loading.value = true
     try {
@@ -158,12 +177,12 @@ function labelOf(a: Asset) {
           <header class="head">
             <div>
               <h3>{{ title || '从资源库选择' }}</h3>
-              <p>{{ showTabs ? '可从本页图片、公共资产或自己的分类文件夹选用' : '已生成/上传的素材都在这里' }}</p>
+              <p>{{ pickerHint }}</p>
             </div>
             <button class="close" @click="emit('close')">×</button>
           </header>
           <div v-if="showTabs" class="tabs">
-            <button type="button" :class="{ on: tab === 'page' }" @click="tab = 'page'">本页图片</button>
+            <button type="button" :class="{ on: tab === 'page' }" @click="tab = 'page'">{{ pageTabLabel }}</button>
             <button type="button" :class="{ on: tab === 'library' }" @click="tab = 'library'">资产库</button>
           </div>
           <div v-if="showTabs && tab === 'library'" class="folder-rail">

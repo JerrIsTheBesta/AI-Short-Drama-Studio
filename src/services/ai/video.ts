@@ -11,9 +11,15 @@
 import { getAIMode } from './client'
 import { getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
-import { assertValidH3Prompt, composeH3VideoPrompt } from './h3Prompt'
-import { VIDEO_AUTODL_ROOT, VIDEO_DEFAULT_WORKFLOW_ID, migrateVideoBaseUrl, migrateVideoWorkflowId } from './env'
-import type { Shot, AspectRatio, VideoGenModel } from '@/types'
+import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
+import {
+  VIDEO_AUTODL_ROOT,
+  VIDEO_DEFAULT_WORKFLOW_ID,
+  VIDEO_FL2VA_WORKFLOW_ID,
+  migrateVideoBaseUrl,
+  migrateVideoWorkflowId
+} from './env'
+import type { AspectRatio, H3VideoGenMode, Shot, VideoGenModel } from '@/types'
 import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
@@ -25,9 +31,11 @@ export interface VideoGenInput {
   /** 其余参考图，按角色设计图 → 场景图 → 故事看板的顺序 */
   referenceImages?: Blob[]
   /**
-   * 分镜视觉描述（中文，详细场景）
+   * 发给出视频接口的提示词。promptAsIs 为真时不再编译/拼接。
    */
   prompt: string
+  /** 框里的全文原样发送，不再套 H3 模板 */
+  promptAsIs?: boolean
   /**
    * 项目级整体氛围（中文，1-2 段）
    * 会拼到 visualPrompt 前面
@@ -54,6 +62,7 @@ export interface VideoGenInput {
   sceneAnchor?: string
   shotTitle?: string
   imageAssignments?: string[]
+  imageSlots?: H3ImageSlot[]
   onScreenNames?: string[]
   duration: number
   width: number
@@ -67,6 +76,12 @@ export interface VideoGenInput {
   promptStyle?: VideoPromptStyle
   /** 图生视频节点模型。默认 H3 */
   videoModel?: VideoGenModel
+  /** H3：参考图生成或首尾帧。默认参考图。 */
+  h3GenMode?: H3VideoGenMode
+  /** 首尾帧模式的尾帧图 */
+  lastFrameBlob?: Blob
+  /** H3 任务类型。多图人设/场景/看板用 R2VA；单张首帧用 I2VA。 */
+  mode?: 'I2VA' | 'T2VA' | 'R2VA'
   /** 已提交的 AutoDL 工作流 task_id；传入后跳过提交，直接恢复轮询。 */
   resumeTaskId?: string
   /** 新任务提交成功后立即回传 task_id，调用方应持久化用于断点恢复。 */
@@ -88,7 +103,21 @@ const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)(?:$|[?#])/i
 const MAX_REF_IMAGES = 9
 
 function resultUrl(r: any): string {
-  const candidates = [r?.url, r?.video_url, r?.videoUrl, r?.file_url, r?.filename]
+  const candidates = [
+    r?.url,
+    r?.video_url,
+    r?.videoUrl,
+    r?.file_url,
+    r?.fileUrl,
+    r?.download_url,
+    r?.downloadUrl,
+    r?.oss_url,
+    r?.signed_url,
+    r?.output_url,
+    r?.src,
+    r?.path,
+    r?.filename
+  ]
   for (const c of candidates) {
     const s = String(c ?? '').trim()
     if (/^https?:\/\//i.test(s)) return s
@@ -109,16 +138,21 @@ function pickWorkflowVideoResult(
       let score = 0
       if (VIDEO_EXT_RE.test(url)) score += 100
       if (IMAGE_EXT_RE.test(url)) score -= 100
-      if (/video/.test(type)) score += 40
+      if (/video/.test(type)) score += 60
       if (type === 'image' && !VIDEO_EXT_RE.test(url)) score -= 30
-      if (/mp4|webm|mov|video/.test(blobText) && VIDEO_EXT_RE.test(url)) score += 10
+      if (/mp4|webm|mov|video/.test(blobText) && !IMAGE_EXT_RE.test(url)) score += 20
+      // OSS 签名链经常没有 .mp4 后缀
+      if (!IMAGE_EXT_RE.test(url) && !VIDEO_EXT_RE.test(url) && /^https?:\/\//i.test(url)) {
+        score += /video/.test(type) ? 20 : 10
+      }
       return { url, type, score }
     })
     .filter(Boolean) as { url: string; type?: string; score: number }[]
 
   scored.sort((a, b) => b.score - a.score)
   const best = scored[0]
-  if (!best || best.score < 50 || !/^https?:\/\//i.test(best.url)) return null
+  if (!best || best.score < 40 || !/^https?:\/\//i.test(best.url)) return null
+  if (IMAGE_EXT_RE.test(best.url) && best.score < 50) return null
   return { url: best.url, type: best.type }
 }
 
@@ -428,7 +462,9 @@ function harvestMediaItems(value: unknown, out: any[] = [], depth = 0): any[] {
   }
   if (typeof parsed === 'object') {
     const rec = parsed as Record<string, unknown>
-    if (rec.url || rec.video_url || rec.videoUrl || rec.filename || rec.file_url) out.push(rec)
+    if (rec.url || rec.video_url || rec.videoUrl || rec.filename || rec.file_url || rec.download_url || rec.oss_url) {
+      out.push(rec)
+    }
     for (const nested of Object.values(rec)) harvestMediaItems(nested, out, depth + 1)
   }
   return out
@@ -528,7 +564,10 @@ async function realWorkflowVideo(
   const cfg = getVideoConfig()
   const baseUrl = migrateVideoBaseUrl(cfg.baseUrl || VIDEO_AUTODL_ROOT)
   const apiKey = cfg.apiKey
-  const workflowId = migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
+  const isFl2va = input.h3GenMode === 'fl2va'
+  const workflowId = isFl2va
+    ? VIDEO_FL2VA_WORKFLOW_ID
+    : migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
   const root = workflowApiRoot(baseUrl)
   throwIfAborted(input.signal)
 
@@ -536,10 +575,13 @@ async function realWorkflowVideo(
     throw new Error('[video] 没配 AutoDL Token，请到设置页填写图生视频令牌')
   }
 
-  const allBlobs = [input.imageBlob, ...(input.referenceImages ?? [])]
-    .filter((b): b is Blob => !!b)
-    .slice(0, MAX_REF_IMAGES)
+  const allBlobs = isFl2va
+    ? [input.imageBlob, input.lastFrameBlob].filter((b): b is Blob => !!b)
+    : [input.imageBlob, ...(input.referenceImages ?? [])].filter((b): b is Blob => !!b).slice(0, MAX_REF_IMAGES)
 
+  if (isFl2va && allBlobs.length < 2) {
+    throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
+  }
   if (allBlobs.length === 0) {
     throw new Error('[video] 没有可用图片')
   }
@@ -564,9 +606,6 @@ async function realWorkflowVideo(
     finalPrompt = finalPrompt.slice(0, 10000)
     onProgress?.('提示词超过 10000 字，已截断')
   }
-  const expectedDialogue = input.voiceMode === 'none' ? '' : input.voiceover
-  assertValidH3Prompt(finalPrompt, expectedDialogue)
-  onProgress?.('H3 提示词自检通过')
 
   const resolution = autodlResolution(input)
   const body: Record<string, string | number> = {
@@ -574,15 +613,26 @@ async function realWorkflowVideo(
     duration: targetDuration,
     resolution
   }
-  dataUrls.forEach((url, index) => {
-    body[`ref_image_${index}`] = url
-  })
+  if (isFl2va) {
+    body.first_frame = dataUrls[0]
+    body.last_frame = dataUrls[1]
+    body.ref_image_0 = dataUrls[0]
+    body.ref_image_1 = dataUrls[1]
+  } else {
+    dataUrls.forEach((url, index) => {
+      body[`ref_image_${index}`] = url
+    })
+  }
   let taskId = String(input.resumeTaskId || '').trim()
   if (taskId) {
     onProgress?.(`恢复已有任务 (${taskId})，不会重复提交…`)
     log(`↻ 恢复任务: ${taskId}`)
   } else {
-    onProgress?.(`提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`)
+    onProgress?.(
+      isFl2va
+        ? `提交首尾帧任务（${input.aspectRatio || resolution}）...`
+        : `提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`
+    )
     const submitCtl = controlledSignal(input.signal, 120_000)
     let submitResp: AutodlHttpResult
     try {
@@ -637,6 +687,9 @@ async function realWorkflowVideo(
   // 旺时任务可能在队列中超过 15 分钟。保留到 30 分钟，并允许调用方随时 abort；
   // 智能口播会逐段落库，因此取消或超时后可以从已完成段继续。
   const deadline = start + 30 * 60 * 1000
+  /** AutoDL 常先标 SUCCESS 再把 mp4 写进 results（ComfyUI 落盘有竞态）。 */
+  const EMPTY_SUCCESS_GRACE_MS = 120_000
+  let successEmptySince = 0
   let attempt = 0
   while (Date.now() < deadline) {
     attempt++
@@ -682,7 +735,7 @@ async function realWorkflowVideo(
     const durationSec = Number(data?.duration) || elapsed
     const results = collectWorkflowResults(pollData)
     const picked = pickWorkflowVideoResult(results)
-    if (attempt === 1 || attempt % 5 === 0) {
+    if (attempt === 1 || attempt % 5 === 0 || (phase === 'success' && !picked)) {
       log(`轮询 #${attempt} (${elapsed}s) status=${status || '-'} results=${results.length}: ${pollText.slice(0, 280)}`)
     }
     if (picked) {
@@ -691,10 +744,12 @@ async function realWorkflowVideo(
       return await downloadGeneratedVideo(picked.url, input.signal, finalPrompt, targetDuration, onProgress)
     }
     if (phase === 'queued') {
+      successEmptySince = 0
       onProgress?.(`排队中… ${elapsed}s`)
       continue
     }
     if (phase === 'running') {
+      successEmptySince = 0
       onProgress?.(`生成中… ${durationSec}s`)
       continue
     }
@@ -702,7 +757,18 @@ async function realWorkflowVideo(
       throw new Error(`[video] 生成失败：${taskErrorOf(pollData) || status}`)
     }
     if (phase === 'success') {
-      throw new Error(`[video] 任务完成但没有视频地址\n${pollText.slice(0, 800)}`)
+      if (!successEmptySince) successEmptySince = Date.now()
+      const waited = Date.now() - successEmptySince
+      if (waited < EMPTY_SUCCESS_GRACE_MS) {
+        onProgress?.(`任务已完成，正在等视频地址… ${Math.ceil((EMPTY_SUCCESS_GRACE_MS - waited) / 1000)}s`)
+        continue
+      }
+      throw new Error(
+        `[video] AutoDL 已标记完成，但 results 仍是空的，没有视频下载地址。task_id=${taskId}\n` +
+          `工作流跑了 ${durationSec || elapsed} 秒。常见原因是结果文件还没写进查询接口，或工作流没有输出 mp4。\n` +
+          `请再点一次生成（会接着查这个任务）。若仍失败，用这个 task_id 到 AutoDL 控制台核对是否真的出了视频。\n` +
+          pollText.slice(0, 500)
+      )
     }
     onProgress?.(`生成中… ${elapsed}s${status ? `（${status}）` : ''}`)
   }
@@ -870,37 +936,61 @@ async function realWanVideo(
 
 /** 拼最终喂给 ComfyUI / MiniMax H3 的视频提示词（页面预览 / 实际生成共用）
  *
- * 按 H3 官方 I2VA 编译：首帧对齐句 + integrated_multimodal_description +
- * overall_soundscape + non_diegetic_music。
+ * 选 H3 时：多图人设/场景/看板走官方 Ref2VA 六段；单张首帧走 I2VA。
+ * 选万相时原样使用用户提示词，不套 H3 格式。
  */
 export function composeVideoPrompt(input: VideoGenInput): string {
   return buildPrompt(input)
 }
 
+function inferH3Mode(input: VideoGenInput): 'I2VA' | 'T2VA' | 'R2VA' {
+  if (input.mode) return input.mode
+  if (
+    isRef2VA({
+      prompt: input.prompt,
+      duration: input.duration,
+      imageSlots: input.imageSlots,
+      imageAssignments: input.imageAssignments
+    })
+  ) {
+    return 'R2VA'
+  }
+  if (input.imageBlob || input.referenceImages?.length) return 'I2VA'
+  return 'T2VA'
+}
+
 function buildPrompt(input: VideoGenInput): string {
-  return composeH3VideoPrompt({
-    prompt: input.prompt,
-    aesthetic: input.aesthetic,
-    audioDescription: input.audioDescription,
-    voiceover: input.voiceover,
-    voiceMode: input.voiceMode,
-    speakerHint: input.speakerHint,
-    speakerName: input.speakerName,
-    sceneName: input.sceneName,
-    sceneDescription: input.sceneDescription,
-    sceneLighting: input.sceneLighting,
-    sceneAnchor: input.sceneAnchor,
-    shotTitle: input.shotTitle,
-    imageAssignments: input.imageAssignments,
-    onScreenNames: input.onScreenNames,
-    duration: input.duration,
-    width: input.width,
-    height: input.height,
-    aspectRatio: input.aspectRatio,
-    cameraMovement: input.cameraMovement,
-    mode: input.imageBlob || input.referenceImages?.length ? 'I2VA' : 'T2VA',
-    promptStyle: input.promptStyle ?? getVideoPromptStyle()
-  })
+  const raw =
+    input.videoModel === 'wan-prime' || input.promptAsIs
+      ? input.prompt
+      : composeH3VideoPrompt({
+          prompt: input.prompt,
+          aesthetic: input.aesthetic,
+          audioDescription: input.audioDescription,
+          voiceover: input.voiceover,
+          voiceMode: input.voiceMode,
+          speakerHint: input.speakerHint,
+          speakerName: input.speakerName,
+          sceneName: input.sceneName,
+          sceneDescription: input.sceneDescription,
+          sceneLighting: input.sceneLighting,
+          sceneAnchor: input.sceneAnchor,
+          shotTitle: input.shotTitle,
+          imageAssignments: input.imageAssignments,
+          imageSlots: input.imageSlots,
+          onScreenNames: input.onScreenNames,
+          duration: input.duration,
+          width: input.width,
+          height: input.height,
+          aspectRatio: input.aspectRatio,
+          cameraMovement: input.cameraMovement,
+          mode: inferH3Mode(input),
+          promptStyle: input.promptStyle ?? getVideoPromptStyle()
+        })
+  if (input.h3GenMode === 'fl2va' && input.videoModel !== 'wan-prime') {
+    return ensureFl2vaLead(raw, input.duration)
+  }
+  return raw
 }
 
 export async function generateVideo(
@@ -909,7 +999,11 @@ export async function generateVideo(
 ): Promise<VideoGenOutput> {
   const mode = getAIMode()
   if (mode === 'real') {
-    if (!input.imageBlob) {
+    if (input.h3GenMode === 'fl2va') {
+      if (!input.imageBlob || !input.lastFrameBlob) {
+        throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
+      }
+    } else if (!input.imageBlob) {
       throw new Error('[video] 真实模式需要角色设计图、场景图和故事看板作为参考输入')
     }
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频

@@ -38,7 +38,7 @@ export const STYLE_ALIASES: Record<VisualStyle, string[]> = {
   watercolor: ['水彩画风', '水彩画', '水彩风', 'watercolor', '水彩'],
   'oil-painting': ['古典油画', '油画风', 'oil painting', 'oil-painting', '厚涂', '油画'],
   'pixel-art': ['像素风格', '像素风', 'pixel-art', 'pixel art', '像素画', '像素'],
-  '3d-render': ['三维渲染', '3d渲染', '3d-render', 'blender', 'octane', 'c4d', '三维', '3d'],
+  '3d-render': ['三维渲染', '3d渲染', '3d-render', 'blender', 'octane', 'c4d'],
   anime: ['日系动画', '二次元', '赛璐璐', '动漫风', '动画风', 'anime', '动漫', '动画'],
   photorealistic: ['写实摄影', '超写实', 'photorealistic', '纪实摄影', '真人实拍'],
   cinematic: ['电影剧照', '院线电影', '胶片摄影', '电影感', 'cinematic', '胶片颗粒']
@@ -189,12 +189,25 @@ const MEDIUM_STOP = new Set([
 ])
 
 const OPEN_MEDIUM_CUE =
-  /风格|画风|质感|电影感|动画|动漫|二次元|写实|摄影|渲染|油画|水彩|像素|水墨|赛博|蒸汽朋克|复古|胶片|手绘|插画|国风|赛璐璐|厚涂|扁平|3d|黏土|粘土|剪纸|皮影|浮世绘|波普|定格/
+  /风格|画风|质感|电影感|动画|动漫|二次元|写实|摄影|渲染|油画|水彩|像素|水墨|赛博|蒸汽朋克|复古|胶片|手绘|插画|国风|赛璐璐|厚涂|扁平|3d|黏土|粘土|剪纸|皮影|浮世绘|波普|定格|卡通|q版|cel-shad/
+
+/** 卡通渲染 / Q 版 / Cel-shading：词库里没有独立枚举，不能落到「像素」或写实 PBR 3D */
+const CEL_SHADE_PHRASE =
+  /卡通渲染(?:（Cel-shading）)?(?:\s*3D)?(?:\s*[+＋]\s*)?(?:Q\s*版(?:人物)?)?|Cel-shading(?:\s*3D)?|Q\s*版人物|卡通\s*3D|3D\s*卡通/i
+
+function extractCelShadePhrase(blob: string): string {
+  const hit = blob.match(CEL_SHADE_PHRASE)
+  if (!hit?.[0]) return ''
+  return hit[0].replace(/\s+/g, ' ').trim()
+}
 
 /** 从用户原话抽出画风词：先抓「X风/X风格」，再匹配已知画种。剧名不算画风。 */
 export function extractUserMediumPhrase(...texts: Array<string | undefined>): string {
   const blob = joinedText(...texts)
   if (!blob.trim()) return ''
+
+  const cel = extractCelShadePhrase(blob)
+  if (cel) return cel
 
   const open: string[] = []
   for (const m of blob.matchAll(/([\u4e00-\u9fffA-Za-z0-9]{1,12}(?:风格|画风))/g)) {
@@ -229,6 +242,8 @@ export function extractUserMediumPhrase(...texts: Array<string | undefined>): st
 export function inferVisualStyleFromText(...texts: Array<string | undefined>): VisualStyle | null {
   const blob = joinedText(...texts)
   if (!blob.trim()) return null
+  // 点了卡通渲染 / Q 版就不要对成词库里的像素或写实三维
+  if (extractCelShadePhrase(blob)) return null
   const lower = blob.toLowerCase()
   for (const style of INFER_ORDER) {
     const hit = STYLE_ALIASES[style].some((alias) => {
@@ -280,10 +295,20 @@ export function lookFromScript(
     topic?: string
     content?: string
     keywords?: string[]
-  } | null
+    aesthetic?: string
+    styleBrief?: string
+  } | null,
+  ...extra: Array<string | undefined>
 ): VisualLook {
   const fallback = script?.style ?? 'cinematic'
-  return lookFromTexts(fallback, script?.topic, script?.content, script?.keywords)
+  return lookFromTexts(
+    fallback,
+    script?.topic,
+    script?.keywords,
+    script?.aesthetic,
+    script?.styleBrief,
+    ...extra
+  )
 }
 
 /** 用户点了非实拍媒介时，人设不要走摄影棚三视图 */
@@ -307,7 +332,7 @@ export function mediumLockText(look: VisualLook): string {
     return `${userBit}${styleLockSuffix(look.matched)} ${professionalQualityLock(look.matched)}`
   }
   if (look.userNamed) {
-    return `必须按用户原词「${look.medium}」绘制，用该媒介自己的材料、技法和质感做到专业完成度。禁止偷换成用户没点名的其他画风，也不要用页面下拉的默认风格覆盖。`
+    return `必须按用户原词「${look.medium}」绘制，用该媒介自己的材料、技法和质感做到专业完成度。禁止改成用户没写的其他画风。`
   }
   return `${styleLockSuffix(look.style)} ${professionalQualityLock(look.style)}`
 }

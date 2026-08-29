@@ -10,7 +10,7 @@ triggers: 视频,出片,图生视频,运镜,动起来,生成视频
 
 缺人设、场景或看板先补，不要先出配图。画外音镜头里被叫到的人不能张嘴。最终视频必须是单一完整画面，禁止复制四宫格、分格、边框、拼贴、字幕或标签。
 
-出片使用 `videoPrompt` 的动作表演信息，不把配图用的 `visualPrompt` 原样送入 H3。生成前由主 LLM 将项目上下文、人物、场景、走位、视线、连续性和道具编译为纯英文视觉描述，并自动自检一次；不合格自动重写，仍不合格则暂停。
+出片使用 `videoPrompt` 的动作表演信息，不把配图用的 `visualPrompt` 原样送入 H3。`videoPrompt` 必须是这一镜的剧情表演（谁看见什么、做什么、情绪怎么变），不是按秒填空。选 **H3** 时按官方 Ref2VA 六段编译（见 `h3-prompt-writing`）：`subject_definitions` / `summary` / `retention_analysis` / `detailed_description` / `overall_soundscape` / `non_diegetic_music`。正文是连续 `[Shot 1]`，第一镜不加时间戳，运镜写成 `The camera pushes in with small amplitude at slow speed` 这种句内动作。中文场记不要写成 `From 0.00s to 1.50s`。人设图不是 I2VA 首帧。选万相时不套这套格式。
 
 ## 配音
 
@@ -19,7 +19,7 @@ triggers: 视频,出片,图生视频,运镜,动起来,生成视频
 - `tts`：H3 不生成人声，最终合成时混入独立 TTS。
 - `none`：只有环境声。
 
-人物名、声线和镜头描述都不是台词。最终 H3 提示词用官方 I2VA 英文三段式；只有 `<d>[Chinese] 原词</d>` 会被朗读。口播栏如果写的是景别或动作说明，就写 `No dialogue. No lips moving.`
+人物名、声线和镜头描述都不是台词。最终 H3 提示词用官方英文；只有 `<d>[Chinese] 原词</d>` 会被朗读。出镜写 `<Subject 1> (S1) says:`，画外音写 `says in an off-screen voiceover` 并让嘴唇闭合。口播栏如果写的是景别或动作说明，就写 `No dialogue. No lips moving.`
 
 ## 运动与队列
 

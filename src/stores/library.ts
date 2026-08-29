@@ -22,6 +22,7 @@ export const useLibraryStore = defineStore('library', () => {
   const all = ref<Asset[]>([])
   const folders = ref<LibraryFolder[]>([])
   const urlCache = new Map<ID, string>()
+  const ensureFolderJobs = new Map<string, Promise<LibraryFolder>>()
 
   async function refresh() {
     const [assets, list] = await Promise.all([listLibraryAssets(), listLibraryFolders()])
@@ -144,6 +145,35 @@ export const useLibraryStore = defineStore('library', () => {
     return folder
   }
 
+  /** 给节点自动归档使用；并发生成时同一分类只会创建一次。 */
+  async function ensureFolder(name: string): Promise<LibraryFolder> {
+    const trimmed = name.trim()
+    const current = folders.value.find((folder) => folder.name === trimmed)
+    if (current) return current
+    const pending = ensureFolderJobs.get(trimmed)
+    if (pending) return pending
+    const job = (async () => {
+      await refresh()
+      return folders.value.find((folder) => folder.name === trimmed) || createFolder(trimmed)
+    })()
+    ensureFolderJobs.set(trimmed, job)
+    try {
+      return await job
+    } finally {
+      ensureFolderJobs.delete(trimmed)
+    }
+  }
+
+  async function addCategorized(
+    blob: Blob,
+    category: '角色' | '场景' | '道具' | '其他',
+    source: Asset['source'],
+    options: { filename?: string; prompt?: string } = {}
+  ): Promise<Asset> {
+    const folder = await ensureFolder(category)
+    return add(blob, source, { ...options, folderId: folder.id })
+  }
+
   async function renameFolder(id: string, name: string): Promise<void> {
     const trimmed = assertFolderName(name, id)
     const next = folders.value.map((f) => (f.id === id ? { ...f, name: trimmed } : f))
@@ -185,6 +215,8 @@ export const useLibraryStore = defineStore('library', () => {
     folderCount,
     folderName,
     createFolder,
+    ensureFolder,
+    addCategorized,
     renameFolder,
     deleteFolder,
     moveToFolder

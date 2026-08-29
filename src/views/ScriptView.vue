@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -12,7 +12,7 @@ import {
   normalizeImportedMarkdown,
   scriptExportFilename
 } from '@/utils/scriptMarkdown'
-import type { Script, VisualStyle, AspectRatio } from '@/types'
+import type { Script, ScriptChapter, VisualStyle, AspectRatio } from '@/types'
 
 const MAX_PRODUCT_IMAGES = 5
 
@@ -30,6 +30,24 @@ const keywords = ref('')
 const productIds = ref<string[]>([])
 const productUrls = ref<Record<string, string>>({})
 const workflowMode = ref<Script['workflowMode']>()
+const chapters = ref<ScriptChapter[]>([])
+const activeChapterId = ref('')
+const selectedChapterIds = ref<Set<string>>(new Set())
+const dramaLoaded = ref(false)
+let dramaSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+const isDrama = computed(() => project.current?.pipelineMode === 'drama')
+const activeChapter = computed(() =>
+  chapters.value.find((chapter) => chapter.id === activeChapterId.value) ?? chapters.value[0]
+)
+const dramaWordCount = computed(() =>
+  chapters.value.reduce((sum, chapter) => sum + chapter.content.replace(/\s/g, '').length, 0)
+)
+const selectedReadyChapters = computed(() =>
+  chapters.value.filter(
+    (chapter) => selectedChapterIds.value.has(chapter.id) && chapter.content.trim()
+  )
+)
 
 const presets = [
   {
@@ -99,7 +117,158 @@ onMounted(async () => {
     topic.value = p.topic
     content.value = p.content
   }
+
+  if (isDrama.value && project.current) {
+    const existing = [...(project.current.chapters ?? [])].sort((a, b) => a.order - b.order)
+    if (existing.length) {
+      chapters.value = existing
+    } else {
+      const now = Date.now()
+      chapters.value = [{
+        id: 'ch_' + now.toString(36),
+        title: '第 1 章',
+        content: project.current.script?.content ?? '',
+        order: 0,
+        status: project.current.script?.content?.trim() ? 'ready' : 'draft',
+        createdAt: now,
+        updatedAt: now
+      }]
+    }
+    activeChapterId.value = chapters.value[0].id
+    const savedSelection = project.current.selectedChapterIds ?? []
+    selectedChapterIds.value = new Set(
+      savedSelection.length ? savedSelection : [chapters.value[0].id]
+    )
+    dramaLoaded.value = true
+    await persistDrama(false)
+  }
 })
+
+watch(
+  chapters,
+  () => {
+    if (!dramaLoaded.value || !isDrama.value) return
+    if (dramaSaveTimer) clearTimeout(dramaSaveTimer)
+    dramaSaveTimer = setTimeout(() => persistDrama(false), 700)
+  },
+  { deep: true }
+)
+
+onBeforeUnmount(() => {
+  if (dramaSaveTimer) clearTimeout(dramaSaveTimer)
+  if (dramaLoaded.value && isDrama.value) persistDrama(false)
+})
+
+function updateActiveChapter(patch: Partial<Pick<ScriptChapter, 'title' | 'content'>>) {
+  const index = chapters.value.findIndex((chapter) => chapter.id === activeChapterId.value)
+  if (index < 0) return
+  const current = chapters.value[index]
+  const next = { ...current, ...patch, updatedAt: Date.now() }
+  next.status = next.content.trim() ? 'ready' : 'draft'
+  chapters.value[index] = next
+}
+
+function addChapter() {
+  const now = Date.now()
+  const chapter: ScriptChapter = {
+    id: `ch_${now.toString(36)}_${chapters.value.length + 1}`,
+    title: `第 ${chapters.value.length + 1} 章`,
+    content: '',
+    order: chapters.value.length,
+    status: 'draft',
+    createdAt: now,
+    updatedAt: now
+  }
+  chapters.value = [...chapters.value, chapter]
+  activeChapterId.value = chapter.id
+  selectedChapterIds.value = new Set([...selectedChapterIds.value, chapter.id])
+  persistDrama(false)
+}
+
+function removeChapter(id: string) {
+  if (chapters.value.length <= 1) {
+    toast.warn('至少保留一个章节')
+    return
+  }
+  const target = chapters.value.find((chapter) => chapter.id === id)
+  if (!target || !confirm(`确定删除「${target.title}」吗？`)) return
+  chapters.value = chapters.value.filter((chapter) => chapter.id !== id)
+  const nextSelected = new Set(selectedChapterIds.value)
+  nextSelected.delete(id)
+  selectedChapterIds.value = nextSelected
+  if (activeChapterId.value === id) activeChapterId.value = chapters.value[0].id
+  persistDrama(false)
+}
+
+function moveChapter(id: string, offset: -1 | 1) {
+  const index = chapters.value.findIndex((chapter) => chapter.id === id)
+  const target = index + offset
+  if (index < 0 || target < 0 || target >= chapters.value.length) return
+  const next = [...chapters.value]
+  ;[next[index], next[target]] = [next[target], next[index]]
+  chapters.value = next.map((chapter, order) => ({ ...chapter, order }))
+}
+
+function toggleChapterSelection(id: string) {
+  const next = new Set(selectedChapterIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedChapterIds.value = next
+  persistDrama(false)
+}
+
+function selectAllReady() {
+  selectedChapterIds.value = new Set(
+    chapters.value.filter((chapter) => chapter.content.trim()).map((chapter) => chapter.id)
+  )
+  persistDrama(false)
+}
+
+async function persistDrama(showToast = false) {
+  if (!project.current || !isDrama.value) return
+  project.setChapters(chapters.value)
+  project.setSelectedChapterIds([...selectedChapterIds.value])
+  await project.save()
+  if (showToast) toast.success(`已保存 ${chapters.value.length} 个章节`)
+}
+
+async function produceSelectedChapters() {
+  if (!project.current) return
+  if (!selectedReadyChapters.value.length) {
+    toast.warn('请至少勾选一个有内容的章节')
+    return
+  }
+  await persistDrama(false)
+  const prev = project.current.script
+  const selected = selectedReadyChapters.value
+  const assembled = selected
+    .map((chapter, index) => `## 第 ${index + 1} 章｜${chapter.title}\n\n${chapter.content.trim()}`)
+    .join('\n\n---\n\n')
+  project.setScript({
+    id: prev?.id ?? 's_' + Date.now().toString(36),
+    topic: selected.length === 1 ? selected[0].title : `${project.current.name}（${selected.length} 章）`,
+    content: assembled,
+    keywords: prev?.keywords ?? [],
+    style: style.value,
+    aspectRatio: aspectRatio.value,
+    shotDuration: shotDuration.value,
+    workflowMode: 'film-chapter',
+    aesthetic: prev?.aesthetic,
+    h3Aesthetic: prev?.h3Aesthetic,
+    styleBrief: prev?.styleBrief,
+    colorPalette: prev?.colorPalette,
+    lightingNote: prev?.lightingNote,
+    playReady: true,
+    referenceAssetIds: prev?.referenceAssetIds ?? [],
+    createdAt: prev?.createdAt ?? Date.now()
+  })
+  project.setProductionChapterIds(selected.map((chapter) => chapter.id))
+  project.setPlayApproved(false)
+  project.setAspectRatio(aspectRatio.value)
+  await project.save()
+  toast.success(`已将 ${selected.length} 个章节送入分镜设计`)
+  router.push('/storyboard')
+}
 
 const wordCount = computed(() => content.value.replace(/\s/g, '').length)
 const estimatedShots = computed(() => {
@@ -265,7 +434,26 @@ async function removeProductImage(id: string) {
 
 <template>
   <div class="page">
-    <header class="page-head">
+    <header v-if="isDrama" class="page-head drama-head">
+      <div>
+        <div class="drama-eyebrow">AI 短剧 · 剧本模式</div>
+        <h1>先把故事写好，再选择章节制作</h1>
+        <p>章节会独立保存。只有点击“用已选章节设计分镜”才会进入视频生产流程。</p>
+      </div>
+      <div class="head-actions">
+        <GradientButton type="ghost" @click="router.push('/')">← 项目列表</GradientButton>
+        <GradientButton type="ghost" @click="persistDrama(true)">仅保存剧本</GradientButton>
+        <GradientButton
+          icon="🎬"
+          :disabled="selectedReadyChapters.length === 0"
+          @click="produceSelectedChapters"
+        >
+          用已选 {{ selectedReadyChapters.length }} 章设计分镜
+        </GradientButton>
+      </div>
+    </header>
+
+    <header v-else class="page-head">
       <div>
         <h1>📝 文案准备</h1>
         <p>输入主题和文案。电商带货可上传产品图（最多 5 张），分镜会按真实产品来写。</p>
@@ -282,7 +470,120 @@ async function removeProductImage(id: string) {
       </div>
     </header>
 
-    <div class="layout">
+    <div v-if="isDrama" class="drama-layout">
+      <aside class="chapter-panel">
+        <div class="chapter-panel-head">
+          <div>
+            <b>章节</b>
+            <span>{{ chapters.length }} 章 · {{ dramaWordCount }} 字</span>
+          </div>
+          <button type="button" class="chapter-add" @click="addChapter">＋ 新建</button>
+        </div>
+
+        <div class="chapter-select-bar">
+          <span>已选 {{ selectedChapterIds.size }} 章</span>
+          <button type="button" @click="selectAllReady">选择全部已写章节</button>
+        </div>
+
+        <div class="chapter-list">
+          <article
+            v-for="(chapter, index) in chapters"
+            :key="chapter.id"
+            class="chapter-item"
+            :class="{ active: chapter.id === activeChapterId, selected: selectedChapterIds.has(chapter.id) }"
+            @click="activeChapterId = chapter.id"
+          >
+            <label class="chapter-check" title="选择这个章节进入分镜制作" @click.stop>
+              <input
+                type="checkbox"
+                :checked="selectedChapterIds.has(chapter.id)"
+                @change="toggleChapterSelection(chapter.id)"
+              />
+            </label>
+            <div class="chapter-item-main">
+              <b>{{ chapter.title || `第 ${index + 1} 章` }}</b>
+              <span>{{ chapter.content.replace(/\s/g, '').length }} 字 · {{ chapter.status === 'ready' ? '已写' : '草稿' }}</span>
+              <p>{{ chapter.content.trim().slice(0, 46) || '还没有内容，点击开始写作' }}</p>
+            </div>
+            <div class="chapter-actions" @click.stop>
+              <button type="button" title="上移" :disabled="index === 0" @click="moveChapter(chapter.id, -1)">↑</button>
+              <button type="button" title="下移" :disabled="index === chapters.length - 1" @click="moveChapter(chapter.id, 1)">↓</button>
+              <button type="button" class="danger" title="删除章节" @click="removeChapter(chapter.id)">×</button>
+            </div>
+          </article>
+        </div>
+      </aside>
+
+      <main v-if="activeChapter" class="chapter-editor">
+        <div class="chapter-editor-top">
+          <div class="chapter-order">章节 {{ activeChapter.order + 1 }}</div>
+          <div class="save-state">自动保存 · {{ activeChapter.status === 'ready' ? '可投入制作' : '草稿' }}</div>
+        </div>
+        <input
+          class="chapter-title-input"
+          :value="activeChapter.title"
+          maxlength="80"
+          placeholder="章节标题"
+          @input="updateActiveChapter({ title: ($event.target as HTMLInputElement).value })"
+        />
+        <textarea
+          class="chapter-content-input"
+          :value="activeChapter.content"
+          placeholder="开始写这一章的剧本。可以写场次、动作、人物和对白……"
+          @input="updateActiveChapter({ content: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <footer class="chapter-editor-foot">
+          <span>本章 {{ activeChapter.content.replace(/\s/g, '').length }} 字</span>
+          <label>
+            <input
+              type="checkbox"
+              :checked="selectedChapterIds.has(activeChapter.id)"
+              @change="toggleChapterSelection(activeChapter.id)"
+            />
+            完成后将本章加入分镜制作
+          </label>
+        </footer>
+      </main>
+
+      <aside class="production-panel">
+        <h3>本次制作范围</h3>
+        <p>顺序以左侧章节顺序为准。未勾选的章节只保存剧本，不会生成分镜、图片或视频。</p>
+        <ol v-if="selectedReadyChapters.length">
+          <li v-for="chapter in selectedReadyChapters" :key="chapter.id">
+            <span>{{ chapter.title }}</span>
+            <em>{{ chapter.content.replace(/\s/g, '').length }} 字</em>
+          </li>
+        </ol>
+        <div v-else class="production-empty">勾选至少一个已经写好内容的章节</div>
+        <div class="production-settings">
+          <label>
+            <span>画面风格</span>
+            <select v-model="style">
+              <option v-for="item in styleOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>视频比例</span>
+            <select v-model="aspectRatio">
+              <option v-for="item in aspectOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>单镜参考时长 {{ shotDuration }}s</span>
+            <input v-model.number="shotDuration" type="range" min="5" max="10" step="1" />
+          </label>
+        </div>
+        <GradientButton
+          icon="🎬"
+          :disabled="selectedReadyChapters.length === 0"
+          @click="produceSelectedChapters"
+        >
+          进入分镜设计
+        </GradientButton>
+      </aside>
+    </div>
+
+    <div v-else class="layout">
       <div class="main">
         <GlassCard padding="lg">
           <label class="field">
@@ -471,6 +772,283 @@ async function removeProductImage(id: string) {
   display: flex;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+.drama-eyebrow {
+  margin-bottom: 6px;
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.drama-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(420px, 1fr) 280px;
+  min-height: calc(100vh - 170px);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-1);
+}
+.chapter-panel,
+.production-panel {
+  min-width: 0;
+  background: color-mix(in srgb, var(--color-bg-2) 82%, transparent);
+}
+.chapter-panel {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--color-border);
+}
+.chapter-panel-head,
+.chapter-select-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+.chapter-panel-head > div {
+  display: grid;
+  gap: 2px;
+}
+.chapter-panel-head b {
+  font-size: 15px;
+}
+.chapter-panel-head span,
+.chapter-select-bar span {
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+.chapter-add,
+.chapter-select-bar button {
+  color: var(--color-accent);
+  font-size: 12px;
+}
+.chapter-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.chapter-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 6px;
+  padding: 11px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+.chapter-item:hover {
+  background: var(--color-fill);
+}
+.chapter-item.active {
+  border-color: var(--color-accent);
+  background: var(--grad-primary-soft);
+}
+.chapter-item.selected:not(.active) {
+  border-color: color-mix(in srgb, var(--color-accent) 34%, transparent);
+}
+.chapter-check {
+  padding-top: 2px;
+}
+.chapter-item-main {
+  min-width: 0;
+}
+.chapter-item-main b,
+.chapter-item-main span,
+.chapter-item-main p {
+  display: block;
+}
+.chapter-item-main b {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chapter-item-main span {
+  margin-top: 3px;
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+.chapter-item-main p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 7px 0 0;
+  color: var(--color-text-4);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.chapter-actions {
+  display: grid;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+.chapter-item:hover .chapter-actions,
+.chapter-item.active .chapter-actions {
+  opacity: 1;
+}
+.chapter-actions button {
+  width: 22px;
+  height: 20px;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+.chapter-actions button:disabled {
+  opacity: 0.25;
+}
+.chapter-actions .danger:hover {
+  color: var(--color-error);
+}
+.chapter-editor {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 24px 30px 18px;
+}
+.chapter-editor-top,
+.chapter-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+.chapter-order {
+  color: var(--color-accent);
+  font-weight: 700;
+}
+.chapter-title-input {
+  width: 100%;
+  margin: 18px 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font-size: 28px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+.chapter-title-input:focus {
+  border-color: var(--color-accent);
+}
+.chapter-content-input {
+  width: 100%;
+  min-height: 480px;
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 2;
+}
+.chapter-editor-foot {
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+.chapter-editor-foot label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.production-panel {
+  padding: 18px;
+  border-left: 1px solid var(--color-border);
+}
+.production-panel h3 {
+  margin: 0 0 7px;
+  font-size: 15px;
+}
+.production-panel > p {
+  margin: 0 0 14px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.production-panel ol {
+  display: grid;
+  max-height: 230px;
+  gap: 6px;
+  overflow-y: auto;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  counter-reset: chapter;
+}
+.production-panel li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-1);
+  font-size: 12px;
+  counter-increment: chapter;
+}
+.production-panel li span::before {
+  content: counter(chapter) '. ';
+  color: var(--color-accent);
+}
+.production-panel li em {
+  flex: none;
+  color: var(--color-text-4);
+  font-style: normal;
+  font-size: 10px;
+}
+.production-empty {
+  margin-bottom: 16px;
+  padding: 20px 12px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-4);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+.production-settings {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+.production-settings label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+.production-settings select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+}
+.production-panel :deep(.gradient-btn) {
+  width: 100%;
+}
+@media (max-width: 1100px) {
+  .drama-layout {
+    grid-template-columns: 240px minmax(380px, 1fr);
+  }
+  .production-panel {
+    display: none;
+  }
 }
 .workflow-option {
   display: flex;

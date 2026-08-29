@@ -11,10 +11,16 @@ import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
+import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
-import type { CanvasNodeType, ID, VideoGenModel } from '@/types'
-import { normalizeVideoGenModel } from '@/types'
+import {
+  canvasNodeOutputAssetId,
+  resolvedCanvasReferenceAssetIds
+} from '@/services/canvas/references'
+import type { CanvasNodeType, H3VideoGenMode, ID, VideoGenModel } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel } from '@/types'
 
 const props = defineProps<{
   id: string
@@ -23,6 +29,7 @@ const props = defineProps<{
     label?: string
     prompt?: string
     referenceAssetIds?: string[]
+    referenceSourceNodeIds?: string[]
     outputAssetId?: string
     duration?: number
     videoModel?: VideoGenModel
@@ -37,6 +44,7 @@ const toast = useToastStore()
 const mediaUrl = ref('')
 const posterUrl = ref('')
 const pickerOpen = ref(false)
+const pickerMode = ref<'ref' | 'output'>('ref')
 const panelOpen = ref(false)
 const moreOpen = ref(false)
 const busyLabel = ref('')
@@ -47,7 +55,18 @@ const { updateNodeData } = useVueFlow()
 const type = computed(() => (props.data.nodeType === 'videoGen' ? 'videoGen' : 'imageGen'))
 const isVideo = computed(() => type.value === 'videoGen')
 const node = computed(() => project.current?.canvas?.nodes.find((n) => n.id === props.id))
-const refs = computed(() => node.value?.data.referenceAssetIds ?? [])
+const boundRefs = computed(() => {
+  const p = project.current
+  const n = node.value
+  if (!p || !n) return []
+  return (n.data.referenceSourceNodeIds ?? [])
+    .map((id) => canvasNodeOutputAssetId(p, p.canvas?.nodes.find((item) => item.id === id)))
+    .filter((id): id is ID => Boolean(id))
+})
+const refs = computed(() => {
+  const p = project.current
+  return p && node.value ? resolvedCanvasReferenceAssetIds(p, node.value) : []
+})
 const outputId = computed(() => node.value?.data.outputAssetId || props.data.outputAssetId)
 const hasAsset = computed(() => Boolean(outputId.value))
 const generating = computed(() => isNodeRunning(props.id))
@@ -55,6 +74,29 @@ const title = computed(() => node.value?.data.label || (isVideo.value ? '视频'
 const prompt = computed({
   get: () => node.value?.data.prompt ?? '',
   set: (v: string) => project.patchCanvasNode(props.id, { prompt: v })
+})
+const h3GenMode = computed({
+  get: () => normalizeH3GenMode(node.value?.data.h3GenMode),
+  set: (v: H3VideoGenMode) => {
+    const patch: {
+      h3GenMode: H3VideoGenMode
+      firstFrameAssetId?: ID
+      lastFrameAssetId?: ID
+    } = { h3GenMode: v }
+    if (v === 'fl2va') {
+      if (!node.value?.data.firstFrameAssetId && refs.value[0]) patch.firstFrameAssetId = refs.value[0]
+      if (!node.value?.data.lastFrameAssetId && refs.value[1]) patch.lastFrameAssetId = refs.value[1]
+    }
+    project.patchCanvasNode(props.id, patch)
+  }
+})
+const firstFrameId = computed({
+  get: () => node.value?.data.firstFrameAssetId,
+  set: (v: ID | undefined) => project.patchCanvasNode(props.id, { firstFrameAssetId: v })
+})
+const lastFrameId = computed({
+  get: () => node.value?.data.lastFrameAssetId,
+  set: (v: ID | undefined) => project.patchCanvasNode(props.id, { lastFrameAssetId: v })
 })
 const videoModel = computed({
   get: () => normalizeVideoGenModel(node.value?.data.videoModel),
@@ -72,6 +114,8 @@ const videoModel = computed({
     })
   }
 })
+const isH3Video = computed(() => isVideo.value && videoModel.value !== 'wan-prime')
+const isH3Fl2va = computed(() => isH3Video.value && h3GenMode.value === 'fl2va')
 const durationOptions = computed(() => {
   if (videoModel.value === 'wan-prime') {
     return Array.from({ length: 29 }, (_, i) => i + 2)
@@ -109,9 +153,11 @@ const failMsg = computed(() =>
 
 const pageImageIds = computed(() => {
   const ids: ID[] = []
-  for (const n of project.current?.canvas?.nodes ?? []) {
+  const p = project.current
+  if (!p) return ids
+  for (const n of p.canvas?.nodes ?? []) {
     if (n.type === 'imageGen' && n.data.outputAssetId) ids.push(n.data.outputAssetId)
-    for (const id of n.data.referenceAssetIds ?? []) ids.push(id)
+    for (const id of resolvedCanvasReferenceAssetIds(p, n)) ids.push(id)
   }
   return [...new Set(ids)]
 })
@@ -189,35 +235,83 @@ onBeforeUnmount(() => {
 
 function setRefs(ids: ID[]) {
   const max = videoModel.value === 'wan-prime' ? 10 : 9
-  project.patchCanvasNode(props.id, { referenceAssetIds: [...new Set(ids)].slice(0, max) })
+  const inherited = new Set(boundRefs.value)
+  const manual = [...new Set(ids)].filter((id) => !inherited.has(id))
+  const next = manual.slice(0, Math.max(0, max - inherited.size))
+  project.patchCanvasNode(props.id, {
+    referenceAssetIds: next
+  })
+  updateNodeData(props.id, {
+    ...props.data,
+    referenceAssetIds: next,
+    nodeType: type.value
+  })
 }
 
-function removeRef(id: ID) {
-  setRefs(refs.value.filter((x) => x !== id))
+function previewRef(id: ID) {
+  const url = refUrls.value[id]
+  if (url) openLightbox(url, 'image')
+}
+
+function removeRef(id: ID, ev?: Event) {
+  ev?.preventDefault()
+  ev?.stopPropagation()
+  project.removeCanvasNodeRef(props.id, id)
+  const n = project.current?.canvas?.nodes.find((item) => item.id === props.id)
+  updateNodeData(props.id, {
+    ...props.data,
+    referenceSourceNodeIds: n?.data.referenceSourceNodeIds ?? [],
+    referenceAssetIds: n?.data.referenceAssetIds ?? [],
+    nodeType: type.value
+  })
+  toast.success('已移除这张参考图')
 }
 
 async function onPickerConfirm(ids: ID[]) {
-  const resolved: ID[] = []
-  for (const id of ids) {
-    if (assets.getMeta(id) || refs.value.includes(id)) {
-      resolved.push(id)
-      continue
-    }
-    const blob = (await library.getBlob(id)) || (await assets.getBlob(id))
-    if (!blob) {
-      resolved.push(id)
-      continue
-    }
-    const meta = library.getMeta(id)
-    const copied = await assets.add(blob, 'image', meta?.source || 'uploaded', {
-      filename: meta?.filename,
-      prompt: meta?.prompt,
-      projectId: project.current?.id
-    })
-    resolved.push(copied.id)
-  }
-  setRefs([...refs.value, ...resolved])
   pickerOpen.value = false
+  if (!ids.length) return
+  try {
+    if (pickerMode.value === 'output') {
+      const kind = isVideo.value ? 'video' : 'image'
+      const asset = await assets.adopt(ids[0], kind, { projectId: project.current?.id })
+      project.assignCanvasNodeAsset(props.id, asset.id)
+      updateNodeData(props.id, {
+        ...props.data,
+        outputAssetId: asset.id,
+        nodeType: type.value
+      })
+      await loadMedia()
+      toast.success(isVideo.value ? '已选用该视频' : '已选用该图片')
+      return
+    }
+    const resolved: ID[] = []
+    for (const id of ids) {
+      try {
+        const copied = await assets.adopt(id, 'image', { projectId: project.current?.id })
+        resolved.push(copied.id)
+      } catch {
+        resolved.push(id)
+      }
+    }
+    setRefs([...refs.value, ...resolved])
+  } catch (e: any) {
+    toast.error(e?.message || '选用失败')
+  }
+}
+
+function openRefPicker() {
+  pickerMode.value = 'ref'
+  pickerOpen.value = true
+}
+
+function openOutputPicker() {
+  pickerMode.value = 'output'
+  pickerOpen.value = true
+}
+
+function onEmptyClick() {
+  if (generating.value) return
+  if (props.selected && panelOpen.value) openOutputPicker()
 }
 
 function uploadRefs() {
@@ -270,9 +364,20 @@ async function generate() {
     toast.warn('请先写提示词')
     return
   }
-  if (isVideo.value && !refs.value.length) {
-    toast.warn('请先选至少一张参考图')
-    return
+  if (isVideo.value) {
+    if (isH3Fl2va.value) {
+      if (!firstFrameId.value && !refs.value[0]) {
+        toast.warn('请先选首帧')
+        return
+      }
+      if (!lastFrameId.value && !refs.value[1]) {
+        toast.warn('请先选尾帧')
+        return
+      }
+    } else if (!refs.value.length) {
+      toast.warn('请先选至少一张参考图')
+      return
+    }
   }
   moreOpen.value = false
   durOpen.value = ''
@@ -372,6 +477,9 @@ function removeSelf() {
           <button type="button" :disabled="generating" @click="generate">
             <span>↺</span>{{ genLabel }}
           </button>
+          <button type="button" :disabled="generating" title="选用已有资源，不重新生成" @click="openOutputPicker">
+            <span>▣</span>选用
+          </button>
           <button type="button" @click="duplicateSelf">
             <span>❐</span>复制
           </button>
@@ -434,7 +542,14 @@ function removeSelf() {
         alt=""
         @click.stop="previewFull"
       />
-      <div v-else class="ph">{{ isVideo ? '▶' : '＋' }}</div>
+      <div
+        v-else
+        class="ph pick"
+        :title="isVideo ? '选用已有视频' : '选用已有图片'"
+        @click="onEmptyClick"
+      >
+        {{ isVideo ? '▶' : '＋' }}
+      </div>
       <span v-if="isVideo && duration" class="dur-tag">{{ duration }}s</span>
       <NodeBusyOverlay v-if="generating" :label="busyLabel || (isVideo ? '出视频…' : '出图…')" />
       <div v-if="failMsg && !generating" class="fail" :title="failMsg">{{ failMsg }}</div>
@@ -449,18 +564,32 @@ function removeSelf() {
       <div
         v-if="selected && panelOpen"
         class="prompt nodrag nowheel"
+        @pointerdown.stop
         @mousedown.stop
         @click.stop
       >
-        <div class="refs">
-          <button v-for="id in refs" :key="id" type="button" class="thumb" title="移出参考" @click="removeRef(id)">
-            <img v-if="refUrls[id]" :src="refUrls[id]" alt="" />
-          </button>
-          <button type="button" class="add" title="上传参考图" @click="uploadRefs">＋</button>
-          <button type="button" class="add" title="从本页或资产库选择" @click="pickerOpen = true">库</button>
-          <span class="refs-hint">{{
-            isVideo && videoModel === 'wan-prime' ? '参考图（图1、图2…）；单张作首帧' : '参考图'
-          }}</span>
+        <H3GenModeSelect v-if="isH3Video" v-model="h3GenMode" />
+        <FramePairSlots
+          v-if="isH3Fl2va"
+          v-model:first-id="firstFrameId"
+          v-model:last-id="lastFrameId"
+        />
+        <div v-else class="refs">
+          <div v-for="id in refs" :key="id" class="thumb nodrag nopan nowheel">
+            <button type="button" class="thumb-preview nodrag" title="查看大图" @pointerdown.stop @click.stop="previewRef(id)">
+              <img v-if="refUrls[id]" :src="refUrls[id]" alt="" />
+            </button>
+            <button
+              type="button"
+              class="thumb-del nodrag nopan nowheel"
+              title="移除这张参考图"
+              @pointerdown.stop.prevent="removeRef(id, $event)"
+            >
+              ×
+            </button>
+          </div>
+          <button type="button" class="add nodrag" title="上传参考图" @click="uploadRefs">＋</button>
+          <button type="button" class="add nodrag" title="从本页或资产库选择参考图" @click="openRefPicker">库</button>
         </div>
         <textarea
           v-model="prompt"
@@ -503,17 +632,23 @@ function removeSelf() {
 
     <AssetPicker
       :open="pickerOpen"
-      kind="image"
-      multiple
+      :kind="pickerMode === 'output' && isVideo ? 'video' : 'image'"
+      :multiple="pickerMode === 'ref'"
       :title="
-        isVideo
-          ? videoModel === 'wan-prime'
-            ? '选择参考图（最多 10 张，提示词里可用图1、图2）'
-            : '选择参考图（本页或公共库）'
-          : '选择参考图'
+        pickerMode === 'output'
+          ? isVideo
+            ? '选用已有视频作为本节点结果'
+            : '选用已有图片作为本节点结果'
+          : isVideo
+            ? videoModel === 'wan-prime'
+              ? '选择参考图（最多 10 张，提示词里可用图1、图2）'
+              : '选择参考图（本页或公共库）'
+            : '选择参考图'
       "
-      :page-ids="pageImageIds"
-      show-library
+      :page-ids="pickerMode === 'ref' ? pageImageIds : undefined"
+      :show-library="pickerMode === 'ref' || !isVideo"
+      :default-tab="pickerMode === 'output' ? 'page' : undefined"
+      :selected-ids="pickerMode === 'output' && outputId ? [outputId] : []"
       @close="pickerOpen = false"
       @confirm="onPickerConfirm"
     />
@@ -688,6 +823,9 @@ function removeSelf() {
   color: var(--color-text-4);
   font-size: 18px;
 }
+.ph.pick {
+  cursor: pointer;
+}
 .dur-tag {
   position: absolute;
   right: 8px;
@@ -722,13 +860,13 @@ function removeSelf() {
 }
 .prompt {
   position: absolute;
-  left: 50%;
+  left: 0;
   top: calc(100% + 8px);
   z-index: 5;
-  width: 480px;
-  min-width: 480px;
-  transform: translateX(-50%);
-  transform-origin: 50% 0;
+  width: 420px;
+  min-width: 280px;
+  transform-origin: 0 0;
+  overflow: visible;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -738,19 +876,25 @@ function removeSelf() {
 .refs {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding-top: 2px;
+  overflow: visible;
 }
-.refs-hint {
-  margin-left: 4px;
-  font-size: 11px;
-  color: var(--color-text-4);
+.thumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  z-index: 2;
+  overflow: visible;
+  pointer-events: auto;
 }
-.thumb,
+.thumb-preview,
 .add {
-  width: 40px;
-  height: 40px;
+  width: 48px;
+  height: 48px;
   margin: 0;
   padding: 0;
   border-radius: 8px;
@@ -759,12 +903,47 @@ function removeSelf() {
   background: var(--color-bg-2);
   color: var(--color-text-3);
   cursor: pointer;
+  pointer-events: auto;
 }
-.thumb img {
+.add {
+  width: 36px;
+  height: 36px;
+  font-size: 16px;
+  align-self: flex-start;
+}
+.thumb-preview img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  pointer-events: none;
+}
+.thumb-del {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 8;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  background: #e5484d;
+  color: #fff !important;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.thumb-del:hover {
+  background: #c63c41;
 }
 .prompt textarea {
   width: 100%;
@@ -878,6 +1057,6 @@ function removeSelf() {
 .float-down-enter-from,
 .float-down-leave-to {
   opacity: 0;
-  transform: translateX(-50%) translateY(-6px);
+  transform: translateY(-6px);
 }
 </style>

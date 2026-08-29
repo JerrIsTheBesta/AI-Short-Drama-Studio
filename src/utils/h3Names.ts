@@ -26,6 +26,41 @@ export function h3RefName(name?: string, fallback = 'the character'): string {
   return value
 }
 
+/** 中文人名不能都塌成 the character，否则图一图二无法区分。 */
+export function h3UniqueName(
+  name: string | undefined,
+  index: number,
+  role: 'person' | 'place' = 'person'
+): string {
+  const mapped = h3RefName(name, '')
+  if (mapped) return mapped
+  return role === 'place' ? `Place ${index}` : `Person ${index}`
+}
+
+/** 按出场顺序给每个人一个不重复的英文称呼。 */
+export function h3NameMap(names: Array<string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {}
+  const used = new Set<string>()
+  let person = 0
+  for (const raw of names) {
+    const key = String(raw || '').trim()
+    if (!key || out[key]) continue
+    let label = h3RefName(key, '')
+    if (!label) {
+      person += 1
+      label = `Person ${person}`
+    }
+    let final = label
+    let n = 2
+    while (used.has(final.toLowerCase())) {
+      final = `${label} ${n++}`
+    }
+    used.add(final.toLowerCase())
+    out[key] = final
+  }
+  return out
+}
+
 export function englishOrOmit(text?: string): string {
   const value = String(text || '').trim()
   if (!value || hasCjk(value)) return ''

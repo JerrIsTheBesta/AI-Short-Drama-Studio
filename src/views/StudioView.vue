@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
@@ -8,8 +8,12 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { rebuildCanvasGraph } from '@/services/canvas/layout'
+import { rebuildCanvasGraph, NODE_W } from '@/services/canvas/layout'
 import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
+import {
+  appendCanvasReferenceSource,
+  canvasNodeProducesImage
+} from '@/services/canvas/references'
 import { isDesktop, desktop } from '@/services/desktop'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
 import AudioNode from '@/components/canvas/AudioNode.vue'
@@ -17,6 +21,7 @@ import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
 import FreeformGenNode from '@/components/canvas/FreeformGenNode.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
+import PromptCoach from '@/components/canvas/PromptCoach.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
 import type { CanvasNode } from '@/types'
 
@@ -25,14 +30,97 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 const router = useRouter()
 const agentOpen = ref(true)
+const agentWidth = ref(440)
+const resizingAgent = ref(false)
 const rightOpen = ref(false)
 const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
+
+const AGENT_WIDTH_KEY = 'aicut:agent-chat-width'
+const AGENT_MIN_WIDTH = 300
+const AGENT_MAX_WIDTH = 760
+let resizeStartX = 0
+let resizeStartWidth = 440
+let previousBodyCursor = ''
+let previousBodyUserSelect = ''
+
+function maxAgentWidth() {
+  const rightDock = rightOpen.value ? 300 : 0
+  return Math.max(
+    AGENT_MIN_WIDTH,
+    Math.min(AGENT_MAX_WIDTH, window.innerWidth - rightDock - 360)
+  )
+}
+
+function clampAgentWidth(value: number) {
+  return Math.round(Math.max(AGENT_MIN_WIDTH, Math.min(maxAgentWidth(), value)))
+}
+
+function persistAgentWidth() {
+  try {
+    localStorage.setItem(AGENT_WIDTH_KEY, String(agentWidth.value))
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
+function loadAgentWidth() {
+  try {
+    const saved = Number(localStorage.getItem(AGENT_WIDTH_KEY))
+    if (Number.isFinite(saved) && saved > 0) agentWidth.value = clampAgentWidth(saved)
+  } catch {
+    agentWidth.value = clampAgentWidth(agentWidth.value)
+  }
+}
+
+function onAgentResizeMove(event: PointerEvent) {
+  if (!resizingAgent.value) return
+  agentWidth.value = clampAgentWidth(resizeStartWidth + event.clientX - resizeStartX)
+}
+
+function stopAgentResize() {
+  if (!resizingAgent.value) return
+  resizingAgent.value = false
+  window.removeEventListener('pointermove', onAgentResizeMove)
+  window.removeEventListener('pointerup', stopAgentResize)
+  window.removeEventListener('pointercancel', stopAgentResize)
+  document.body.style.cursor = previousBodyCursor
+  document.body.style.userSelect = previousBodyUserSelect
+  persistAgentWidth()
+}
+
+function startAgentResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  resizeStartX = event.clientX
+  resizeStartWidth = agentWidth.value
+  resizingAgent.value = true
+  previousBodyCursor = document.body.style.cursor
+  previousBodyUserSelect = document.body.style.userSelect
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', onAgentResizeMove)
+  window.addEventListener('pointerup', stopAgentResize)
+  window.addEventListener('pointercancel', stopAgentResize)
+}
+
+function nudgeAgentWidth(delta: number) {
+  agentWidth.value = clampAgentWidth(agentWidth.value + delta)
+  persistAgentWidth()
+}
+
+function clampAgentToViewport() {
+  const next = clampAgentWidth(agentWidth.value)
+  if (next !== agentWidth.value) agentWidth.value = next
+}
+
+watch(rightOpen, clampAgentToViewport)
 
 const nodeTypes = {
   script: ScriptDocNode,
   subject: PipelineNode,
   subjectProps: PipelineNode,
   scene: PipelineNode,
+  sceneProps: PipelineNode,
   shotBoard: PipelineNode,
   shotImage: PipelineNode,
   shotVideo: PipelineNode,
@@ -69,7 +157,7 @@ const flowNodes = computed<Node[]>(() => {
         },
         draggable: true,
         selectable: false,
-        zIndex: -1
+        zIndex: 0
       }
     }
     if (n.type === 'script') {
@@ -92,7 +180,7 @@ const flowNodes = computed<Node[]>(() => {
       position: n.position,
       data: { ...n.data, nodeType: n.type },
       parentNode: n.parentGroupId,
-      extent: n.parentGroupId ? ('parent' as const) : undefined,
+      expandParent: false,
       draggable: true,
       zIndex: 1
     }
@@ -128,7 +216,8 @@ onMounted(async () => {
     router.push('/')
     return
   }
-  agentOpen.value = project.current.pipelineMode !== 'img2video'
+  agentOpen.value = true
+  loadAgentWidth()
   if (project.current.pipelineMode === 'img2video') {
     /* 空白画布，右键添加节点 */
   } else if (!project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')) {
@@ -153,10 +242,13 @@ onMounted(async () => {
   })
   setTimeout(() => fitView({ padding: 0.2 }), 80)
   window.addEventListener('keydown', onDupKey)
+  window.addEventListener('resize', clampAgentToViewport)
 })
 
 onUnmounted(() => {
+  stopAgentResize()
   window.removeEventListener('keydown', onDupKey)
+  window.removeEventListener('resize', clampAgentToViewport)
   setCanvasReveal(null)
   setCanvasInspect(null)
   setCanvasSelect(null)
@@ -164,6 +256,18 @@ onUnmounted(() => {
 
 onConnect((c: Connection) => {
   if (!project.current?.canvas) return
+  const source = project.current.canvas.nodes.find((node) => node.id === c.source)
+  const target = project.current.canvas.nodes.find((node) => node.id === c.target)
+  if (
+    source &&
+    target &&
+    canvasNodeProducesImage(source) &&
+    (target.type === 'imageGen' || target.type === 'videoGen') &&
+    !appendCanvasReferenceSource(project.current, target.id, source.id)
+  ) {
+    toast.warn('参考图数量已达到当前模型上限')
+    return
+  }
   const id = `e-${c.source}-${c.target}-${c.targetHandle || 'in'}`
   const edges = [
     ...project.current.canvas.edges.filter((e) => e.id !== id),
@@ -180,8 +284,34 @@ onConnect((c: Connection) => {
 
 onNodeDragStop(({ node }) => {
   if (!project.current?.canvas || !node) return
+  if (node.type === 'groupFrame') {
+    const nodes = project.current.canvas.nodes.map((n) =>
+      n.id === node.id ? { ...n, position: { ...node.position } } : n
+    )
+    project.setCanvas({ ...project.current.canvas, nodes })
+    return
+  }
+  const stored = project.current.canvas.nodes.find((n) => n.id === node.id)
+  const parentId = stored?.parentGroupId
+  let position = { ...node.position }
+  let parentGroupId = parentId
+  if (parentId) {
+    const parent = project.current.canvas.nodes.find((n) => n.id === parentId)
+    const pw = Number(parent?.data.width) || 0
+    const ph = Number(parent?.data.height) || 0
+    const cx = node.position.x + NODE_W / 2
+    const cy = node.position.y + 48
+    const inside = cx >= 0 && cy >= 0 && cx <= pw && cy <= ph
+    if (!inside && parent) {
+      position = {
+        x: parent.position.x + node.position.x,
+        y: parent.position.y + node.position.y
+      }
+      parentGroupId = undefined
+    }
+  }
   const nodes = project.current.canvas.nodes.map((n) =>
-    n.id === node.id ? { ...n, position: { ...node.position } } : n
+    n.id === node.id ? { ...n, position, parentGroupId } : n
   )
   project.setCanvas({ ...project.current.canvas, nodes })
 })
@@ -252,7 +382,6 @@ function duplicateNode(id: string | null | undefined) {
 }
 
 function onDupKey(e: KeyboardEvent) {
-  if (!isImg2Video.value) return
   const t = e.target as HTMLElement | null
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
@@ -262,7 +391,6 @@ function onDupKey(e: KeyboardEvent) {
 }
 
 function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
-  if (!isImg2Video.value) return
   const event = eventFromCtx(ev)
   if (!event) return
   event.preventDefault()
@@ -293,7 +421,13 @@ function addFreeform(type: 'imageGen' | 'videoGen') {
   if (!project.current) return
   const count = (project.current.canvas?.nodes ?? []).filter((n) => n.type === type).length + 1
   const id = `${type}_${Date.now().toString(36)}`
-  const pos = ctxMenu.value?.flow ?? { x: 120, y: 120 }
+  const sourceId = ctxMenu.value?.nodeId
+  const source = sourceId
+    ? project.current.canvas?.nodes.find((node) => node.id === sourceId)
+    : undefined
+  const inheritsSource = canvasNodeProducesImage(source)
+  const base = ctxMenu.value?.flow ?? { x: 120, y: 120 }
+  const pos = source ? { x: base.x + 140, y: base.y - 50 } : base
   project.addCanvasNode({
     id,
     type,
@@ -302,11 +436,26 @@ function addFreeform(type: 'imageGen' | 'videoGen') {
       label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
       prompt: '',
       referenceAssetIds: [],
+      referenceSourceNodeIds: inheritsSource && sourceId ? [sourceId] : [],
       duration: 8,
       ...(type === 'videoGen' ? { videoModel: 'h3' as const } : {})
     },
     status: 'idle'
   })
+  if (inheritsSource && sourceId && project.current.canvas) {
+    const edge = {
+      id: `e-${sourceId}-${id}-in`,
+      source: sourceId,
+      target: id,
+      sourceHandle: 'out',
+      targetHandle: 'in'
+    }
+    project.setCanvas({
+      ...project.current.canvas,
+      edges: [...project.current.canvas.edges.filter((item) => item.id !== edge.id), edge]
+    })
+  }
+  selectedId.value = id
   closeCtxMenu()
 }
 
@@ -337,7 +486,6 @@ function goClassic() {
       </span>
       <div class="spacer" />
       <button
-        v-if="!isImg2Video"
         class="icon-btn"
         :class="{ on: agentOpen }"
         :title="agentOpen ? '收起对话' : '打开智能体'"
@@ -391,7 +539,30 @@ function goClassic() {
       </button>
     </header>
     <div class="body">
-      <AgentChat v-if="agentOpen && !isImg2Video" />
+      <div
+        v-if="agentOpen"
+        class="agent-shell"
+        :class="{ resizing: resizingAgent }"
+        :style="{ width: `${agentWidth}px` }"
+      >
+        <PromptCoach v-if="isImg2Video" :node="selected" />
+        <AgentChat v-else />
+        <div
+          class="agent-resizer"
+          role="separator"
+          aria-label="调整智能体聊天窗口宽度"
+          aria-orientation="vertical"
+          :aria-valuemin="AGENT_MIN_WIDTH"
+          :aria-valuemax="maxAgentWidth()"
+          :aria-valuenow="agentWidth"
+          tabindex="0"
+          title="左右拖动调整聊天窗口宽度"
+          @pointerdown="startAgentResize"
+          @keydown.left.prevent="nudgeAgentWidth(-24)"
+          @keydown.right.prevent="nudgeAgentWidth(24)"
+          @dblclick="agentWidth = 440; persistAgentWidth()"
+        />
+      </div>
       <div class="flow-wrap">
         <VueFlow
           :nodes="flowNodes"
@@ -428,8 +599,12 @@ function goClassic() {
           :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }"
           @mousedown.stop
         >
-          <button type="button" @mousedown.prevent.stop="addFreeform('imageGen')">图片生成</button>
-          <button type="button" @mousedown.prevent.stop="addFreeform('videoGen')">视频生成</button>
+          <button type="button" @mousedown.prevent.stop="addFreeform('imageGen')">
+            {{ ctxMenu.nodeId ? '追加生图节点' : '添加生图节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addFreeform('videoGen')">
+            {{ ctxMenu.nodeId ? '追加视频节点' : '添加视频节点' }}
+          </button>
           <button
             v-if="canDuplicate(ctxMenu.nodeId)"
             type="button"
@@ -588,6 +763,46 @@ function goClassic() {
   display: flex;
   min-height: 0;
 }
+.agent-shell {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 300px;
+  max-width: min(760px, calc(100vw - 360px));
+  min-height: 0;
+  z-index: 4;
+}
+.agent-shell :deep(.agent) {
+  width: 100%;
+  height: 100%;
+  border-right: 1px solid var(--color-border);
+}
+.agent-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  z-index: 8;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.agent-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.agent-resizer:hover::after,
+.agent-resizer:focus-visible::after,
+.agent-shell.resizing .agent-resizer::after {
+  background: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
 .flow-wrap {
   flex: 1;
   min-width: 0;
@@ -650,6 +865,7 @@ function goClassic() {
 .flow-wrap :deep(.vue-flow__node-subject),
 .flow-wrap :deep(.vue-flow__node-subjectProps),
 .flow-wrap :deep(.vue-flow__node-scene),
+.flow-wrap :deep(.vue-flow__node-sceneProps),
 .flow-wrap :deep(.vue-flow__node-shotBoard),
 .flow-wrap :deep(.vue-flow__node-shotImage),
 .flow-wrap :deep(.vue-flow__node-shotVideo),

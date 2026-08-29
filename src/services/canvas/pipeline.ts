@@ -1,6 +1,7 @@
 import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
+import { sceneHasKeyProps } from '@/utils/consistency'
 
 export interface PipelineStep {
   id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'videos' | 'audio'
@@ -18,12 +19,26 @@ export function nextExtractStage(p: Project | null | undefined): ExtractStage | 
   return null
 }
 
+export function extractStageNoun(stage: ExtractStage): string {
+  if (stage === 'subjects') return '人物'
+  if (stage === 'scenes') return '场景描点'
+  return '分镜'
+}
+
+export function extractStageFromText(text: string): ExtractStage | undefined {
+  const t = String(text || '').trim()
+  if (/人物/.test(t) && !/场景|分镜/.test(t)) return 'subjects'
+  if (/(场景描点|场景锚点|场景)/.test(t) && !/分镜/.test(t)) return 'scenes'
+  if (/分镜|提炼节点|重新提炼/.test(t)) return 'shots'
+  return undefined
+}
+
 export function extractStageLabel(p: Project | null | undefined): string {
-  if (p?.shots.length) return '重新提炼节点'
   const stage = nextExtractStage(p)
   if (stage === 'subjects') return '第 1 步：提炼人物'
   if (stage === 'scenes') return '第 2 步：提炼场景'
-  return '第 3 步：拆分镜'
+  if (stage === 'shots') return '第 3 步：拆分镜'
+  return '重新提取请点对应分组'
 }
 
 export function nextPipelineStep(p: Project | null | undefined): PipelineStep | null {
@@ -62,13 +77,13 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-subjects'
     }
   }
-  const missingProps = (p.subjects ?? []).some((s) => !s.propSheetAssetId)
+  const missingProps = (p.scenes ?? []).some((s) => sceneHasKeyProps(s) && !s.propSheetAssetId)
   if (missingProps) {
     return {
       id: 'cast',
-      label: '角色资产图',
+      label: '场景关键道具图',
       tools: [{ tool: 'generate_all_prop_sheets' }],
-      focusNodeId: 'group-subjects'
+      focusNodeId: 'group-scenes'
     }
   }
   const missingPlates = (p.scenes ?? []).some((s) => !s.plateAssetId)
@@ -149,7 +164,7 @@ export function greetingReply(p: Project | null | undefined): string {
   if (!p?.script?.content?.trim()) {
     return [
       '你好，我是画布里的制作助手。',
-      '把主题或口播文案发我，我先写成完整剧本；之后一次只拆一步：先人物，再场景，再分镜。',
+      '把主题或口播文案发我，我先写成带背景、人物和环境的完整剧本；之后一次只拆一步：先人物，再场景，再分镜。',
       '也可以直接说「全流程」。'
     ].join('\n')
   }
@@ -220,13 +235,13 @@ export const TOOL_LABEL: Record<string, string> = {
   generate_play: '写完整剧本',
   continue_play: '续写剧本',
   generate_storyboard: '写完整剧本',
-  extract_cast: '提炼下一步（人物/场景/分镜）',
+  extract_cast: '提炼人物 / 场景 / 分镜（可指定一组重提）',
   approve_play: '记下剧本已验收',
   revise_shot: '局部修改分镜',
   generate_sheet: '生成四视图',
   generate_all_sheets: '补齐四视图',
-  generate_prop_sheet: '生成资产图',
-  generate_all_prop_sheets: '补齐资产图',
+  generate_prop_sheet: '生成场景关键道具图',
+  generate_all_prop_sheets: '补齐场景关键道具图',
   generate_scene: '生成场景锚点图',
   generate_all_scenes: '补齐场景锚点图',
   generate_shot_board: '生成故事看板',

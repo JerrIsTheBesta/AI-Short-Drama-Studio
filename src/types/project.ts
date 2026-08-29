@@ -9,7 +9,7 @@
  * - settings     : 项目级设置（分辨率、帧率、转场、字幕样式等）
  */
 
-import type { CanvasGraph } from './canvas'
+import type { CanvasGraph, H3VideoGenMode } from './canvas'
 
 export type ID = string
 
@@ -111,6 +111,8 @@ export interface Shot {
   /** 关联的素材 */
   imageAssetId?: ID
   videoAssetId?: ID
+  /** AutoDL / 万相未完成下载时的任务 ID，重试时先拿这个查结果，避免再交一遍 */
+  videoTaskId?: string
   /** 口播 TTS 音频 */
   audioAssetId?: ID
   /** 该分镜历史生成过的图片（不含当前），保留在资源库可回看/回用 */
@@ -129,8 +131,18 @@ export interface Shot {
    * 不能复用 visualPrompt（那是静帧配图词）。为空时按场记动作/台词重写。
    */
   videoPrompt?: string
+  /** 实际发给出视频接口的全文。有字就原样发送，不再背后编译。 */
+  compiledVideoPrompt?: string
+  /** H3：参考图生成（默认）或首尾帧。仅 H3 生效。 */
+  h3GenMode?: H3VideoGenMode
+  /** 首尾帧模式的首帧。空则用本镜配图 */
+  firstFrameAssetId?: ID
+  /** 首尾帧模式的尾帧 */
+  lastFrameAssetId?: ID
   /** 分镜级参考图（图生图/图像编辑用，0-N 张素材 ID） */
   referenceAssetIds?: ID[]
+  /** 本镜生成时不要再用的参考图（含自动带上的人设/场景/看板） */
+  omittedRefAssetIds?: ID[]
   /** 本镜出场的主体（人物/动物），对应 Project.subjects */
   subjectIds?: ID[]
   /** 本镜所在场景，对应 Project.scenes */
@@ -236,6 +248,17 @@ export interface Script {
   playReady?: boolean
   /** 创建时间 */
   createdAt: number
+}
+
+/** AI 短剧项目中可独立创作、选择并投入制作的剧本章节。 */
+export interface ScriptChapter {
+  id: ID
+  title: string
+  content: string
+  order: number
+  status: 'draft' | 'ready'
+  createdAt: number
+  updatedAt: number
 }
 
 /** 字幕样式 */
@@ -345,6 +368,8 @@ export interface Subject {
   referenceAssetIds?: ID[]
   /** 资产图额外参考图 */
   propReferenceAssetIds?: ID[]
+  /** 实际发给出图接口的四视图全文。框里有字就原样发送。 */
+  sheetPrompt?: string
 }
 
 /** 整片锁定的场景锚点图（四宫格：全景 / 主锚 / 地面 / 光线） */
@@ -359,12 +384,22 @@ export interface Scene {
   anchors?: string
   /** 时辰与光源 */
   lighting?: string
+  /** 当前场景中真正影响剧情或被人物使用的少量关键道具，分号分隔 */
+  props?: string
   /** 场景四宫格锚点图 */
   plateAssetId?: ID
   /** 历史锚点图（不含当前） */
   plateHistoryIds?: ID[]
   /** 场景锚点图额外参考图 */
   referenceAssetIds?: ID[]
+  /** 当前场景关键道具设计图 */
+  propSheetAssetId?: ID
+  propSheetHistoryIds?: ID[]
+  propReferenceAssetIds?: ID[]
+  /** 实际发给出图接口的场景锚点图全文。 */
+  platePrompt?: string
+  /** 实际发给出图接口的关键道具图全文。 */
+  propSheetPrompt?: string
 }
 
 /** 完整项目 */
@@ -372,6 +407,12 @@ export interface Project {
   id: ID
   name: string
   script: Script | null
+  /** AI 短剧的章节库。写作阶段与视频生产阶段彼此独立。 */
+  chapters?: ScriptChapter[]
+  /** 剧本工作台中勾选、准备进入分镜制作的章节。 */
+  selectedChapterIds?: ID[]
+  /** 最近一次组装为制作剧本的章节，用于提示当前生产范围。 */
+  productionChapterIds?: ID[]
   shots: Shot[]
   /** 整片主体（人设），配图/视频前先生成多角度设计图 */
   subjects?: Subject[]
@@ -403,7 +444,7 @@ export interface Project {
    * remake：上传参考视频复刻镜头，产品必须换成用户图
    * img2video：一图生视频，自由画布（图片节点 + 视频节点）
    */
-  pipelineMode?: 'standard' | 'remake' | 'img2video' | 'smart-speech'
+  pipelineMode?: 'standard' | 'drama' | 'remake' | 'img2video' | 'smart-speech'
   /** 智能口播入口创建的专用流程配置 */
   speechWorkflow?: SpeechWorkflow
   /** 视频复刻的参考视频 */

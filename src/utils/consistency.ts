@@ -1,12 +1,17 @@
 import type { ID, Project, Scene, Shot, Subject } from '@/types'
+import { sceneForShotPlace } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
-import { h3RefName } from '@/utils/h3Names'
 
 export interface ShotRefBundle {
   ids: ID[]
   labels: string[]
   characterCount: number
   hasScene: boolean
+}
+
+export function sceneHasKeyProps(scene: Pick<Scene, 'props'>): boolean {
+  const value = scene.props?.trim()
+  return Boolean(value && !/^(无|没有|暂无|none|no)$/i.test(value))
 }
 
 function uniqueIds(ids: ID[]): ID[] {
@@ -76,12 +81,6 @@ function castRefEntries(
         label: `four-view turnaround of "${sub.name}" (${sub.kind}); lock face, hair, body and outfit`
       })
     }
-    if (opts?.includeProps !== false && sub.propSheetAssetId) {
-      out.push({
-        id: sub.propSheetAssetId,
-        label: `prop / costume assets of "${sub.name}"; bags, badges, devices and worn items must match`
-      })
-    }
     if (out.filter((x) => x.label.includes('four-view')).length >= 2) break
   }
   return out
@@ -94,7 +93,7 @@ export function collectShotBoardRefIds(shot: Shot, project: Project): ShotRefBun
   return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 6 })
 }
 
-export type VideoRefKind = 'character' | 'scene' | 'board'
+export type VideoRefKind = 'character' | 'scene' | 'board' | 'extra'
 
 export interface VideoRefEntry {
   id: ID
@@ -105,6 +104,7 @@ export interface VideoRefEntry {
 
 /** 视频参考：本镜每个角色的设计图 + 场景图 + 故事看板。不传人物+场景配图。 */
 export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefEntry[] {
+  const omitted = new Set(shot.omittedRefAssetIds ?? [])
   const subjects = project.subjects ?? []
   const bound = boundSubjectIds(shot, subjects)
   const speakerLabel = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
@@ -113,29 +113,40 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
   const out: VideoRefEntry[] = []
   for (const sid of wanted) {
     const sub = subjects.find((item) => item.id === sid)
-    if (!sub?.designSheetAssetId) continue
+    if (!sub?.designSheetAssetId || omitted.has(sub.designSheetAssetId)) continue
     out.push({
       id: sub.designSheetAssetId,
       kind: 'character',
       name: sub.name,
-      label: `character design sheet of ${h3RefName(sub.name)}; lock face, hair, body and outfit only; do not generate a four-view grid`
+      label: `CHARACTER DESIGN SHEET of ${sub.name}; lock only this person's face, hair, body and outfit; do not generate a four-view grid`
     })
   }
   const scene = sceneForShot(shot, project)
-  if (scene?.plateAssetId) {
+  if (scene?.plateAssetId && !omitted.has(scene.plateAssetId)) {
     out.push({
       id: scene.plateAssetId,
       kind: 'scene',
       name: scene.name,
-      label: `scene plate of ${h3RefName(scene.name, 'the location')}; lock space, materials and light only; do not generate a four-panel grid`
+      label: `SCENE PLATE of ${scene.name}; lock only space, materials and light; do not generate a four-panel grid`
     })
   }
-  if (shot.boardAssetId) {
+  if (shot.boardAssetId && !omitted.has(shot.boardAssetId)) {
     out.push({
       id: shot.boardAssetId,
       kind: 'board',
       name: `shot ${shot.index + 1}`,
-      label: `six-panel storyboard for [Shot 1]; read action, blocking and order from top-left to bottom-right; synthesize one continuous full-frame video; do not copy panels, borders or sketches`
+      label: `six-panel STORYBOARD for [Shot 1]; action plan only; one continuous full-frame take; never copy panels or play them as a slideshow`
+    })
+  }
+  const used = new Set(out.map((item) => item.id))
+  for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
+    if (!id || used.has(id) || omitted.has(id) || id === shot.imageAssetId) continue
+    used.add(id)
+    out.push({
+      id,
+      kind: 'extra',
+      name: 'user reference',
+      label: 'additional user reference; match people, clothing, product or style from this image'
     })
   }
   return out
@@ -151,14 +162,17 @@ export function collectShotVideoRefIds(shot: Shot, project: Project): ShotRefBun
   }
 }
 
-/** 最多 9 张：本镜全部角色设计图 + 场景图 + 故事看板。不传配图。 */
+/** 最多 9 张：角色设计图 + 场景图 + 故事看板 + 用户补充参考。不传人物+场景配图。 */
 export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRefEntry[] {
   const chars = entries.filter((entry) => entry.kind === 'character')
+  const extras = entries.filter((entry) => entry.kind === 'extra')
   const scene = entries.find((entry) => entry.kind === 'scene')
   const board = entries.find((entry) => entry.kind === 'board')
   const reserved = [scene, board].filter((entry): entry is VideoRefEntry => Boolean(entry))
-  const charSlots = Math.max(0, max - reserved.length)
-  return [...chars.slice(0, charSlots), ...reserved]
+  const leftover = Math.max(0, max - reserved.length)
+  const extraTake = Math.min(extras.length, leftover)
+  const charTake = Math.max(0, leftover - extraTake)
+  return [...chars.slice(0, charTake), ...reserved, ...extras.slice(0, extraTake)]
 }
 
 /**
@@ -174,6 +188,9 @@ function packShotRefs(
   project: Project,
   opts: { includeBoard: boolean; includeProps: boolean; max: number }
 ): ShotRefBundle {
+  const omitted = new Set(shot.omittedRefAssetIds ?? [])
+  const keep = (list: { id: ID; label: string }[]) =>
+    omitted.size ? list.filter((item) => !omitted.has(item.id)) : list
   const scenes = project.scenes ?? []
   const chars = castRefEntries(shot, project, { includeProps: opts.includeProps })
   const scene =
@@ -182,6 +199,12 @@ function packShotRefs(
     ? {
         id: scene.plateAssetId,
         label: `four-panel scene anchor sheet of "${scene.name}"; same place, no people; use overall space, main anchor, floor and light`
+      }
+    : null
+  const scenePropEntry = opts.includeProps && sceneHasKeyProps(scene || {}) && scene?.propSheetAssetId
+    ? {
+        id: scene.propSheetAssetId,
+        label: `key prop design sheet of "${scene.name}"; only the listed story-relevant objects must match`
       }
     : null
   const boardEntry =
@@ -216,9 +239,10 @@ function packShotRefs(
       if (ordered.length >= 4) break
       if (!ordered.some((o) => o.id === p.id)) ordered.push(p)
     }
+    const kept = keep(ordered)
     return {
-      ids: ordered.map((o) => o.id),
-      labels: ordered.map((o) => o.label),
+      ids: kept.map((o) => o.id),
+      labels: kept.map((o) => o.label),
       characterCount: charOne.length,
       hasScene: Boolean(sceneEntry)
     }
@@ -231,6 +255,7 @@ function packShotRefs(
       ...(boardEntry ? [boardEntry] : []),
       ...fourViews.slice(0, 2),
       ...props.slice(0, 2),
+      ...(scenePropEntry ? [scenePropEntry] : []),
       ...(sceneEntry ? [sceneEntry] : [])
     ]
     for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
@@ -238,9 +263,10 @@ function packShotRefs(
       if (ordered.some((o) => o.id === id)) continue
       ordered.push({ id, label: 'user extra reference' })
     }
+    const kept = keep(ordered)
     return {
-      ids: ordered.map((o) => o.id),
-      labels: ordered.map((o) => o.label),
+      ids: kept.map((o) => o.id),
+      labels: kept.map((o) => o.label),
       characterCount: Math.min(fourViews.length, 2),
       hasScene: Boolean(sceneEntry)
     }
@@ -249,7 +275,7 @@ function packShotRefs(
   const fallback = uniqueIds([
     ...(shot.referenceAssetIds ?? []),
     ...(project.script?.referenceAssetIds ?? [])
-  ])
+  ]).filter((id) => !omitted.has(id))
   return {
     ids: fallback.slice(0, 3),
     labels: fallback.slice(0, 3).map((_, i) => `style/product reference ${i + 1}`),
@@ -267,9 +293,7 @@ export function subjectsForShot(shot: Shot, project: Project): Subject[] {
 }
 
 export function sceneForShot(shot: Shot, project: Project): Scene | undefined {
-  const all = project.scenes ?? []
-  if (shot.sceneId) return all.find((s) => s.id === shot.sceneId)
-  return all[0]
+  return sceneForShotPlace(shot, project)
 }
 
 export type ShotRefSlot = {
@@ -281,8 +305,8 @@ export type ShotRefSlot = {
 export function refSlotLabel(id: ID, project: Project): string {
   const four = (project.subjects ?? []).find((s) => s.designSheetAssetId === id)
   if (four) return `四视图·${four.name}`
-  const prop = (project.subjects ?? []).find((s) => s.propSheetAssetId === id)
-  if (prop) return `资产·${prop.name}`
+  const prop = (project.scenes ?? []).find((s) => s.propSheetAssetId === id)
+  if (prop) return `关键道具·${prop.name}`
   const scn = (project.scenes ?? []).find((s) => s.plateAssetId === id)
   if (scn) return `锚点·${scn.name}`
   const board = (project.shots ?? []).find((s) => s.boardAssetId === id)
@@ -294,19 +318,20 @@ export function refSlotLabel(id: ID, project: Project): string {
 /** 配图节点上展示：人设/空镜/产品锁定，额外参考可删 */
 export function imageRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
   const seen = new Set<ID>()
+  const omitted = new Set(shot.omittedRefAssetIds ?? [])
   const slots: ShotRefSlot[] = []
   const push = (id: ID | undefined, label: string, locked: boolean) => {
-    if (!id || seen.has(id)) return
+    if (!id || seen.has(id) || omitted.has(id)) return
     seen.add(id)
     slots.push({ id, label, locked })
   }
   push(shot.boardAssetId, '故事看板', true)
   for (const sub of subjectsForShot(shot, project)) {
     push(sub.designSheetAssetId, `四视图·${sub.name}`, true)
-    push(sub.propSheetAssetId, `资产·${sub.name}`, true)
   }
   const scene = sceneForShot(shot, project)
   push(scene?.plateAssetId, scene ? `锚点·${scene.name}` : '锚点图', true)
+  push(scene?.propSheetAssetId, scene ? `关键道具·${scene.name}` : '关键道具图', true)
   if (project.pipelineMode === 'remake') {
     for (const id of project.script?.referenceAssetIds ?? []) {
       push(id, '产品', true)
@@ -332,8 +357,10 @@ export function videoRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
         ? `图${index + 1}：角色设计·${entry.name}`
         : entry.kind === 'scene'
           ? `图${index + 1}：场景·${entry.name}`
-          : `图${index + 1}：本镜故事看板`,
-    locked: true
+          : entry.kind === 'extra'
+            ? `图${index + 1}：补充参考`
+            : `图${index + 1}：本镜故事看板`,
+    locked: false
   }))
 }
 
@@ -373,8 +400,8 @@ export function missingCastAssets(project: Project): {
   scenes: Scene[]
 } {
   return {
-    subjects: (project.subjects ?? []).filter((s) => !s.designSheetAssetId || !s.propSheetAssetId),
-    scenes: (project.scenes ?? []).filter((s) => !s.plateAssetId)
+    subjects: (project.subjects ?? []).filter((s) => !s.designSheetAssetId),
+    scenes: (project.scenes ?? []).filter((s) => !s.plateAssetId || (sceneHasKeyProps(s) && !s.propSheetAssetId))
   }
 }
 
@@ -406,15 +433,15 @@ export function composeShotImagePrompt(
   }
   if (chars.length) {
     parts.push(
-      '人物必须与四视图完全一致（同一张脸、发型、体型、服装、配色），随身物跟资产图：' +
+      '人物必须与四视图完全一致（同一张脸、发型、体型、服装、配色）：' +
         chars
-          .map((c) => `${c.name} — ${c.description}${c.props ? `；身上物件：${c.props}` : ''}`)
+          .map((c) => `${c.name} — ${c.description}`)
           .join('；')
     )
   }
   if (scene) {
     parts.push(
-      `地点必须与场景锚点图「${scene.name}」一致：${scene.description}${scene.mainAnchor ? `；主锚是${scene.mainAnchor}` : ''}。锚点图是四宫格设定，成片只要同一个地方，不要把四格画进画面。场景里没有人；把上述人物按四视图放进去，禁止另造场景，也禁止再添路人。`
+      `地点必须与场景锚点图「${scene.name}」一致：${scene.description}${scene.mainAnchor ? `；主锚是${scene.mainAnchor}` : ''}${scene.props && scene.props !== '无' ? `；本场关键道具：${scene.props}` : ''}。锚点图是四宫格设定，成片只要同一个地方，不要把四格画进画面。场景里没有人；把上述人物按四视图放进去，禁止另造场景，也禁止再添路人。`
     )
   }
   if (project.pipelineMode === 'remake') {

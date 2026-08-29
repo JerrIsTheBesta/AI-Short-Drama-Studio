@@ -17,13 +17,15 @@ import {
   loadProjectFromDir
 } from '@/services/storage'
 import { isDesktop, desktop } from '@/services/desktop'
-import { emptyCanvas, normalizeVideoGenModel } from '@/types/canvas'
+import { emptyCanvas, normalizeH3GenMode, normalizeVideoGenModel } from '@/types/canvas'
 import { pushHistory } from '@/utils/shot'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
+import { removeCanvasNodeReference } from '@/services/canvas/references'
 import { aspectToSize, isLandscapeAspect } from '@/utils/aspect'
 import type {
   Project,
   Script,
+  ScriptChapter,
   Shot,
   TimelineClip,
   ProjectSettings,
@@ -175,6 +177,19 @@ export const useProjectStore = defineStore('project', () => {
       p.subjects = p.subjects ?? []
       p.scenes = p.scenes ?? []
       p.timeline = p.timeline ?? []
+      p.chapters = (p.chapters ?? []).map((chapter, index) => ({
+        ...chapter,
+        order: chapter.order ?? index,
+        status: chapter.status ?? (chapter.content?.trim() ? 'ready' : 'draft'),
+        createdAt: chapter.createdAt ?? p.createdAt,
+        updatedAt: chapter.updatedAt ?? p.updatedAt
+      }))
+      p.selectedChapterIds = (p.selectedChapterIds ?? []).filter((id) =>
+        p.chapters?.some((chapter) => chapter.id === id)
+      )
+      p.productionChapterIds = (p.productionChapterIds ?? []).filter((id) =>
+        p.chapters?.some((chapter) => chapter.id === id)
+      )
       p.canvas = p.canvas ?? emptyCanvas()
       if (p.canvas.nodes?.length) {
         p.canvas = {
@@ -255,6 +270,28 @@ export const useProjectStore = defineStore('project', () => {
   function setScript(script: Script) {
     if (!current.value) return
     current.value.script = script
+    touch()
+  }
+
+  function setChapters(chapters: ScriptChapter[]) {
+    if (!current.value) return
+    current.value.chapters = chapters.map((chapter, index) => ({ ...chapter, order: index }))
+    const ids = new Set(current.value.chapters.map((chapter) => chapter.id))
+    current.value.selectedChapterIds = (current.value.selectedChapterIds ?? []).filter((id) => ids.has(id))
+    current.value.productionChapterIds = (current.value.productionChapterIds ?? []).filter((id) => ids.has(id))
+    touch()
+  }
+
+  function setSelectedChapterIds(ids: ID[]) {
+    if (!current.value) return
+    const existing = new Set((current.value.chapters ?? []).map((chapter) => chapter.id))
+    current.value.selectedChapterIds = [...new Set(ids)].filter((id) => existing.has(id))
+    touch()
+  }
+
+  function setProductionChapterIds(ids: ID[]) {
+    if (!current.value) return
+    current.value.productionChapterIds = [...new Set(ids)]
     touch()
   }
 
@@ -488,6 +525,62 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  function removeCanvasNodeRef(nodeId: string, assetId: ID) {
+    const p = current.value
+    if (!p) return
+    removeCanvasNodeReference(p, nodeId, assetId)
+    touch()
+  }
+
+  /** 把已有素材绑到画布节点成片，跳过生成。公共库素材请先 adopt 进项目。 */
+  function assignCanvasNodeAsset(nodeId: string, assetId: ID) {
+    const p = current.value
+    const node = p?.canvas?.nodes.find((n) => n.id === nodeId)
+    if (!p || !node) return
+    const shot = node.data.shotId ? p.shots.find((s) => s.id === node.data.shotId) : undefined
+    const subject = node.data.subjectId
+      ? (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
+      : undefined
+    const scene = node.data.sceneId ? (p.scenes ?? []).find((s) => s.id === node.data.sceneId) : undefined
+    if (node.type === 'imageGen' || node.type === 'videoGen') {
+      node.data = { ...node.data, outputAssetId: assetId }
+    } else if (node.type === 'shotImage' && shot) {
+      assignShotImage(shot.id, assetId)
+    } else if (node.type === 'shotBoard' && shot) {
+      assignShotBoard(shot.id, assetId)
+    } else if (node.type === 'shotVideo' && shot) {
+      assignShotVideo(shot.id, assetId)
+    } else if (node.type === 'sceneProps' && scene) {
+      updateScene(scene.id, {
+        propSheetAssetId: assetId,
+        propSheetHistoryIds: pushHistory(
+          scene.propSheetAssetId,
+          assetId,
+          scene.propSheetHistoryIds
+        )
+      })
+    } else if (node.type === 'subject' && subject) {
+      updateSubject(subject.id, {
+        designSheetAssetId: assetId,
+        designSheetHistoryIds: pushHistory(
+          subject.designSheetAssetId,
+          assetId,
+          subject.designSheetHistoryIds
+        )
+      })
+    } else if (node.type === 'scene' && scene) {
+      updateScene(scene.id, {
+        plateAssetId: assetId,
+        plateHistoryIds: pushHistory(scene.plateAssetId, assetId, scene.plateHistoryIds)
+      })
+    } else {
+      return
+    }
+    node.status = 'success'
+    node.error = undefined
+    touch()
+  }
+
   function addCanvasNode(node: NonNullable<Project['canvas']>['nodes'][number]) {
     if (!current.value) return
     if (!current.value.canvas) current.value.canvas = emptyCanvas()
@@ -515,9 +608,15 @@ export const useProjectStore = defineStore('project', () => {
         label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
         prompt: src.data.prompt || '',
         referenceAssetIds: [...(src.data.referenceAssetIds ?? [])],
+        referenceSourceNodeIds: [...(src.data.referenceSourceNodeIds ?? [])],
         duration: src.data.duration ?? 8,
         ...(type === 'videoGen'
-          ? { videoModel: normalizeVideoGenModel(src.data.videoModel) }
+          ? {
+              videoModel: normalizeVideoGenModel(src.data.videoModel),
+              h3GenMode: normalizeH3GenMode(src.data.h3GenMode),
+              firstFrameAssetId: src.data.firstFrameAssetId,
+              lastFrameAssetId: src.data.lastFrameAssetId
+            }
           : {})
       },
       status: 'idle',
@@ -644,6 +743,9 @@ export const useProjectStore = defineStore('project', () => {
     createNamed,
     openFromFolder,
     setScript,
+    setChapters,
+    setSelectedChapterIds,
+    setProductionChapterIds,
     applyPlayTitle,
     setShots,
     setSubjects,
@@ -669,6 +771,8 @@ export const useProjectStore = defineStore('project', () => {
     patchAgentState,
     setCanvas,
     patchCanvasNode,
+    removeCanvasNodeRef,
+    assignCanvasNodeAsset,
     addCanvasNode,
     duplicateCanvasNode,
     removeCanvasNode,

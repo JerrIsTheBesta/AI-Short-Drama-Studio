@@ -68,6 +68,24 @@ export function characterPropSheetPrompt(
 ${mediumLockText(resolved)}`
 }
 
+/** 当前场景里真正需要锁定的少量关键道具；不把普通陈设拆成资产。 */
+export function scenePropSheetPrompt(
+  scene: Scene,
+  style: VisualStyle,
+  look?: VisualLook
+): string {
+  const resolved = look ?? lookFromTexts(style)
+  const medium = resolved.medium
+  const inventory = scene.props?.trim() || '无明确关键道具'
+
+  return `【16:9】「${scene.name}」关键道具设计图。绘制媒介必须是「${medium}」。
+只展示本场景中明显出现、被人物拿取或使用、或者推动剧情的关键道具，最多 4 件：${inventory}
+场景语境：${scene.description}
+
+像影视美术部门的道具设定板：每件道具单独完整展示，清楚锁定形状、尺寸比例、材质、颜色和磨损痕迹。纯净中性背景，不画人物，不画完整场景，不添加清单之外的杯子、普通家具、装饰、衣服或零碎杂物。若清单只有一件，就只设计这一件，不要自行凑数。
+${mediumLockText(resolved)}`
+}
+
 /** 单镜故事看板：六格黑白草图，锁定同一镜头内的动作时间线。 */
 export function shotBoardPrompt(
   shot: Pick<

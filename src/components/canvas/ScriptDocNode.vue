@@ -11,7 +11,7 @@ import {
 } from '@/utils/scriptMarkdown'
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
-import { extractStageLabel } from '@/services/canvas/pipeline'
+import { extractStageLabel, nextExtractStage } from '@/services/canvas/pipeline'
 import { isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
@@ -79,6 +79,7 @@ const approved = computed(() => Boolean(project.current?.shots.length) && !waiti
 const playReady = computed(() => isPlayReady(project.current?.script))
 const playLabel = computed(() => (playReady.value ? '重新写剧本' : '写剧本'))
 const extractLabel = computed(() => extractStageLabel(project.current))
+const nextStage = computed(() => nextExtractStage(project.current))
 
 const editing = ref(false)
 const draft = ref('')
@@ -334,7 +335,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             @input="patchDraftBrief(($event.target as HTMLTextAreaElement).value)"
           />
         </template>
-        <p v-else class="prompt-hint">续写会保留已有场次，只往后加。重新写剧本会整篇重来并清空节点。</p>
+        <p v-else class="prompt-hint">写剧本会先写故事背景、人物、环境和分场，不是口播填空表。续写只往后加。重新写会整篇重来并清空节点。</p>
         <template v-if="playReady">
           <label>续写方向（可选）</label>
           <textarea
@@ -355,6 +356,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             </select>
           </label>
           <button
+            v-if="nextStage"
             type="button"
             class="ghost"
             :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"

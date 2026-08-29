@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useToastStore, useLibraryStore } from '@/stores'
 import { generateImage, characterSheetPrompt, scenePlatePrompt } from '@/services/ai'
 import { imageModelForProject } from '@/services/ai/runtime'
 import { effectiveImagePrompt } from '@/utils/shot'
@@ -25,6 +25,7 @@ import type { Shot, ID, Subject, Scene } from '@/types'
 const router = useRouter()
 const project = useProjectStore()
 const assets = useAssetsStore()
+const library = useLibraryStore()
 const toast = useToastStore()
 
 const generating = ref<Set<string>>(new Set())
@@ -181,7 +182,10 @@ async function generateSubjectSheet(sub: Subject) {
     const refs = await productRefBlobs()
     const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
     const look = lookFromScript(project.current.script)
-    const prompt = characterSheetPrompt(sub, look.style, useRefs, look)
+    const prompt = sub.sheetPrompt?.trim() || characterSheetPrompt(sub, look.style, useRefs, look)
+    if (!sub.sheetPrompt?.trim()) {
+      project.updateSubject(sub.id, { sheetPrompt: prompt })
+    }
     const result = await generateImage(
       {
         prompt,
@@ -203,6 +207,10 @@ async function generateSubjectSheet(sub: Subject) {
       filename: `character_${sub.name}_${Date.now().toString(36)}`,
       prompt,
       projectId: project.current.id
+    })
+    await library.addCategorized(result.blob, '角色', 'ai-generated', {
+      filename: asset.filename,
+      prompt
     })
     project.updateSubject(sub.id, { designSheetAssetId: asset.id })
     await project.save()
@@ -241,6 +249,10 @@ async function generateScenePlate(scn: Scene) {
       filename: `scene_${scn.name}_${Date.now().toString(36)}`,
       prompt,
       projectId: project.current.id
+    })
+    await library.addCategorized(result.blob, '场景', 'ai-generated', {
+      filename: asset.filename,
+      prompt
     })
     project.updateScene(scn.id, { plateAssetId: asset.id })
     await project.save()
@@ -306,6 +318,10 @@ async function generateOne(shot: Shot) {
       prompt,
       projectId: project.current.id,
       shotId: shot.id
+    })
+    await library.addCategorized(result.blob, '其他', 'ai-generated', {
+      filename: asset.filename,
+      prompt
     })
     project.assignShotImage(shot.id, asset.id)
     await project.save()

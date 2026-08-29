@@ -77,7 +77,7 @@ export const useAssetsStore = defineStore('assets', () => {
       const isPng =
         head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47
       const isGif = head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46
-      if (isJpeg || isPng || isGif || typed.type.startsWith('image/')) {
+      if (isJpeg || isPng || isGif || (typed.type || '').startsWith('image/')) {
         throw new Error(
           '生成结果是图片而不是视频（常见于工作流只输出了预览帧）。请检查图生视频节点是否输出 mp4。'
         )
@@ -189,6 +189,31 @@ export const useAssetsStore = defineStore('assets', () => {
     return all.value.find((a) => a.id === id)
   }
 
+  /** 把资源库或其它来源的素材收进当前项目；已在项目里则原样返回。 */
+  async function adopt(
+    id: ID,
+    kind: Asset['kind'],
+    options: { projectId?: string; shotId?: string } = {}
+  ): Promise<Asset> {
+    const existing = getMeta(id)
+    if (existing && existing.kind === kind) return existing
+    let blob = await getBlob(id)
+    let meta = existing
+    if (!blob) {
+      const { useLibraryStore } = await import('./library')
+      const library = useLibraryStore()
+      blob = await library.getBlob(id)
+      meta = library.getMeta(id)
+    }
+    if (!blob) throw new Error('素材读取失败')
+    return add(blob, kind, meta?.source || 'uploaded', {
+      filename: meta?.filename,
+      prompt: meta?.prompt,
+      projectId: options.projectId,
+      shotId: options.shotId
+    })
+  }
+
   async function remove(id: ID) {
     await deleteAsset(id)
     if (urlCache.has(id) && urlCache.get(id)!.startsWith('blob:')) {
@@ -226,6 +251,7 @@ export const useAssetsStore = defineStore('assets', () => {
     getBlob,
     getMeta,
     remove,
+    adopt,
     cleanup
   }
 })

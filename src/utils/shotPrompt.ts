@@ -5,24 +5,59 @@
 
 import type { Shot } from '@/types'
 
-const CAMERA_CN: Record<NonNullable<Shot['cameraMovement']>, string> = {
-  push: '镜头缓缓推近',
-  pull: '镜头慢慢拉远',
-  pan: '镜头缓缓横摇',
-  tilt: '镜头缓缓上下移',
-  static: '镜头基本固定，跟着动作微微晃',
-  orbit: '镜头缓缓绕着人走'
+export const CAMERA_MOVEMENTS = ['push', 'pull', 'pan', 'tilt', 'static', 'orbit'] as const
+
+/** 拆分镜模型常写出 handheld / 跟踪 等非法值；查表失败会让 H3 提示词编译崩掉。 */
+export function normalizeCameraMovement(value: unknown): Shot['cameraMovement'] {
+  const raw = String(value ?? '').trim().toLowerCase()
+  return (CAMERA_MOVEMENTS as readonly string[]).includes(raw)
+    ? (raw as Shot['cameraMovement'])
+    : 'static'
 }
 
-/** 旧设置值继续兼容；出片时统一编译成 H3 官方 I2VA 英文三段式。 */
+/** 旧设置值继续兼容；选 H3 时编译成官方 Ref2VA / I2VA，不套万相。 */
 export type VideoPromptStyle = 'scene-narrative' | 'formatted'
 
-/** 编辑器里仍写中文内容表现；出片时再编译成 I2VA。用户若已粘贴官方英文三段式，原样使用。 */
-export const SCENE_NARRATIVE_SPEC = `只写本镜头连续发生的事，中文约 180-450 字，不要写【环境光影】或 integrated_multimodal_description。按发生顺序写清：镜头从哪里开始；谁先做什么；表情、手脚、道具和环境怎么变；镜头怎么走、怎么收。人物外貌和场景由参考图负责。
+export function clampShotSeconds(duration?: number): number {
+  return Math.max(4, Math.min(15, Math.round(Number(duration) || 5)))
+}
 
-有出镜对白时只记口播原词，不要把景别、站位、运镜写成要念的话。没有对白就明确写「无对白」。
+/** 按本镜时长切连续时间段，出片提示词必须覆盖到最后一秒。 */
+export function timedBeatWindows(duration?: number): Array<{ start: number; end: number }> {
+  const total = clampShotSeconds(duration)
+  const n = total <= 5 ? 3 : total <= 8 ? 4 : total <= 12 ? 5 : 6
+  const out: Array<{ start: number; end: number }> = []
+  for (let i = 0; i < n; i++) {
+    out.push({
+      start: Number(((total * i) / n).toFixed(2)),
+      end: Number(((total * (i + 1)) / n).toFixed(2))
+    })
+  }
+  out[out.length - 1].end = Number(total.toFixed(2))
+  return out
+}
 
-禁止：把四视图或场景四宫格当成成片画面、把六格看板写成宫格成片、抄静帧词、无动机跳切、同一镜头让多人轮流说话。`
+export function formatBeatRangeCn(start: number, end: number): string {
+  const a = Number.isInteger(start) ? String(start) : start.toFixed(1)
+  const b = Number.isInteger(end) ? String(end) : end.toFixed(1)
+  return `${a}–${b}秒`
+}
+
+export function formatBeatRangeEn(start: number, end: number): string {
+  return `From ${start.toFixed(2)}s to ${end.toFixed(2)}s`
+}
+
+/** 编辑器里仍写中文内容表现；选 H3 出片时再编译成官方 Ref2VA / I2VA。用户若已粘贴官方英文全文，原样使用。 */
+export const SCENE_NARRATIVE_SPEC = `用导演给演员说戏的口吻，连续写这一镜里到底发生了什么。中文 80–320 字。只写本镜，不要把上一镜或下一镜的剧情演进来。
+
+先写清楚开场站位：画面里每一个出场的人各写一句——在近处还是后面、身体朝哪、眼睛看谁或看什么。说话的人可以在后面或侧面，前面的人必须侧对或回头看他、或看他指的东西。禁止合影式正面排排站、禁止所有人看镜头。人设图是正面身份锁，成片姿势不要抄人设。
+
+再写中间的动作和看见了什么，情绪怎么跟着变，最后停在什么状态。表情必须跟这件事挂钩。运镜一句话。有台词只写口播原词；成年旁白是画外音，画面里的人闭嘴。剧本写了不拍的必须遵守。
+
+人物脸和衣服由参考图负责，这里不要报身份证。不要按秒切段，不要写「0–1.5秒」，不要写「禁止呆脸空眼」「衣摆、光和空气里的东西跟着动」这种套话，也不要只在结尾加一句「人物看向场景里的人或物，不要看镜头」却不写每个人看哪。
+
+坏例子：「林遥指着田垄说话。老农和差役在场。人物看向场景里的人或物，不要看镜头。」
+好例子：「近处：老农和差役侧对镜头站在石板路上，不朝向镜头。林遥在他们身后稍远，从跪姿撑起半身，泥手指向田垄。老农回头眯眼打量林遥，差役停步，视线跟着那只手看向田垄。三个人都不看镜头。」`
 
 /** 格式化：人物图 + 空镜底板直接出视频时，内容表现仍写细，出片再套 H3 结构 */
 export const FORMATTED_VIDEO_PERFORMANCE_SPEC = SCENE_NARRATIVE_SPEC
@@ -31,11 +66,8 @@ export function videoPerformanceSpec(style: VideoPromptStyle = 'scene-narrative'
   return style === 'formatted' ? FORMATTED_VIDEO_PERFORMANCE_SPEC : SCENE_NARRATIVE_SPEC
 }
 
-export function videoPromptJsonHint(style: VideoPromptStyle = 'scene-narrative'): string {
-  if (style === 'formatted') {
-    return '<视频内容表现，中文，180-450字。先点名谁是谁。每个出场的人都要写表情神态（眉眼嘴角眼神）和手脚动作。环境要动（门、桌、光、风、衣摆、桌上的东西）。台词用原词并写说话神态。最后写镜头怎么走、怎么收。不要写成静帧配图词>'
-  }
-  return '<两段中文场景叙事。第一段：画面中：站位+发型+衣服+动作+年龄的人是名字；用分号点名每个人。空一行后第二段连续叙述谁做什么、表情神态、原词台词、环境动势、镜头怎么走怎么收。180-450字。不要写「从第一帧接着演」，不要标签>'
+export function videoPromptJsonHint(_style: VideoPromptStyle = 'scene-narrative'): string {
+  return '<导演口吻。先写每个出场人物：近处还是后面、身体朝哪、眼睛看谁。说话者可以在后；前面的人侧对或回头看他/他指的东西。禁止合影看镜头。再写动作和台词原词。80-320字。>'
 }
 
 /** 写给编剧 / 质检 / 出视频：默认按当前主流的场景叙事 */
@@ -87,25 +119,83 @@ export function assembleShotVideoPrompt(opts: {
 }
 
 const FACE_RE =
-  /表情|神态|眉|眼|笑|愣|皱|歪|低头|抬头|眼神|嘴角|脸|惊喜|开心|认真|犹豫|紧张|温柔|点头|摇头|吃惊|无奈|得意|委屈|好奇/
+  /表情|神态|眉|眼|笑|愣|皱|歪|低头|抬头|眼神|嘴角|脸|惊喜|开心|认真|犹豫|紧张|温柔|点头|摇头|吃惊|无奈|得意|委屈|好奇|惊|呆/
 const BODY_RE =
-  /跑|走|拿|放|伸|举|弯|站|坐|蹲|抱|推|拉|转身|回头|抬手|伸手|迈|踏|递|捧|摸|拍|跳|停|凑|靠|俯|仰/
+  /跑|走|拿|放|伸|举|弯|站|坐|蹲|抱|推|拉|转身|回头|抬手|伸手|迈|踏|递|捧|摸|拍|跳|停|凑|靠|俯|仰|躺|撑|醒/
 const ENV_RE =
-  /门|桌|地|光|风|窗|墙|衣|树|水|灯|屋|院|街|天|雾|雨|烟|火|锅|盘|碗|杯|台|椅|梨|包|产品|案|桥|石|帘|影|尘|叶/
+  /门|桌|地|光|风|窗|墙|衣|树|水|灯|屋|院|街|天|雾|雨|烟|火|锅|盘|碗|杯|台|椅|梨|包|产品|案|桥|石|帘|影|尘|叶|草|田/
+
+const TEMPLATE_RE =
+  /禁止呆脸空眼|衣摆、光和空气里的东西跟着动|把这件事做起来：|表情往前走：眼神一转|0\s*[–\-~]\s*\d+(?:\.\d+)?秒|人物看向场景里的人或物，不要看镜头/
+
+const ENSEMBLE_LAYER_RE =
+  /近处|近景里|身前|身后|稍远|前景|后景|侧对|侧身|侧过|四分之三|过肩|回头|扭头/
+
+/** 多人在场却没写谁在前、谁在后、各自看谁 → 模型会摆成合影看镜头。 */
+export function lacksEnsembleBlocking(text: string, names: string[] = []): boolean {
+  const t = (text || '').trim()
+  if (!t) return false
+  const named = names.filter((n) => n && n.length >= 2 && t.includes(n))
+  const multi = named.length >= 2 || /和|、|与/.test(t) && (t.match(/[\u4e00-\u9fff]{2,4}(?=从|跪|说|看|眯|停|站)/g) || []).length >= 2
+  if (!multi && named.length < 2) return false
+  return !ENSEMBLE_LAYER_RE.test(t)
+}
+
+export function isVideoPerformanceTemplate(text: string): boolean {
+  const t = (text || '').trim()
+  if (!t) return false
+  const timed = (t.match(/\d+(?:\.\d+)?\s*[–\-~]\s*\d+(?:\.\d+)?秒/g) || []).length
+  return timed >= 2 || TEMPLATE_RE.test(t)
+}
+
+/** continuity 常写成「上一镜末态 → 本镜变化 → 下一镜初态」；出视频只演中间这一截。 */
+export function thisShotAction(continuity?: string): string {
+  const raw = (continuity || '').trim().replace(/^起始[:：]\s*/, '')
+  if (!raw) return ''
+  const parts = raw
+    .split(/\s*(?:→|->|／|\/)\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (parts.length >= 3) return parts[1]
+  if (parts.length === 2) return parts[1]
+  return raw
+}
+
+function cameraStoryCn(movement: Shot['cameraMovement']): string {
+  switch (movement) {
+    case 'push':
+      return '镜头跟着他的注意慢慢推近，幅度小，结束时停住。'
+    case 'pull':
+      return '镜头从近处慢慢拉开，把环境和后来靠近的人带进画面，不要猛拉。'
+    case 'pan':
+      return '镜头顺着他的视线慢慢横移，停在他看见的东西上。'
+    case 'tilt':
+      return '镜头顺着他抬头或低头的方向慢慢俯仰，停在结束视线。'
+    case 'orbit':
+      return '镜头小幅度绕着他转一点，带出周围环境，不要绕出半圈。'
+    default:
+      return '机位基本不动，只随呼吸和动作有一点微晃。'
+  }
+}
 
 export function isVideoPerformanceThin(text: string): boolean {
   const t = (text || '').trim()
-  if (t.length < 150) return true
-  return !(FACE_RE.test(t) && BODY_RE.test(t) && ENV_RE.test(t))
+  if (t.length < 50) return true
+  if (isVideoPerformanceTemplate(t)) return true
+  return !(BODY_RE.test(t) || FACE_RE.test(t))
 }
 
-export function videoPerformanceIssue(text: string): string | null {
+export function videoPerformanceIssue(text: string, names?: string[]): string | null {
   const t = (text || '').trim()
   if (!t) return '缺少视频内容表现'
-  if (t.length < 150) return '视频内容表现过短，表情、动作、环境都要写细'
-  if (!FACE_RE.test(t)) return '视频内容表现缺少表情神态'
-  if (!BODY_RE.test(t)) return '视频内容表现缺少具体动作'
-  if (!ENV_RE.test(t)) return '视频内容表现缺少环境变化'
+  if (isVideoPerformanceTemplate(t)) return '视频内容表现是套话，没有写出每个人站哪、看谁'
+  if (t.length < 40) return '视频内容表现过短，没写清这一镜发生了什么'
+  if (lacksEnsembleBlocking(t, names)) {
+    return '多人同框却没写谁在近处、谁在后面、各自看谁，会拍成合影看镜头'
+  }
+  if (!BODY_RE.test(t) && !FACE_RE.test(t) && !ENV_RE.test(t)) {
+    return '视频内容表现缺少具体动作或反应'
+  }
   return null
 }
 
@@ -128,53 +218,40 @@ function storedVideoPrompt(shot: Shot): string {
   return (shot.videoPrompt || '').trim()
 }
 
-/** 从分镜场记拼一段「这一镜发生了什么」，绝不回退成配图静帧词 */
+/** 从分镜场记写出「这一镜发生了什么」，绝不回退成配图静帧词，也不按秒填空。 */
 export function synthesizeVideoPerformance(shot: Shot): string {
-  const parts: string[] = []
-  const size = (shot.shotSize || '').trim()
-  if (size) parts.push(`景别是${size}。`)
-
-  const blocking = (shot.blocking || '').trim()
-  if (blocking) parts.push(`人物站位：${blocking}。`)
-
-  const eyeline = (shot.eyeline || '').trim()
-  if (eyeline) parts.push(`视线${eyeline}。`)
-
-  const action = (shot.continuity || '').trim()
-  if (action) {
-    parts.push(
-      `动作过程：${action.replace(/^起始[:：]\s*/, '')}。每个人的表情神态要跟着这件事走，眉眼和嘴角有变化，手脚把动作做完整。`
-    )
-  }
-
-  const prop = (shot.propFocus || '').trim()
-  if (prop && prop !== '无') parts.push(`道具：${prop}。手里的东西、桌上的东西要跟着动作轻轻反应。`)
-
+  const secs = clampShotSeconds(shot.duration)
+  const happening =
+    thisShotAction(shot.continuity) ||
+    (shot.blocking || '').trim() ||
+    (shot.title || '').trim() ||
+    '把这一镜的事做完'
+  const look = (shot.eyeline || '').trim()
   const line = (shot.voiceover || '').trim()
-  if (line) {
-    const speaker = line.match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim() || ''
-    const spoken = line.replace(/^([^：:\n]{1,12})[：:]\s*/, '').trim()
-    parts.push(
+  const speaker = line.match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim() || ''
+  const spoken = line.replace(/^([^：:\n]{1,12})[：:]\s*/, '').trim()
+  const movement = normalizeCameraMovement(shot.cameraMovement)
+  const bits = [
+    `${happening.replace(/[。；;]+$/, '')}。`,
+    look
+      ? `每个人写清看向谁：${look.replace(/^看/, '')}。身体侧对或四分之三侧面，不要正面看镜头。`
+      : '每个人写清站在近处还是后面、身体朝哪、眼睛看谁。禁止合影看镜头。'
+  ]
+  if ((shot.blocking || '').trim() && happening !== (shot.blocking || '').trim()) {
+    bits.push(`站位：${(shot.blocking || '').trim()}。`)
+  }
+  bits.push(cameraStoryCn(movement))
+  if (spoken) {
+    bits.push(
       speaker
-        ? `${speaker}带着对应情绪开口，说「${spoken}」。旁边的人闭嘴并做无声反应。`
-        : `当前说话者带着对应情绪开口，说「${spoken}」。旁边的人闭嘴并做无声反应。`
+        ? `${speaker}开口说「${spoken}」。旁边的人闭嘴，侧头或回头看他，脸上要有反应。`
+        : `有人开口说「${spoken}」。旁边的人闭嘴，看向说话者或他指的东西。`
     )
+  } else {
+    bits.push('无对白。')
   }
-
-  const cam = shot.cameraMovement ? CAMERA_CN[shot.cameraMovement] : ''
-  if (cam) parts.push(`${cam}，环境里的光、门、桌、衣摆跟着动作有细微变化。`)
-  else parts.push('镜头跟着动作走，环境里的光和物件有细微反应。')
-
-  if ((shot.purpose || '').match(/收口|落幕|揭示/)) {
-    parts.push('这一镜收到尾，把故事点交代清楚。')
-  }
-
-  const text = parts.filter(Boolean).join('')
-  if (text.length >= 80) return text
-  if (shot.title?.trim()) {
-    return `${shot.title.trim()}。每个人都有自己的表情神态和手脚动作，环境里的光、门、桌、衣摆跟着动，把该说的原词说完，镜头走完这一镜。`
-  }
-  return '每个人都有自己的表情神态和手脚动作，环境里的光、物件、衣摆跟着动，把该说的原词说完，镜头走完这一镜。'
+  bits.push(`约${secs}秒，一镜到底，不要跳切。`)
+  return bits.join('')
 }
 
 /** 编辑框里的原文：空就是空，不要把场记补回去；旧稿里的套话顺手剥掉 */

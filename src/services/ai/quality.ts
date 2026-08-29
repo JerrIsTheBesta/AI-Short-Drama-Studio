@@ -19,7 +19,7 @@ export async function reviewImageQuality(
   signal?: AbortSignal
 ): Promise<QualityReport> {
   throwIfAborted(signal)
-  if (blob.size < 8_000 || !blob.type.startsWith('image/')) {
+  if (blob.size < 8_000 || !(blob.type || '').startsWith('image/')) {
     return { passed: false, score: 0, issues: ['返回文件不是有效图片或文件过小'] }
   }
   return { passed: true, score: 100, issues: [] }
@@ -32,7 +32,7 @@ export async function reviewVideoQuality(
   signal?: AbortSignal
 ): Promise<QualityReport> {
   throwIfAborted(signal)
-  if (blob.size < 24_000 || !blob.type.startsWith('video/')) {
+  if (blob.size < 24_000 || !(blob.type || '').startsWith('video/')) {
     return { passed: false, score: 0, issues: ['返回文件不是有效视频或文件过小'] }
   }
   return { passed: true, score: 100, issues: [] }
@@ -43,7 +43,7 @@ export async function reviewSpeechQuality(
   text: string,
   targetDuration: number
 ): Promise<QualityReport> {
-  if (blob.size < 1_000 || !blob.type.startsWith('audio/')) {
+  if (blob.size < 1_000 || !(blob.type || '').startsWith('audio/')) {
     return { passed: false, score: 0, issues: ['TTS 返回的不是有效音频'] }
   }
   const spokenChars = text.replace(/[\s，。！？、,.!?；;]/g, '').length

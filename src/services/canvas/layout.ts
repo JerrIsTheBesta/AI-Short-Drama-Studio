@@ -1,11 +1,11 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
 import { emptyCanvas } from '@/types/canvas'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
-import { boundSubjectIds } from '@/utils/consistency'
+import { boundSubjectIds, sceneHasKeyProps } from '@/utils/consistency'
 
 export const NODE_W = 240
-const GAP = 14
-const PAD = 16
+const GAP = 18
+const PAD = 20
 const HEAD = 44
 const COL_GAP = 32
 const SCRIPT_W = 460
@@ -77,12 +77,13 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const prevList = project.canvas?.nodes ?? []
   const subjects = project.subjects ?? []
   const scenes = project.scenes ?? []
+  const scenesWithProps = scenes.filter(sceneHasKeyProps)
   const shots = project.shots
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
   const layoutReady =
     hadGroups &&
     prevList.some((n) => n.id === 'group-audio') &&
-    (subjects.length === 0 || prevList.some((n) => n.type === 'subjectProps')) &&
+    scenesWithProps.every((scene) => prevList.some((n) => n.id === `sceneProps:${scene.id}`)) &&
     (shots.length === 0 || prevList.some((n) => n.type === 'shotBoard'))
   const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
@@ -113,8 +114,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     status: persistStatus(prevScript?.status, Boolean(project.script?.content))
   })
 
-  const subBox = groupBox(subjects.length, 2, sheetH)
-  const scnBox = groupBox(scenes.length, 1, sheetH)
+  const subBox = groupBox(subjects.length, 1, sheetH)
+  const scnBox = groupBox(scenes.length, scenesWithProps.length ? 2 : 1, sheetH)
   const shotBox = groupBox(shots.length, 2, shotH)
   const audBox = groupBox(shots.length, 1, AUDIO_NODE_H)
   const expBox = groupBox(1, 2, shotH)
@@ -146,7 +147,13 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   pushGroup('group-export', '合成视频', 'export', expBox)
 
   function attach(groupId: string, node: CanvasNode) {
+    const old = prevAny.get(node.id)
+    if (preservePositions && old && old.parentGroupId === undefined && prevList.some((n) => n.id === node.id)) {
+      nodes.push({ ...node, position: old.position, parentGroupId: undefined })
+      return
+    }
     node.parentGroupId = groupId
+    node.position = pos(prev, node.id, node.position)
     nodes.push(node)
     const g = groups.find((x) => x.id === groupId)
     g?.nodeIds.push(node.id)
@@ -154,7 +161,6 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
 
   subjects.forEach((s, i) => {
     const id = `subject:${s.id}`
-    const propId = `subjectProps:${s.id}`
     attach('group-subjects', {
       id,
       type: 'subject',
@@ -163,25 +169,10 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       status: persistStatus(prev.get(id)?.status, Boolean(s.designSheetAssetId)),
       parentGroupId: 'group-subjects'
     })
-    attach('group-subjects', {
-      id: propId,
-      type: 'subjectProps',
-      position: cell(i, 1, sheetH),
-      data: { subjectId: s.id, label: `${s.name} 资产` },
-      status: persistStatus(prev.get(propId)?.status, Boolean(s.propSheetAssetId)),
-      parentGroupId: 'group-subjects'
-    })
     edges.push({
       id: `e-script-${id}`,
       source: 'script',
       target: id,
-      sourceHandle: 'out',
-      targetHandle: 'in'
-    })
-    edges.push({
-      id: `e-${id}-${propId}`,
-      source: id,
-      target: propId,
       sourceHandle: 'out',
       targetHandle: 'in'
     })
@@ -204,6 +195,24 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       sourceHandle: 'out',
       targetHandle: 'in'
     })
+    if (sceneHasKeyProps(s)) {
+      const propId = `sceneProps:${s.id}`
+      attach('group-scenes', {
+        id: propId,
+        type: 'sceneProps',
+        position: cell(i, 1, sheetH),
+        data: { sceneId: s.id, label: `${s.name} 关键道具` },
+        status: persistStatus(prev.get(propId)?.status, Boolean(s.propSheetAssetId)),
+        parentGroupId: 'group-scenes'
+      })
+      edges.push({
+        id: `e-${id}-${propId}`,
+        source: id,
+        target: propId,
+        sourceHandle: 'out',
+        targetHandle: 'in'
+      })
+    }
   })
 
   shots.forEach((shot, i) => {
@@ -311,6 +320,19 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     targetHandle: 'in'
   })
 
+  // 固定流程是模板层；用户追加的自由生图/视频节点属于创作层，重整布局时不能覆盖。
+  const freeNodes = prevList.filter((node) => node.type === 'imageGen' || node.type === 'videoGen')
+  const freeIds = new Set(freeNodes.map((node) => node.id))
+  for (const node of freeNodes) {
+    if (!nodes.some((item) => item.id === node.id)) nodes.push({ ...node, parentGroupId: undefined })
+  }
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  for (const edge of project.canvas?.edges ?? []) {
+    if (!freeIds.has(edge.source) && !freeIds.has(edge.target)) continue
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) continue
+    if (!edges.some((item) => item.id === edge.id)) edges.push(edge)
+  }
+
   const viewport = project.canvas?.viewport ?? emptyCanvas().viewport
   return { nodes, edges, groups, viewport }
 }
@@ -319,7 +341,7 @@ export function nodeByEntity(graph: CanvasGraph, type: CanvasNode['type'], entit
   return graph.nodes.find((n) => {
     if (n.type !== type) return false
     if (type === 'subject' || type === 'subjectProps') return n.data.subjectId === entityId
-    if (type === 'scene') return n.data.sceneId === entityId
+    if (type === 'scene' || type === 'sceneProps') return n.data.sceneId === entityId
     return n.data.shotId === entityId
   })
 }

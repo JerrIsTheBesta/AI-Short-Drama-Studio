@@ -4,7 +4,20 @@ import { useRoute, useRouter } from 'vue-router'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { useAssetsStore, useProjectStore, useToastStore } from '@/stores'
-import { cloneVoiceFromSample, generateVideo, synthesizeClonedSpeech } from '@/services/ai'
+import {
+  cloneVoiceFromSample,
+  generateVideo,
+  synthesizeClonedSpeech,
+  DIGITAL_HUMAN_VISUAL_LOCK,
+  DIGITAL_HUMAN_AESTHETIC,
+  DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+  DIGITAL_HUMAN_SPEAKER_HINT,
+  DIGITAL_HUMAN_SPEAKER_NAME,
+  DIGITAL_HUMAN_SCENE_NAME,
+  DIGITAL_HUMAN_SCENE_DESCRIPTION,
+  DIGITAL_HUMAN_SCENE_ANCHOR,
+  DIGITAL_HUMAN_IMAGE_ASSIGNMENT
+} from '@/services/ai'
 import { replaceVideoAudio } from '@/services/ffmpeg'
 import type {
   AspectRatio,
@@ -582,11 +595,21 @@ async function buildDigitalHumanVideo(
     const generated = await generateVideo(
       {
         imageBlob,
-        prompt: '人物保持与参考图完全一致，正面看向镜头，自然眨眼和轻微点头，嘴型连续清晰地配合口播，不改变背景，不出现字幕或额外人物。',
+        prompt: DIGITAL_HUMAN_VISUAL_LOCK,
+        aesthetic: DIGITAL_HUMAN_AESTHETIC,
+        audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
         voiceover: text,
         voiceMode: 'dialogue',
-        speakerHint: '自然、可信、有亲和力的中文营销口播，语速稳定，吐字清晰',
-        speakerName: '画面中的人物',
+        speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
+        speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
+        onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
+        sceneName: DIGITAL_HUMAN_SCENE_NAME,
+        sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
+        sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
+        shotTitle: 'Locked single-person talking head',
+        imageAssignments: [
+          DIGITAL_HUMAN_IMAGE_ASSIGNMENT
+        ],
         duration: Math.min(15, Math.max(3, Math.ceil(speechDuration + 0.4))),
         width: p.settings.width,
         height: p.settings.height,

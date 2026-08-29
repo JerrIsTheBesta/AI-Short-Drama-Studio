@@ -407,3 +407,201 @@ export function scriptExportFilename(topic: string): string {
   const title = cleanMarkdownTitle(topic) || '未命名剧本'
   return `${title.slice(0, 60)}.md`
 }
+
+/** 能拍的章节剧本：有背景、人物锁、环境，而不是短视频「口播/画面/时长」四格表。 */
+export function looksLikeFilmChapterPlay(markdown: string): boolean {
+  const t = markdown || ''
+  return (
+    /改编原则|拍摄原则/.test(t) ||
+    /##\s*故事背景/.test(t) ||
+    /##\s*环境与场景/.test(t) ||
+    /##\s*场景[一二三四五六七八九十0-9]/.test(t) ||
+    /(?:内景|外景)\s*｜/.test(t) ||
+    /成年[^\n]{0,16}旁白/.test(t) ||
+    /视觉与声音基调/.test(t)
+  )
+}
+
+const PLAY_DIRECTIVE_HEADINGS = [
+  '故事背景',
+  '本章承接',
+  '人物',
+  '环境与场景',
+  '拍摄原则',
+  '改编原则',
+  '本章情绪线',
+  '视觉与声音基调'
+]
+
+/** 章节级约束：背景、人设、环境、不拍什么。拆镜和出片都要带着。 */
+export function extractPlayDirectives(markdown: string, maxChars = 3600): string {
+  const sections = splitH2(markdown || '')
+  const chunks: string[] = []
+  const meta = (markdown || '').match(/^>\s*.+(?:\n>\s*.+)*/m)
+  if (meta) chunks.push(meta[0])
+  for (const key of PLAY_DIRECTIVE_HEADINGS) {
+    const hit = sections.find((s) => s.title === key || s.title.startsWith(key))
+    if (hit?.body?.trim()) {
+      const body = key === '人物' || key === '环境与场景' ? hit.body.trim().slice(0, 1200) : hit.body.trim()
+      chunks.push(`## ${hit.title}\n${body}`)
+    }
+  }
+  return chunks.join('\n\n').slice(0, maxChars)
+}
+
+export interface PlayLocationDraft {
+  name: string
+  description: string
+  lighting?: string
+  mainAnchor?: string
+  anchors?: string
+  props?: string
+}
+
+function normLocationKey(name: string): string {
+  return name.replace(/\s+/g, '').replace(/[，,。．.、]/g, '').toLowerCase()
+}
+
+function locationShortName(raw: string): string {
+  return raw
+    .replace(/^场景[^\｜|]*/, '')
+    .replace(/^[｜|]\s*/, '')
+    .split(/[，,]/)[0]
+    .trim()
+}
+
+function guessLocationAnchor(name: string, description: string): string {
+  const blob = `${name} ${description}`
+  const hit = blob.match(
+    /破瓦|门缝|墙角|折叠桌|搪瓷盆|铁皮棚|卷帘门|街机|石板路|田埂|仓房|饭堂|修车铺|游戏厅|宿舍|公园|公厕/
+  )
+  return hit?.[0] || `${name}主锚`
+}
+
+/** 不靠模型：从环境设定和「内景｜地点」场记抽出地点，提炼失败时兜底。 */
+export function extractLocationsFromPlay(markdown: string): PlayLocationDraft[] {
+  const sections = splitH2(markdown || '')
+  const out: PlayLocationDraft[] = []
+  const seen = new Set<string>()
+
+  const add = (rawName: string, description: string, lighting?: string) => {
+    const name = locationShortName(rawName) || rawName.trim()
+    const key = normLocationKey(name)
+    if (!name || key.length < 2 || seen.has(key)) return
+    if (/^场景[一二三四五六七八九十百0-9]+$/.test(name)) return
+    seen.add(key)
+    const desc = (description || `${name}。无人时的空间、地面、建筑和光线按剧本。`).replace(/\s+/g, ' ').trim()
+    const mainAnchor = guessLocationAnchor(name, desc)
+    out.push({
+      name,
+      description: desc.slice(0, 480),
+      lighting: lighting?.trim() || undefined,
+      mainAnchor,
+      anchors: `全景；${mainAnchor}；地面站位区；光源`,
+      props: '无'
+    })
+  }
+
+  const bible = sections.find(
+    (s) => s.title === '环境与场景' || s.title === '场景' || s.title.startsWith('环境')
+  )
+  if (bible) {
+    for (const block of splitH3(bible.body)) add(block.name, block.body)
+  }
+
+  for (const sec of sections.filter((s) => /^场景[一二三四五六七八九十百0-9]/.test(s.title))) {
+    const heading = sec.body.match(/(?:内景|外景|半外景)\s*｜\s*([^｜\n*]+)\s*｜\s*([^\n*]+)/)
+    const loc = heading?.[1]?.trim()
+    const weather = heading?.[2]?.trim()
+    add(loc || sec.title, sec.body.slice(0, 600), weather)
+  }
+
+  return out
+}
+
+const SKIP_SUBJECT = /旁白|画外|镜头|蒙太奇|改编|类型|本章|视觉|声音/
+
+/** 不靠模型：从「## 人物」和对白名抽出角色。 */
+export function extractSubjectsFromPlay(markdown: string): Array<{
+  name: string
+  kind: 'person' | 'animal' | 'other'
+  description: string
+  role: string
+  stateVariants: string
+  fromReference: boolean
+}> {
+  const sections = splitH2(markdown || '')
+  const out: Array<{
+    name: string
+    kind: 'person' | 'animal' | 'other'
+    description: string
+    role: string
+    stateVariants: string
+    fromReference: boolean
+  }> = []
+  const seen = new Set<string>()
+
+  const add = (raw: string, description = '', role = '') => {
+    const name = raw.replace(/（[^）]+）|\([^)]+\)/g, '').replace(/旁白$/, '').trim()
+    if (!name || name.length > 16 || SKIP_SUBJECT.test(name)) return
+    const key = name.replace(/\s+/g, '').toLowerCase()
+    if (seen.has(key)) {
+      const row = out.find((item) => item.name.replace(/\s+/g, '').toLowerCase() === key)
+      if (row && description && description.length > row.description.length) row.description = description.slice(0, 400)
+      return
+    }
+    seen.add(key)
+    out.push({
+      name,
+      kind: 'person',
+      description: (description || `${name}，外貌与服装按剧本补全`).slice(0, 400),
+      role,
+      stateVariants: '单一状态',
+      fromReference: false
+    })
+  }
+
+  const people = sections.find((s) => s.title === '人物' || s.title.startsWith('人物'))
+  if (people) {
+    for (const block of splitH3(people.body)) add(block.name, block.body)
+  }
+  for (const m of markdown.matchAll(/\*\*([^*：:\n]{1,16})：\*\*/g)) add(m[1])
+  for (const m of markdown.matchAll(/\*\*([^*：:\n]{1,16})\*\*[：:]/g)) add(m[1])
+  return out
+}
+
+/** 给场景提炼模型的精简正文，避免整章剧本把 JSON 挤爆。 */
+export function extractPlayForSceneStage(markdown: string, maxChars = 8000): string {
+  const sections = splitH2(markdown || '')
+  const chunks: string[] = []
+  const meta = (markdown || '').match(/^>\s*.+(?:\n>\s*.+)*/m)
+  if (meta) chunks.push(meta[0])
+  for (const key of ['故事背景', '环境与场景', '视觉与声音基调', '拍摄原则', '改编原则']) {
+    const hit = sections.find((s) => s.title === key || s.title.startsWith(key))
+    if (hit?.body?.trim()) chunks.push(`## ${hit.title}\n${hit.body.trim()}`)
+  }
+  for (const sec of sections.filter((s) => /^场景[一二三四五六七八九十百0-9]/.test(s.title))) {
+    const head = sec.body.match(/(?:内景|外景|半外景)[^\n]{0,80}/)?.[0] || ''
+    const preview = sec.body.split('\n').filter((l) => l.trim()).slice(0, 6).join('\n')
+    chunks.push(`## ${sec.title}\n${head}\n${preview}`)
+  }
+  const text = chunks.join('\n\n').trim()
+  return (text || markdown).slice(0, maxChars)
+}
+
+/** 取出本镜对应的那场戏原文，避免扩镜时只看见 2 句场记。 */
+export function extractSceneSlice(markdown: string, sceneName?: string, maxChars = 4200): string {
+  const sections = splitH2(markdown || '')
+  const sceneSecs = sections.filter((s) => /^场景/.test(s.title))
+  const name = (sceneName || '').trim()
+  if (name) {
+    const restOfTitle = (title: string) => title.replace(/^场景[^\｜|]*/, '').replace(/^[｜|]\s*/, '').trim()
+    const hit =
+      sceneSecs.find((s) => s.title.includes(name) || name.includes(restOfTitle(s.title))) ||
+      sceneSecs.find((s) => s.body.includes(name)) ||
+      sections.find((s) => s.title.includes(name) || s.body.includes(name))
+    if (hit) return `## ${hit.title}\n\n${hit.body}`.slice(0, maxChars)
+  }
+  if (sceneSecs.length === 1) return `## ${sceneSecs[0].title}\n\n${sceneSecs[0].body}`.slice(0, maxChars)
+  return ''
+}

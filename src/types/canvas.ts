@@ -5,6 +5,7 @@ export type CanvasNodeType =
   | 'subject'
   | 'subjectProps'
   | 'scene'
+  | 'sceneProps'
   | 'shotBoard'
   | 'shotImage'
   | 'shotVideo'
@@ -18,10 +19,18 @@ export type CanvasNodeType =
 /** 图生视频节点模型。默认 H3（AutoDL）；万相走百炼 TTS 同一套 Key。 */
 export type VideoGenModel = 'h3' | 'wan-prime'
 
+/** H3 出片方式。reference=多图参考（当前默认）；fl2va=首尾帧。 */
+export type H3VideoGenMode = 'reference' | 'fl2va'
+
 export const DEFAULT_VIDEO_GEN_MODEL: VideoGenModel = 'h3'
+export const DEFAULT_H3_GEN_MODE: H3VideoGenMode = 'reference'
 
 export function normalizeVideoGenModel(value: unknown): VideoGenModel {
   return value === 'wan-prime' ? 'wan-prime' : 'h3'
+}
+
+export function normalizeH3GenMode(value: unknown): H3VideoGenMode {
+  return value === 'fl2va' ? 'fl2va' : 'reference'
 }
 
 export interface CanvasNode {
@@ -38,9 +47,17 @@ export interface CanvasNode {
     kind?: string
     prompt?: string
     referenceAssetIds?: string[]
+    /** 通过画布连线继承参考图的上游节点，顺序即图1、图2…… */
+    referenceSourceNodeIds?: string[]
     outputAssetId?: string
     duration?: number
     videoModel?: VideoGenModel
+    /** H3：参考图生成（默认）或首尾帧 */
+    h3GenMode?: H3VideoGenMode
+    firstFrameAssetId?: string
+    lastFrameAssetId?: string
+    /** AutoDL / 万相进行中任务，重试时先查结果 */
+    videoTaskId?: string
   }
   status?: TaskStatus
   error?: string

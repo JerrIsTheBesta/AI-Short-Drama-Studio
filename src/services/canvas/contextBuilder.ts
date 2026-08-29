@@ -82,9 +82,7 @@ export function buildProjectContext(userText: string) {
         description: s.description,
         role: s.role,
         stateVariants: s.stateVariants,
-        hasFourView: Boolean(s.designSheetAssetId),
-        hasPropSheet: Boolean(s.propSheetAssetId),
-        props: s.props
+        hasFourView: Boolean(s.designSheetAssetId)
       })),
       scenes: (p.scenes ?? []).map((s) => ({
         id: s.id,
@@ -93,7 +91,9 @@ export function buildProjectContext(userText: string) {
         mainAnchor: s.mainAnchor,
         anchors: s.anchors,
         lighting: s.lighting,
-        hasAnchorSheet: Boolean(s.plateAssetId)
+        props: s.props,
+        hasAnchorSheet: Boolean(s.plateAssetId),
+        hasPropSheet: Boolean(s.propSheetAssetId)
       })),
       shots: relevantShots(p, userText).map(shotContext),
       totals: {

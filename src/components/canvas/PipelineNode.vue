@@ -10,13 +10,18 @@ import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
+import AssetPicker from '@/components/common/AssetPicker.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
+import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { canBuildExport } from '@/utils/timeline'
-import { effectiveImagePrompt, effectiveShotAudioMode, needsExternalTts, pushHistory, editableVideoPrompt } from '@/utils/shot'
+import { sceneHasKeyProps } from '@/utils/consistency'
+import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
-import { normalizeVideoGenModel, type CanvasNodeType, type ID, type VideoGenModel } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel, type CanvasNodeType, type H3VideoGenMode, type ID, type VideoGenModel } from '@/types'
 
 const props = defineProps<{
   id: string
@@ -46,6 +51,7 @@ const playing = ref(false)
 const playbackDuration = ref(0)
 const moreOpen = ref(false)
 const panelOpen = ref(false)
+const pickerOpen = ref(false)
 const toolBusy = ref('')
 const cropOn = ref(false)
 const trimOn = ref(false)
@@ -91,7 +97,7 @@ const title = computed(() => {
 
 const kindLabel = computed(() => {
   if (type.value === 'subject') return '四视图'
-  if (type.value === 'subjectProps') return '资产图'
+  if (type.value === 'sceneProps') return '关键道具'
   if (type.value === 'scene') return '锚点图'
   if (type.value === 'shotBoard') return '看板'
   if (type.value === 'shotImage') return '配图'
@@ -107,7 +113,7 @@ const assetId = computed(() => {
   if (!p) return undefined
   if (type.value === 'final') return p.finalVideoAssetId
   if (type.value === 'subject') return subject.value?.designSheetAssetId
-  if (type.value === 'subjectProps') return subject.value?.propSheetAssetId
+  if (type.value === 'sceneProps') return scene.value?.propSheetAssetId
   if (type.value === 'scene') return scene.value?.plateAssetId
   if (!shot.value) return undefined
   if (type.value === 'shotBoard') return shot.value.boardAssetId
@@ -118,7 +124,7 @@ const assetId = computed(() => {
 })
 
 const mediaAspect = computed(() => {
-  if (type.value === 'subject' || type.value === 'subjectProps' || type.value === 'scene') {
+  if (type.value === 'subject' || type.value === 'sceneProps' || type.value === 'scene') {
     return cssAspectRatio('16:9')
   }
   if (type.value === 'audio' || type.value === 'export') return '16 / 10'
@@ -142,7 +148,7 @@ const isImageNode = computed(
     type.value === 'shotImage' ||
     type.value === 'shotBoard' ||
     type.value === 'subject' ||
-    type.value === 'subjectProps' ||
+    type.value === 'sceneProps' ||
     type.value === 'scene'
 )
 const videoModel = computed({
@@ -151,13 +157,33 @@ const videoModel = computed({
     project.patchCanvasNode(props.id, { videoModel: v })
   }
 })
+const h3GenMode = computed({
+  get: () => normalizeH3GenMode(shot.value?.h3GenMode),
+  set: (v: H3VideoGenMode) => {
+    if (shot.value) project.updateShot(shot.value.id, { h3GenMode: v })
+  }
+})
+const firstFrameId = computed({
+  get: () => shot.value?.firstFrameAssetId,
+  set: (v: ID | undefined) => {
+    if (shot.value) project.updateShot(shot.value.id, { firstFrameAssetId: v })
+  }
+})
+const lastFrameId = computed({
+  get: () => shot.value?.lastFrameAssetId,
+  set: (v: ID | undefined) => {
+    if (shot.value) project.updateShot(shot.value.id, { lastFrameAssetId: v })
+  }
+})
+const isH3VideoNode = computed(() => type.value === 'shotVideo' && videoModel.value !== 'wan-prime')
+const isH3Fl2va = computed(() => isH3VideoNode.value && h3GenMode.value === 'fl2va')
 const showPrompt = computed(
   () =>
     type.value === 'shotImage' ||
     type.value === 'shotBoard' ||
     type.value === 'shotVideo' ||
     type.value === 'subject' ||
-    type.value === 'subjectProps' ||
+    type.value === 'sceneProps' ||
     type.value === 'scene' ||
     type.value === 'audio'
 )
@@ -165,15 +191,15 @@ const showPrompt = computed(
 const extraRefIds = computed({
   get(): ID[] {
     if (type.value === 'subject') return subject.value?.referenceAssetIds ?? []
-    if (type.value === 'subjectProps') return subject.value?.propReferenceAssetIds ?? []
+    if (type.value === 'sceneProps') return scene.value?.propReferenceAssetIds ?? []
     if (type.value === 'scene') return scene.value?.referenceAssetIds ?? []
     return []
   },
   set(ids: ID[]) {
     if (type.value === 'subject' && subject.value) {
       project.updateSubject(subject.value.id, { referenceAssetIds: ids })
-    } else if (type.value === 'subjectProps' && subject.value) {
-      project.updateSubject(subject.value.id, { propReferenceAssetIds: ids })
+    } else if (type.value === 'sceneProps' && scene.value) {
+      project.updateScene(scene.value.id, { propReferenceAssetIds: ids })
     } else if (type.value === 'scene' && scene.value) {
       project.updateScene(scene.value.id, { referenceAssetIds: ids })
     }
@@ -182,36 +208,33 @@ const extraRefIds = computed({
 
 const promptValue = computed({
   get() {
-    if (type.value === 'subject') return subject.value?.description || ''
-    if (type.value === 'subjectProps') return subject.value?.props || ''
-    if (type.value === 'scene') return scene.value?.description || ''
-    if (type.value === 'shotBoard' && shot.value) return shot.value.boardPrompt || shot.value.visualPrompt || ''
-    if (type.value === 'shotImage' && shot.value) return effectiveImagePrompt(shot.value)
-    if (type.value === 'shotVideo' && shot.value) return editableVideoPrompt(shot.value)
+    const p = project.current
+    if (!p) return ''
+    if (type.value === 'subject' && subject.value) return subject.value.sheetPrompt ?? ''
+    if (type.value === 'sceneProps' && scene.value) return scene.value.propSheetPrompt ?? ''
+    if (type.value === 'scene' && scene.value) return scene.value.platePrompt ?? ''
+    if (type.value === 'shotBoard' && shot.value) return shot.value.boardPrompt ?? ''
+    if (type.value === 'shotImage' && shot.value) return shot.value.imagePrompt ?? ''
+    if (type.value === 'shotVideo' && shot.value) return shot.value.compiledVideoPrompt ?? ''
     if (type.value === 'audio') return shot.value?.voiceover || ''
     return ''
   },
   set(v: string) {
-    if (type.value === 'subject' && subject.value) project.updateSubject(subject.value.id, { description: v })
-    else if (type.value === 'subjectProps' && subject.value) project.updateSubject(subject.value.id, { props: v })
-    else if (type.value === 'scene' && scene.value) project.updateScene(scene.value.id, { description: v })
+    if (type.value === 'subject' && subject.value) project.updateSubject(subject.value.id, { sheetPrompt: v })
+    else if (type.value === 'sceneProps' && scene.value) {
+      project.updateScene(scene.value.id, { propSheetPrompt: v })
+    }
+    else if (type.value === 'scene' && scene.value) project.updateScene(scene.value.id, { platePrompt: v })
     else if (type.value === 'shotBoard' && shot.value) project.updateShot(shot.value.id, { boardPrompt: v })
     else if (type.value === 'shotImage' && shot.value) project.updateShot(shot.value.id, { imagePrompt: v })
-    else if (type.value === 'shotVideo' && shot.value) project.updateShot(shot.value.id, { videoPrompt: v })
+    else if (type.value === 'shotVideo' && shot.value) project.updateShot(shot.value.id, { compiledVideoPrompt: v })
     else if (type.value === 'audio' && shot.value) project.updateShot(shot.value.id, { voiceover: v })
   }
 })
 
 const promptHint = computed(() => {
-  if (type.value === 'shotImage') return '改提示词后点生成，只影响这一镜配图'
-  if (type.value === 'shotBoard') return '改这段后点生成，只影响这一镜故事看板'
-  if (type.value === 'shotVideo')
-    return '直接改这段。出视频传角色设计图、场景图和本镜看板，不传配图。清空不会自动填回。'
-  if (type.value === 'subject') return '改外貌描述后重新生成四视图'
-  if (type.value === 'subjectProps') return '写下身上的包、证件、平板、鞋等，再生成资产图'
-  if (type.value === 'scene') return '改地点和主锚后重新生成四宫格锚点图'
   if (type.value === 'audio') return '改口播后重新合成配音'
-  return ''
+  return '这里就是实际发出去的全文。改完原样发送，不会再背后加词。'
 })
 
 const metaLine = computed(() => {
@@ -231,7 +254,7 @@ const genLabel = computed(() => {
   if (gateBlocked.value) return '先验收剧本'
   const again = hasAsset.value
   if (type.value === 'subject') return again ? '重新生成' : '生成四视图'
-  if (type.value === 'subjectProps') return again ? '重新生成' : '生成资产图'
+  if (type.value === 'sceneProps') return again ? '重新生成' : '生成关键道具图'
   if (type.value === 'scene') return again ? '重新生成' : '生成锚点图'
   if (type.value === 'shotBoard') return again ? '重新生成' : '生成看板'
   if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
@@ -257,6 +280,29 @@ watch(
       moreOpen.value = false
       cropOn.value = false
       trimOn.value = false
+      return
+    }
+    const p = project.current
+    const t = type.value
+    if (!p) return
+    if (t === 'subject' && subject.value) {
+      const patch = fillEmptyGeneratePrompt('subject', p, subject.value)
+      if (patch) project.updateSubject(subject.value.id, patch)
+    } else if (t === 'scene' && scene.value) {
+      const patch = fillEmptyGeneratePrompt('scene', p, scene.value)
+      if (patch) project.updateScene(scene.value.id, patch)
+    } else if (t === 'sceneProps' && scene.value) {
+      const patch = fillEmptyGeneratePrompt('sceneProps', p, scene.value)
+      if (patch) project.updateScene(scene.value.id, patch)
+    } else if (t === 'shotBoard' && shot.value) {
+      const patch = fillEmptyGeneratePrompt('shotBoard', p, shot.value)
+      if (patch) project.updateShot(shot.value.id, patch)
+    } else if (t === 'shotImage' && shot.value) {
+      const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
+      if (patch) project.updateShot(shot.value.id, patch)
+    } else if (t === 'shotVideo' && shot.value) {
+      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
+      if (patch) project.updateShot(shot.value.id, patch)
     }
   },
   { immediate: true }
@@ -549,35 +595,36 @@ async function replaceImage(blob: Blob, filename: string) {
     projectId: project.current?.id,
     shotId: shot.value?.id
   })
-  if (type.value === 'shotImage' && shot.value) project.assignShotImage(shot.value.id, asset.id)
-  else if (type.value === 'shotBoard' && shot.value) project.assignShotBoard(shot.value.id, asset.id)
-  else if (type.value === 'subjectProps' && subject.value) {
-    project.updateSubject(subject.value.id, {
-      propSheetAssetId: asset.id,
-      propSheetHistoryIds: pushHistory(
-        subject.value.propSheetAssetId,
-        asset.id,
-        subject.value.propSheetHistoryIds
-      )
-    })
-  }
-  else if (type.value === 'subject' && subject.value) {
-    project.updateSubject(subject.value.id, {
-      designSheetAssetId: asset.id,
-      designSheetHistoryIds: pushHistory(
-        subject.value.designSheetAssetId,
-        asset.id,
-        subject.value.designSheetHistoryIds
-      )
-    })
-  } else if (type.value === 'scene' && scene.value) {
-    project.updateScene(scene.value.id, {
-      plateAssetId: asset.id,
-      plateHistoryIds: pushHistory(scene.value.plateAssetId, asset.id, scene.value.plateHistoryIds)
-    })
-  }
+  project.assignCanvasNodeAsset(props.id, asset.id)
   await project.save()
   await loadMedia()
+}
+
+function openOutputPicker() {
+  pickerOpen.value = true
+}
+
+function onEmptyClick() {
+  if (!isImageNode.value || generating.value) return
+  if (props.selected && panelOpen.value) openOutputPicker()
+}
+
+async function onPickerConfirm(ids: ID[]) {
+  pickerOpen.value = false
+  const id = ids[0]
+  if (!id) return
+  try {
+    const asset = await assets.adopt(id, 'image', {
+      projectId: project.current?.id,
+      shotId: shot.value?.id
+    })
+    project.assignCanvasNodeAsset(props.id, asset.id)
+    await project.save()
+    await loadMedia()
+    toast.success('已选用该图片')
+  } catch (e: any) {
+    toast.error(e?.message || '选用失败')
+  }
 }
 
 async function downloadAsset() {
@@ -664,6 +711,15 @@ const cropStyle = computed(() => ({
           <button v-if="genLabel" type="button" :disabled="generating || gateBlocked || !!toolBusy" @click="generateThis">
             <span>↺</span>{{ hasAsset ? '重绘' : genLabel }}
           </button>
+          <button
+            v-if="isImageNode"
+            type="button"
+            :disabled="generating || !!toolBusy"
+            title="选用已有图片，不重新生成"
+            @click="openOutputPicker"
+          >
+            <span>▣</span>选用
+          </button>
           <button v-if="hasAsset" type="button" @click="downloadAsset">
             <span>⬇</span>下载
           </button>
@@ -724,7 +780,15 @@ const cropStyle = computed(() => ({
         </button>
       </template>
       <img v-else-if="mediaUrl" :src="mediaUrl" alt="" />
-      <div v-else class="ph">{{ isVideoNode ? '▶' : '＋' }}</div>
+      <div
+        v-else
+        class="ph"
+        :class="{ pick: isImageNode }"
+        :title="isImageNode ? '选用已有图片' : undefined"
+        @click="onEmptyClick"
+      >
+        {{ isVideoNode ? '▶' : '＋' }}
+      </div>
       <span v-if="isVideoNode && durationLabel && !trimOn && !generating && !toolBusy" class="dur">{{ durationLabel }}</span>
       <NodeBusyOverlay v-if="generating || toolBusy" :label="toolBusy || '生成中'" />
       <div v-if="status === 'failed' && nodeMeta?.error && !selected" class="fail-dot" :title="nodeMeta.error" />
@@ -774,20 +838,27 @@ const cropStyle = computed(() => ({
     </div>
 
     <transition name="float-down">
-      <div v-if="selected && panelOpen && showPrompt && !cropOn && !trimOn" class="prompt nodrag nowheel" @mousedown.stop @click.stop>
+      <div v-if="selected && panelOpen && showPrompt && !cropOn && !trimOn" class="prompt nodrag nowheel" @pointerdown.stop @mousedown.stop @click.stop>
       <textarea
-        rows="5"
+        rows="12"
         :value="promptValue"
         :placeholder="promptHint"
         @input="promptValue = ($event.target as HTMLTextAreaElement).value"
       />
+      <H3GenModeSelect v-if="isH3VideoNode" v-model="h3GenMode" />
+      <FramePairSlots
+        v-if="isH3Fl2va"
+        v-model:first-id="firstFrameId"
+        v-model:last-id="lastFrameId"
+        :first-hint="shot?.imageAssetId ? '空则用本镜配图' : '请选择首帧'"
+      />
       <ShotRefStrip
-        v-if="shot && (type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo')"
+        v-else-if="shot && (type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo')"
         :shot="shot"
         :mode="type === 'shotVideo' ? 'video' : type === 'shotBoard' ? 'board' : 'image'"
       />
       <ShotRefStrip
-        v-else-if="type === 'subject' || type === 'subjectProps' || type === 'scene'"
+        v-else-if="type === 'subject' || type === 'sceneProps' || type === 'scene'"
         v-model:extra-ids="extraRefIds"
       />
       <div class="prompt-foot">
@@ -821,6 +892,17 @@ const cropStyle = computed(() => ({
     </transition>
 
     <Handle id="out" type="source" :position="Position.Right" class="hndl" />
+
+    <AssetPicker
+      :open="pickerOpen"
+      kind="image"
+      :title="`选用已有图片作为${kindLabel || '本节点'}结果`"
+      show-library
+      default-tab="page"
+      :selected-ids="assetId ? [assetId] : []"
+      @close="pickerOpen = false"
+      @confirm="onPickerConfirm"
+    />
   </div>
 </template>
 
@@ -1010,6 +1092,9 @@ const cropStyle = computed(() => ({
   color: var(--color-text-4);
   font-size: 22px;
 }
+.ph.pick {
+  cursor: pointer;
+}
 .ph.text {
   font-size: 13px;
   font-weight: 600;
@@ -1085,6 +1170,7 @@ const cropStyle = computed(() => ({
   min-width: 400px;
   transform: translateX(-50%);
   transform-origin: 50% 0;
+  overflow: visible;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -1234,13 +1320,13 @@ const cropStyle = computed(() => ({
   border: 1px solid #fff;
 }
 .pnode.kind-subject,
-.pnode.kind-subjectProps,
+.pnode.kind-sceneProps,
 .pnode.kind-scene,
 .pnode.kind-shotBoard,
 .pnode.kind-shotImage,
 .pnode.kind-shotVideo { border-color: var(--color-node-border); }
 .pnode.on.kind-subject,
-.pnode.on.kind-subjectProps,
+.pnode.on.kind-sceneProps,
 .pnode.on.kind-scene,
 .pnode.on.kind-shotBoard,
 .pnode.on.kind-shotImage,

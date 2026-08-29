@@ -1,5 +1,6 @@
 import { useProjectStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
+import { sceneHasKeyProps } from '@/utils/consistency'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { topicFromBrief } from '@/utils/storyBrief'
 import { controlledSignal, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
@@ -14,7 +15,7 @@ import {
   generateMissingVideos,
   generateMissingAudio
 } from './runner'
-import { nextExtractStage } from './pipeline'
+import { nextExtractStage, type ExtractStage } from './pipeline'
 import { revealCanvas } from './canvasBridge'
 import type { AgentTaskGraph, AgentTaskGraphNode } from '@/types/pipeline'
 
@@ -57,6 +58,7 @@ export interface AgentToolAction {
   voiceover?: string
   duration?: number
   cameraMovement?: 'push' | 'pull' | 'pan' | 'tilt' | 'static' | 'orbit'
+  extractStage?: ExtractStage
 }
 
 export interface ToolExecutionContext {
@@ -124,7 +126,7 @@ function counts() {
   const p = useProjectStore().current
   return {
     sheets: (p?.subjects ?? []).filter((s) => !s.designSheetAssetId).length,
-    props: (p?.subjects ?? []).filter((s) => !s.propSheetAssetId).length,
+    props: (p?.scenes ?? []).filter((s) => sceneHasKeyProps(s) && !s.propSheetAssetId).length,
     scenes: (p?.scenes ?? []).filter((s) => !s.plateAssetId).length,
     boards: (p?.shots ?? []).filter((s) => !s.boardAssetId).length,
     images: (p?.shots ?? []).filter((s) => !s.imageAssetId).length,
@@ -206,15 +208,12 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
       const missingFour = (project.subjects ?? []).filter(
         (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
       )
-      const missingProps = (project.subjects ?? []).filter(
-        (subject) => subjectIds.includes(subject.id) && !subject.propSheetAssetId
-      )
       const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
       const repairs: AgentToolAction[] = [
-        ...missingFour.map((subject) => ({ tool: 'generate_sheet' as const, subjectId: subject.id })),
-        ...missingProps.map((subject) => ({ tool: 'generate_prop_sheet' as const, subjectId: subject.id }))
+        ...missingFour.map((subject) => ({ tool: 'generate_sheet' as const, subjectId: subject.id }))
       ]
       if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
+      if (scene && sceneHasKeyProps(scene) && !scene.propSheetAssetId) repairs.push({ tool: 'generate_prop_sheet', sceneId: scene.id })
       if (repairs.length) {
         return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少角色或场景参考，先补依赖`, actions: repairs }
       }
@@ -227,8 +226,8 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     }
   }
   if (action.tool === 'generate_all_prop_sheets') {
-    if (!(project.subjects ?? []).some((subject) => !subject.propSheetAssetId)) {
-      return { state: 'skip', detail: '资产图已经补齐' }
+    if (!(project.scenes ?? []).some((scene) => sceneHasKeyProps(scene) && !scene.propSheetAssetId)) {
+      return { state: 'skip', detail: '场景关键道具图已经补齐' }
     }
   }
 
@@ -236,7 +235,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     if (!(project.shots ?? []).some((shot) => !shot.boardAssetId)) return { state: 'skip', detail: '故事看板已经补齐' }
     const repairs: AgentToolAction[] = []
     if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
-    if ((project.subjects ?? []).some((subject) => !subject.propSheetAssetId)) repairs.push({ tool: 'generate_all_prop_sheets' })
+    if ((project.scenes ?? []).some((scene) => sceneHasKeyProps(scene) && !scene.propSheetAssetId)) repairs.push({ tool: 'generate_all_prop_sheets' })
     if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
     if (repairs.length) return { state: 'repair', detail: '批量看板缺少角色或场景参考，先补依赖', actions: repairs }
   }
@@ -286,13 +285,13 @@ export function verifyRegisteredTool(raw: unknown): string | null {
       return subject?.designSheetAssetId ? null : '角色四视图没有落库'
     }
     case 'generate_prop_sheet':
-      return (project.subjects ?? []).find((item) => item.id === action.subjectId)?.propSheetAssetId ? null : '角色资产图没有落库'
+      return (project.scenes ?? []).find((item) => item.id === action.sceneId)?.propSheetAssetId ? null : '场景关键道具图没有落库'
     case 'generate_scene':
       return (project.scenes ?? []).find((item) => item.id === action.sceneId)?.plateAssetId ? null : '场景锚点图没有落库'
     case 'generate_all_sheets':
       return (project.subjects ?? []).every((item) => item.designSheetAssetId) ? null : '仍有角色四视图缺失'
     case 'generate_all_prop_sheets':
-      return (project.subjects ?? []).every((item) => item.propSheetAssetId) ? null : '仍有角色资产图缺失'
+      return (project.scenes ?? []).every((item) => !sceneHasKeyProps(item) || item.propSheetAssetId) ? null : '仍有场景关键道具图缺失'
     case 'generate_all_scenes':
       return (project.scenes ?? []).every((item) => item.plateAssetId) ? null : '仍有场景锚点图缺失'
     case 'generate_shot_board':
@@ -383,7 +382,7 @@ const definitions: ToolDefinition[] = [
         hint: action.text
       })
       revealCanvas('script')
-      return '已按当前剧后续写（保留原场次）。若已提炼过节点，请再点「重新提炼节点」同步新场。'
+      return '已按当前剧后续写（保留原场次）。若已提炼过节点，请在「分镜」分组点重新提取以同步新场。'
     }
   },
   {
@@ -400,7 +399,7 @@ const definitions: ToolDefinition[] = [
   },
   {
     name: 'extract_cast', phase: 0, timeoutMs: 1_080_000, estimate: oneLlm,
-    async execute(_action, ctx) {
+    async execute(action, ctx) {
       const { runExtractStoryboard, runGeneratePlay } = await import('./runner')
       const { isPlayReady } = await import('@/services/ai')
       const project = useProjectStore()
@@ -410,9 +409,14 @@ const definitions: ToolDefinition[] = [
         revealCanvas('script')
         return '还没有完整剧本，已先写好剧本（未拆节点）；请再点提炼节点'
       }
-      const start = nextExtractStage(project.current) ?? (project.current?.shots.length ? 'subjects' : 'subjects')
-      await runExtractStoryboard(ctx.onLog, ctx.signal)
-      revealCanvas('script')
+      const start = action.extractStage || nextExtractStage(project.current)
+      if (!start) {
+        throw new Error('人物、场景和分镜都已提炼。要改某一组，请在对应分组上点「重新提取」，或说明要重新提取人物、场景还是分镜。')
+      }
+      await runExtractStoryboard(ctx.onLog, ctx.signal, undefined, start)
+      revealCanvas(
+        start === 'subjects' ? 'group-subjects' : start === 'scenes' ? 'group-scenes' : 'group-shots'
+      )
       const after = project.current
       const subjects = after?.subjects?.length ?? 0
       const scenes = after?.scenes?.length ?? 0
@@ -420,9 +424,21 @@ const definitions: ToolDefinition[] = [
       if (start === 'subjects' && !subjects) throw new Error('人物没有写入画布')
       if (start === 'scenes' && !scenes) throw new Error('场景没有写入画布')
       if (start === 'shots' && !shots) throw new Error('分镜没有写入画布')
-      if (start === 'subjects') return `第1步完成：已拆 ${subjects} 个角色。没有同时拆场景和分镜。`
-      if (start === 'scenes') return `第2步完成：已拆 ${scenes} 个场景。没有同时拆分镜。`
-      return `第3步完成：已拆 ${shots} 个分镜。`
+      const re = Boolean(action.extractStage)
+      const kept = '已生成的图和视频按同名或镜号保留。'
+      if (start === 'subjects') {
+        return re
+          ? `已重新提取人物（${subjects} 个）。${kept}没有动场景和分镜。`
+          : `第1步完成：已拆 ${subjects} 个角色。没有同时拆场景和分镜。`
+      }
+      if (start === 'scenes') {
+        return re
+          ? `已重新提取场景描点（${scenes} 个）。${kept}没有动人物和分镜。`
+          : `第2步完成：已拆 ${scenes} 个场景。没有同时拆分镜。`
+      }
+      return re
+        ? `已重新提取分镜（${shots} 镜）。${kept}没有动人物和场景。`
+        : `第3步完成：已拆 ${shots} 个分镜。`
     }
   },
   {
@@ -481,17 +497,17 @@ const definitions: ToolDefinition[] = [
   {
     name: 'generate_all_prop_sheets', phase: 1, timeoutMs: 600_000,
     estimate: () => ({ calls: counts().props, seconds: counts().props * 90 }),
-    async execute(_action, ctx) { await generateMissingPropSheets(ctx.onLog, ctx.signal); return '资产图已补齐' }
+    async execute(_action, ctx) { await generateMissingPropSheets(ctx.onLog, ctx.signal); return '场景关键道具图已补齐' }
   },
   {
-    name: 'generate_prop_sheet', phase: 1, timeoutMs: 240_000, required: ['subjectId'], estimate: oneImage,
+    name: 'generate_prop_sheet', phase: 1, timeoutMs: 240_000, required: ['sceneId'], estimate: oneImage,
     async execute(action, ctx) {
       const p = useProjectStore().current!
-      const sub = (p.subjects ?? []).find((s) => s.id === action.subjectId)
-      if (!sub) throw new Error(`找不到主体 ${action.subjectId}`)
-      await runCanvasNode(`subjectProps:${sub.id}`, progress(ctx), ctx.signal)
-      revealCanvas(`subjectProps:${sub.id}`)
-      return `资产图 ${sub.name} 完成`
+      const scene = (p.scenes ?? []).find((s) => s.id === action.sceneId)
+      if (!scene) throw new Error(`找不到场景 ${action.sceneId}`)
+      await runCanvasNode(`sceneProps:${scene.id}`, progress(ctx), ctx.signal)
+      revealCanvas(`sceneProps:${scene.id}`)
+      return `关键道具图 ${scene.name} 完成`
     }
   },
   {
@@ -603,6 +619,9 @@ export function validateToolAction(raw: unknown): AgentToolAction {
     ,...(typeof action.duration === 'number' ? { duration: action.duration } : {})
     ,...(['push', 'pull', 'pan', 'tilt', 'static', 'orbit'].includes(String(action.cameraMovement))
       ? { cameraMovement: action.cameraMovement as AgentToolAction['cameraMovement'] }
+      : {})
+    ,...(['subjects', 'scenes', 'shots'].includes(String(action.extractStage))
+      ? { extractStage: action.extractStage as ExtractStage }
       : {})
   }
 }

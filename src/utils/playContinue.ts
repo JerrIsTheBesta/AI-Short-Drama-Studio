@@ -2,15 +2,22 @@
 
 function fenChangBlock(md: string): string {
   const m = md.match(/^##\s*分场\s*$/m)
-  if (!m || m.index == null) return md
+  if (!m || m.index == null) return ''
   const from = m.index
   const rest = md.slice(from + m[0].length)
   const next = rest.search(/\n##\s+/)
   return next >= 0 ? md.slice(from, from + m[0].length + next) : md.slice(from)
 }
 
+/** 戏剧场次标题：章节「场景一｜…」或旧稿「第 N 场」。不含人物/环境设定节。 */
 export function playSceneHeadings(md: string): string[] {
-  return [...fenChangBlock(md || '').matchAll(/^###\s+(.+)\s*$/gm)].map((m) => m[1].trim())
+  const text = md || ''
+  const chapter = [...text.matchAll(/^##\s+(场景[一二三四五六七八九十百0-9][^\n]*)\s*$/gm)].map((m) =>
+    m[1].trim()
+  )
+  const numbered = [...fenChangBlock(text).matchAll(/^###\s+(.+)\s*$/gm)].map((m) => m[1].trim())
+  const loose = [...text.matchAll(/^###\s+(第\s*\d+\s*场[^\n]*)\s*$/gm)].map((m) => m[1].trim())
+  return [...new Set([...chapter, ...numbered, ...loose])]
 }
 
 export function countAddedPlayScenes(before: string, after: string): number {
@@ -43,7 +50,7 @@ export function mergeContinuedPlay(original: string, generated: string): string 
 
   if (!genHeads.length && gen.length > 40 && !gen.includes(orig.slice(0, 80))) {
     const n = origHeads.length + 1
-    return `${orig.replace(/\s*$/, '')}\n\n### 第 ${n} 场　续写\n\n${gen}\n`
+    return `${orig.replace(/\s*$/, '')}\n\n## 场景${n}｜续写\n\n${gen}\n`
   }
 
   if (gen.length > orig.length && (added.length > 0 || genHeads.length >= origHeads.length)) {

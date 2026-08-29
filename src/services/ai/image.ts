@@ -13,8 +13,6 @@ import { getAIMode } from './client'
 import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
 import type { VisualStyle, AspectRatio } from '@/types'
-import { aspectFrameHint } from '@/utils/aspect'
-import { professionalQualityLock, styleLockSuffix } from '@/utils/visualStyle'
 import { abortableDelay } from './abort'
 
 export interface ImageGenInput {
@@ -187,15 +185,6 @@ function pickLegacySize(ar?: AspectRatio, w?: number, h?: number): string {
   return '1024x1024'
 }
 
-function prependAspect(prompt: string, ar?: AspectRatio): string {
-  if (!ar) return prompt
-  const hint = aspectFrameHint(ar)
-  if (prompt.includes(`【${ar}`) || prompt.startsWith(`[${ar}]`)) {
-    return `${prompt}。画幅锁定：${hint}。`
-  }
-  return `【${ar}】${hint}。整张图必须按这个画幅输出。\n${prompt}`
-}
-
 function blobToDataUri(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -232,26 +221,8 @@ async function blobToChatImageDataUri(
   }
 }
 
-function buildPrompt(input: ImageGenInput, withRefs: boolean): string {
-  // 主题/分镜里若已写清画风，禁止再用下拉枚举（如 cinematic）覆盖
-  const headed = prependAspect(input.prompt, input.aspectRatio)
-  const alreadyStyled = /【画风|画风锁定|必须按用户原词|风格：/.test(headed)
-  const stylePart = alreadyStyled
-    ? '严格保持提示词中指定的画风与媒介，不要换成其他风格'
-    : styleLockSuffix(input.style)
-  const base = alreadyStyled
-    ? `${headed}。${stylePart}`
-    : `${headed}。${stylePart}。${professionalQualityLock(input.style)}`
-  if (!withRefs) return base
-
-  const labels =
-    input.referenceLabels && input.referenceLabels.length > 0
-      ? input.referenceLabels
-          .map((l, i) => `图${i + 1}：${l}`)
-          .join('；')
-      : '图1/图2 为角色四视图（脸型发型服装必须一致）；图3 为场景四宫格锚点图（同一地点，不要把四格画进成片）。'
-
-  return `${base}。参考说明：${labels}。人物面部、发型、体型、服装与场景必须严格与对应参考图一致。`
+function buildPrompt(input: ImageGenInput, _withRefs: boolean): string {
+  return String(input.prompt || '').trim()
 }
 
 /** Seedream：统一走 /images/generations，优先返回 b64_json */

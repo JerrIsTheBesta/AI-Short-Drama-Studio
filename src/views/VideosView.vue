@@ -2,9 +2,23 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { composeVideoPrompt, spokenTextOnly } from '@/services/ai'
-import { collectShotVideoEntries, packVideoRefEntries, subjectsForShot } from '@/utils/consistency'
-import { generateShotVideo } from '@/services/canvas/runner'
+import {
+  composeVideoPrompt,
+  buildH3ImageSlots,
+  spokenTextOnly,
+  DIGITAL_HUMAN_VISUAL_LOCK,
+  DIGITAL_HUMAN_AESTHETIC,
+  DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+  DIGITAL_HUMAN_SPEAKER_HINT,
+  DIGITAL_HUMAN_SPEAKER_NAME,
+  DIGITAL_HUMAN_SCENE_NAME,
+  DIGITAL_HUMAN_SCENE_DESCRIPTION,
+  DIGITAL_HUMAN_SCENE_ANCHOR,
+  DIGITAL_HUMAN_IMAGE_ASSIGNMENT
+} from '@/services/ai'
+import { collectShotVideoEntries, packVideoRefEntries, sceneForShot, subjectsForShot } from '@/utils/consistency'
+import { resolveShotPlace } from '@/utils/shotPlace'
+import { generateShotVideo, rewriteShotPerformance } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import { effectiveShotAudioMode, editableVideoPrompt, resolveH3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
@@ -14,7 +28,9 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
-import type { Shot, ID } from '@/types'
+import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
+import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
+import { normalizeH3GenMode, type H3VideoGenMode, type Shot, type ID } from '@/types'
 import { openLightbox } from '@/composables/useLightbox'
 
 const router = useRouter()
@@ -42,6 +58,10 @@ onMounted(async () => {
 })
 
 const shots = computed(() => project.current?.shots ?? [])
+const isDigitalHuman = computed(() =>
+  project.current?.pipelineMode === 'smart-speech' &&
+  project.current?.speechWorkflow?.mode === 'digital-human'
+)
 const aspectRatio = computed(() => project.current?.settings.aspectRatio ?? '16:9')
 const width = computed(() => project.current?.settings.width ?? 1280)
 const height = computed(() => project.current?.settings.height ?? 720)
@@ -53,8 +73,18 @@ const videoPromptPlaceholder = computed(() =>
 )
 
 const shotsWithoutBoard = computed(() =>
-  shots.value.filter((s) => !s.boardAssetId)
+  isDigitalHuman.value
+    ? []
+    : shots.value.filter((s) => normalizeH3GenMode(s.h3GenMode) !== 'fl2va' && !s.boardAssetId)
 )
+
+function shotH3Mode(shot: Shot): H3VideoGenMode {
+  return normalizeH3GenMode(shot.h3GenMode)
+}
+
+function setShotH3Mode(shot: Shot, mode: H3VideoGenMode) {
+  project.updateShot(shot.id, { h3GenMode: mode })
+}
 const shotsWithoutVideo = computed(() =>
   shots.value.filter((s) => !s.videoAssetId)
 )
@@ -70,7 +100,9 @@ async function loadVideos() {
 
 async function loadImages() {
   for (const s of shots.value) {
-    const previewId = s.boardAssetId || s.imageAssetId
+    const previewId = isDigitalHuman.value
+      ? project.current?.speechWorkflow?.imageAssetId || s.imageAssetId
+      : s.boardAssetId || s.imageAssetId
     if (previewId) {
       const url = await assets.getUrl(previewId)
       if (url) imageUrls.value[s.id] = url
@@ -93,9 +125,13 @@ function updateVideoPrompt(shot: Shot, value: string) {
   project.updateShot(shot.id, { videoPrompt: value })
 }
 
-function resetVideoPrompt(shot: Shot) {
-  project.updateShot(shot.id, { videoPrompt: synthesizeVideoPerformance(shot) })
-  toast.info('已按分镜动作重写视频内容表现')
+async function resetVideoPrompt(shot: Shot) {
+  try {
+    await rewriteShotPerformance(shot)
+    toast.success('已按本镜剧情重写视频内容表现')
+  } catch (e: any) {
+    toast.error(e?.message || '重写失败')
+  }
 }
 
 function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
@@ -106,13 +142,40 @@ function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
 }
 
 function composedPrompt(shot: Shot) {
+  if (isDigitalHuman.value) {
+    const spoken = spokenTextOnly(shot.voiceover || '')
+    return composeVideoPrompt({
+      prompt: DIGITAL_HUMAN_VISUAL_LOCK,
+      aesthetic: DIGITAL_HUMAN_AESTHETIC,
+      audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+      voiceover: spoken,
+      voiceMode: spoken ? 'dialogue' : 'none',
+      speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
+      speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
+      onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
+      sceneName: DIGITAL_HUMAN_SCENE_NAME,
+      sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
+      sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
+      shotTitle: 'Locked single-person talking head',
+      imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
+      duration: shot.duration,
+      width: width.value,
+      height: height.value,
+      aspectRatio: aspectRatio.value,
+      cameraMovement: 'static',
+      mode: 'I2VA'
+    })
+  }
   const promptStyle = getVideoPromptStyle()
   const spoken = spokenTextOnly(shot.voiceover || '')
   const packed = project.current
     ? packVideoRefEntries(collectShotVideoEntries(shot, project.current))
     : []
+  const imageSlots = buildH3ImageSlots(packed)
   const onScreenNames = project.current ? subjectsForShot(shot, project.current).map((item) => item.name) : []
   const speaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  const scene = project.current ? sceneForShot(shot, project.current) : undefined
+  const place = resolveShotPlace(shot, scene)
   return composeVideoPrompt({
     prompt: editableVideoPrompt(shot) || synthesizeVideoPerformance(shot),
     aesthetic: aesthetic.value,
@@ -122,14 +185,18 @@ function composedPrompt(shot: Shot) {
     speakerHint: shot.speakerHint,
     speakerName: speaker,
     onScreenNames,
+    sceneName: place.name,
+    sceneLighting: place.lighting,
     shotTitle: shot.title,
-    imageAssignments: packed.map((entry) => entry.label),
+    imageAssignments: imageSlots.map((slot) => slot.job),
+    imageSlots,
     duration: shot.duration,
     width: width.value,
     height: height.value,
     aspectRatio: aspectRatio.value,
     cameraMovement: shot.cameraMovement,
-    promptStyle
+    promptStyle,
+    mode: 'R2VA'
   })
 }
 
@@ -203,7 +270,8 @@ function next() {
     <header class="page-head">
       <div>
         <h1>🎥 AI 视频生成</h1>
-        <p>出视频传角色设计图、场景图和本镜故事看板，不传人物+场景配图。口播人声请到「字幕」步骤按台词生成。</p>
+        <p v-if="isDigitalHuman">每次生成和重新生成都强制使用项目上传的人物图作为唯一参考，并锁定人物、服装、背景、构图和机位。</p>
+        <p v-else>H3 可选参考图生成（人设/场景/看板）或首尾帧。口播人声请到「字幕」步骤按台词生成。</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/images')">← 上一步</GradientButton>
@@ -220,7 +288,7 @@ function next() {
     </header>
 
     <GlassCard v-if="shotsWithoutBoard.length > 0" padding="md" class="warn-card">
-      ⚠️ 还有 {{ shotsWithoutBoard.length }} 个分镜没有故事看板。出视频会传角色设计图、场景图和本镜看板，不传人物+场景配图。
+      ⚠️ 还有 {{ shotsWithoutBoard.length }} 个分镜没有故事看板。参考图生成需要角色设计图、场景图和本镜看板；首尾帧模式只需要首帧和尾帧。
     </GlassCard>
 
     <EmptyState
@@ -242,7 +310,8 @@ function next() {
           <div class="shot-title">{{ shot.title }}</div>
           <Tag v-if="shot.videoAssetId" type="success" size="sm">已完成</Tag>
           <Tag v-else-if="generating.has(shot.id)" type="warning" size="sm">生成中</Tag>
-          <Tag v-else-if="!shot.boardAssetId" type="error" size="sm">缺看板</Tag>
+          <Tag v-else-if="shotH3Mode(shot) === 'fl2va' && !shot.lastFrameAssetId" type="error" size="sm">缺尾帧</Tag>
+          <Tag v-else-if="shotH3Mode(shot) !== 'fl2va' && !shot.boardAssetId" type="error" size="sm">缺看板</Tag>
           <Tag v-else size="sm">待生成</Tag>
         </div>
 
@@ -296,6 +365,17 @@ function next() {
           </button>
         </div>
 
+        <div v-if="!isDigitalHuman" class="h3-mode-block">
+          <H3GenModeSelect :model-value="shotH3Mode(shot)" @update:model-value="setShotH3Mode(shot, $event)" />
+          <FramePairSlots
+            v-if="shotH3Mode(shot) === 'fl2va'"
+            :first-id="shot.firstFrameAssetId"
+            :last-id="shot.lastFrameAssetId"
+            first-hint="空则用本镜配图"
+            @update:first-id="project.updateShot(shot.id, { firstFrameAssetId: $event })"
+            @update:last-id="project.updateShot(shot.id, { lastFrameAssetId: $event })"
+          />
+        </div>
         <div class="shot-info">
           <label class="info-row">
             <span>时长</span>
@@ -550,6 +630,11 @@ function next() {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.h3-mode-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .shot-info {
   display: grid;

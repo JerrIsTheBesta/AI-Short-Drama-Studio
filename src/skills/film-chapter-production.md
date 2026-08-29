@@ -45,25 +45,17 @@ triggers: 原创电影,电影章节,亲身经历,章节剧本,彩色故事板,�
 - 正常上色、现实主义电影质感，不加编号、字幕、对白气泡、说明文字或水印。
 - 看板只提供动作和构图；送入视频模型时禁止复制宫格、边框或拼贴。
 
-## 分镜与 H3 提示词
+## 分镜与内容表现
 
 - 每镜 5–10 秒；一个镜头只允许一个出镜说话者。对白轮次拆镜，画外旁白使用 `h3-voiceover`，画中人物闭嘴。
+- 拆镜按戏剧拍点，不要压成十几条短视频口播。蒙太奇把同一意图的连续画面收进 8–10 秒一镜，写成看得见的动作，禁止写「时间流逝」。
+- `videoPrompt` 必须像导演说戏：先写每个出场人物站在近处还是后面、身体朝哪、眼睛看谁，再写动作。说话者可以在后面。禁止合影看镜头。不要按秒填空，不要只写「禁止呆脸空眼」。
+- 改编原则写进每一镜：不拍伤口特写、不拍神像和宗教仪式、不把流浪汉拍成怪物或笑料。善意是端来一盆热水、让出一枚游戏币，不是救世主登场。
 - 运镜先服从情绪与模型稳定性。大全景、复杂建筑、多人背景优先固定镜头；只有叙事需要时才推、拉、摇或跟拍。
-- 提示词必须包含这三个字段：
-
-```text
-integrated_multimodal_description:
-[Shot 1] ... The action develops continuously and finishes naturally within X.00 seconds.
-
-overall_soundscape:
-...
-
-non_diegetic_music:
-N/A
-```
-
-- `integrated_multimodal_description` 写清起始构图、人物身份、身体状态、动作顺序、表情变化、镜头运动、结束姿势和时长。
-- 对话只放在 `<d>[Chinese] 原词</d>`。没有台词就明确 `No dialogue. No lips moving.`
+- 选 H3 时按官方 Ref2VA 六段写：`subject_definitions`、`summary`（以 `[reference generation]` 开头）、`retention_analysis`、`detailed_description`、`overall_soundscape`、`non_diegetic_music`。人设/场景/看板不是 I2VA 首帧。
+- `[Shot 1]` 不加时间戳。不要写 `From 0.00s to 1.50s`。一镜一条成片，用连续叙事：开幅构图 → 动作起幅 → 发展 → 收住。运镜写成句内动作，例如 `The camera pushes in with small amplitude at slow speed`。
+- `detailed_description` 写清构图、人物身份与站位、环境光、动作顺序、表情变化、镜头运动、参考标签生效点和时长。生成任务尽量 350–500 英文词。
+- 对话只放在 `<d>[Chinese] 原词</d>`，说话人写成 `<Subject 1> (S1) says:`。画外音用 `says in an off-screen voiceover` 并让嘴唇闭合。没有台词就明确 `No dialogue. No lips moving.`
 - 人多的远景明确：谁能移动、谁必须坐着、是否允许穿越画面。禁止无关人员端菜、走动或抢镜。
 - 负面约束针对本镜风险写，不堆通用词。固定镜头要明确 no pan / no tilt / no zoom / no push-in。
 
