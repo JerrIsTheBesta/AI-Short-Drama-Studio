@@ -2,6 +2,7 @@ import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
 import { emptyCanvas } from '@/types/canvas'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { boundSubjectIds, sceneHasKeyProps } from '@/utils/consistency'
+import { usesStoryboardCanvas } from '@/utils/storyboardGate'
 
 export const NODE_W = 240
 const GAP = 18
@@ -80,11 +81,12 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const scenesWithProps = scenes.filter(sceneHasKeyProps)
   const shots = project.shots
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
+  const useBoards = usesStoryboardCanvas(project)
   const layoutReady =
     hadGroups &&
     prevList.some((n) => n.id === 'group-audio') &&
     scenesWithProps.every((scene) => prevList.some((n) => n.id === `sceneProps:${scene.id}`)) &&
-    (shots.length === 0 || prevList.some((n) => n.type === 'shotBoard'))
+    (shots.length === 0 || prevList.some((n) => n.type === (useBoards ? 'shotBoard' : 'shotImage')))
   const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
   const nodes: CanvasNode[] = []
@@ -216,15 +218,19 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   })
 
   shots.forEach((shot, i) => {
-    const boardId = `shotBoard:${shot.id}`
+    const stillId = useBoards ? `shotBoard:${shot.id}` : `shotImage:${shot.id}`
+    const stillType: CanvasNode['type'] = useBoards ? 'shotBoard' : 'shotImage'
     const vidId = `shotVideo:${shot.id}`
     const audId = `audio:${shot.id}`
     attach('group-shots', {
-      id: boardId,
-      type: 'shotBoard',
+      id: stillId,
+      type: stillType,
       position: cell(i, 0, shotH),
       data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
-      status: persistStatus(prev.get(boardId)?.status, Boolean(shot.boardAssetId)),
+      status: persistStatus(
+        prev.get(stillId)?.status,
+        Boolean(useBoards ? shot.boardAssetId : shot.imageAssetId)
+      ),
       parentGroupId: 'group-shots'
     })
     attach('group-shots', {
@@ -255,9 +261,9 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       const src = `subject:${sid}`
       if (!nodes.some((n) => n.id === src)) return
       edges.push({
-        id: `e-${src}-${boardId}-${idx}`,
+        id: `e-${src}-${stillId}-${idx}`,
         source: src,
-        target: boardId,
+        target: stillId,
         sourceHandle: 'out',
         targetHandle: idx === 0 ? 'char1' : 'char2'
       })
@@ -265,16 +271,16 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     const sceneId = shot.sceneId || scenes[0]?.id
     if (sceneId) {
       edges.push({
-        id: `e-scene-${sceneId}-${boardId}`,
+        id: `e-scene-${sceneId}-${stillId}`,
         source: `scene:${sceneId}`,
-        target: boardId,
+        target: stillId,
         sourceHandle: 'out',
         targetHandle: 'scene'
       })
     }
     edges.push({
-      id: `e-${boardId}-${vidId}`,
-      source: boardId,
+      id: `e-${stillId}-${vidId}`,
+      source: stillId,
       target: vidId,
       sourceHandle: 'out',
       targetHandle: 'image'

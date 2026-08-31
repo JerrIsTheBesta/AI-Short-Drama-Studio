@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore, useLibraryStore } from '@/stores'
-import { generateImage, characterSheetPrompt, scenePlatePrompt } from '@/services/ai'
+import { generateImage, characterSheetPrompt, ensureCharacterSheetWhiteBackground, scenePlatePrompt } from '@/services/ai'
 import { imageModelForProject } from '@/services/ai/runtime'
 import { effectiveImagePrompt } from '@/utils/shot'
 import {
@@ -182,8 +182,10 @@ async function generateSubjectSheet(sub: Subject) {
     const refs = await productRefBlobs()
     const useRefs = refs.length > 0 && (Boolean(sub.fromReference) || sub.kind === 'other')
     const look = lookFromScript(project.current.script)
-    const prompt = sub.sheetPrompt?.trim() || characterSheetPrompt(sub, look.style, useRefs, look)
-    if (!sub.sheetPrompt?.trim()) {
+    const prompt = ensureCharacterSheetWhiteBackground(
+      sub.sheetPrompt?.trim() || characterSheetPrompt(sub, look.style, useRefs, look)
+    )
+    if (prompt !== (sub.sheetPrompt || '')) {
       project.updateSubject(sub.id, { sheetPrompt: prompt })
     }
     const result = await generateImage(

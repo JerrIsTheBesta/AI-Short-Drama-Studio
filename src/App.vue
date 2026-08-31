@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { useProjectStore, useAssetsStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useSettingsStore } from '@/stores'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TitleBar from '@/components/layout/TitleBar.vue'
 import ToastContainer from '@/components/common/ToastContainer.vue'
@@ -10,6 +10,7 @@ import ImageLightbox from '@/components/common/ImageLightbox.vue'
 const route = useRoute()
 const project = useProjectStore()
 const assets = useAssetsStore()
+const settings = useSettingsStore()
 
 const showLayout = computed(
   () =>
@@ -20,6 +21,7 @@ const showLayout = computed(
 )
 
 onMounted(async () => {
+  await settings.ensureHydrated()
   await project.ensureLoaded()
   await assets.refresh()
   project.startAutoSave()

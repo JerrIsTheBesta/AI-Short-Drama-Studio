@@ -3,6 +3,7 @@ import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
 import { sceneHasKeyProps } from '@/utils/consistency'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
@@ -70,7 +71,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
    - 用户明确说「重新写剧本」，或在讲一个和当前剧本无关的新故事（新题材、新人物、新画风）→ 必须先 seed_script（text=用户这几轮的故事原文，含画风时长题材人物），再 generate_play。禁止 continue_play，禁止拿旧剧本当草稿。
 5. 每做完一步，say 里问要不要继续下一步。用户说「继续」才走下一步。用户说「续写」不是流水线的「继续」。
-6. 没说「全流程 / 全部做完」禁止一次把人设+场景宫格+故事看板+视频全做完。出视频只传角色设计图、场景图和本镜故事看板，禁止传人物+场景配图。
+6. 没说「全流程 / 全部做完」禁止一次把人设+场景+关键帧+视频全做完。普通创作不生成故事看板，用人设图和场景图画「这一镜正在发生的事件」关键帧，再出视频。AI 短剧才走故事看板。
 7. 分镜节点未验收时禁止生成故事看板或视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
 8. 一次最多 8 个 actions。
 
@@ -126,7 +127,9 @@ function skillSelectContext(userText: string) {
     hasShots: shots.length > 0,
     missingSheets: subjects.some((s) => !s.designSheetAssetId),
     missingPlates: scenes.some((s) => !s.plateAssetId || (sceneHasKeyProps(s) && !s.propSheetAssetId)),
-    missingImages: shots.some((s) => !s.boardAssetId),
+    missingImages: videoRequiresStoryboard(p)
+      ? shots.some((s) => !s.boardAssetId)
+      : shots.some((s) => !s.imageAssetId),
     missingVideos: shots.some((s) => !s.videoAssetId)
   }
 }
@@ -138,10 +141,20 @@ function qaNotes(p: Project): string {
   if (noSheet.length) issues.push(`没人设：${noSheet.map((s) => s.name).join('、')}`)
   const noPlate = (p.scenes ?? []).filter((s) => !s.plateAssetId)
   if (noPlate.length) issues.push(`没底板：${noPlate.map((s) => s.name).join('、')}`)
-  const noImg = p.shots.filter((s) => !s.boardAssetId)
-  if (noImg.length) issues.push(`${noImg.length} 镜还没故事看板`)
-  const noVid = p.shots.filter((s) => s.boardAssetId && !s.videoAssetId)
-  if (noVid.length) issues.push(`${noVid.length} 镜有看板没视频`)
+  const noImg = videoRequiresStoryboard(p)
+    ? p.shots.filter((s) => !s.boardAssetId)
+    : p.shots.filter((s) => !s.imageAssetId)
+  if (noImg.length) {
+    issues.push(
+      videoRequiresStoryboard(p)
+        ? `${noImg.length} 镜还没故事看板`
+        : `${noImg.length} 镜还没关键帧`
+    )
+  }
+  const noVid = videoRequiresStoryboard(p)
+    ? p.shots.filter((s) => s.boardAssetId && !s.videoAssetId)
+    : p.shots.filter((s) => !s.videoAssetId)
+  if (noVid.length) issues.push(`${noVid.length} 镜还没视频`)
   const unbound = p.shots.filter((s) => !s.sceneId || !(s.subjectIds && s.subjectIds.length))
   if (unbound.length) issues.push(`${unbound.length} 镜没绑人物或场景`)
   if (!issues.length) return '清单过了一遍，目前能往下剪。'
@@ -769,7 +782,10 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     if (!actions.some((a) => a.tool === 'generate_all_scenes')) {
       actions.push({ tool: 'generate_all_scenes' })
     }
-    if (!actions.some((a) => a.tool === 'generate_all_boards')) {
+    if (!videoRequiresStoryboard(p) && !actions.some((a) => a.tool === 'generate_all_images')) {
+      actions.push({ tool: 'generate_all_images' })
+    }
+    if (videoRequiresStoryboard(p) && !actions.some((a) => a.tool === 'generate_all_boards')) {
       actions.push({ tool: 'generate_all_boards' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_videos')) {

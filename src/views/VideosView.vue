@@ -17,6 +17,7 @@ import {
   DIGITAL_HUMAN_IMAGE_ASSIGNMENT
 } from '@/services/ai'
 import { collectShotVideoEntries, packVideoRefEntries, sceneForShot, subjectsForShot } from '@/utils/consistency'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { generateShotVideo, rewriteShotPerformance } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
@@ -73,7 +74,7 @@ const videoPromptPlaceholder = computed(() =>
 )
 
 const shotsWithoutBoard = computed(() =>
-  isDigitalHuman.value
+  isDigitalHuman.value || !videoRequiresStoryboard(project.current)
     ? []
     : shots.value.filter((s) => normalizeH3GenMode(s.h3GenMode) !== 'fl2va' && !s.boardAssetId)
 )
@@ -271,7 +272,7 @@ function next() {
       <div>
         <h1>🎥 AI 视频生成</h1>
         <p v-if="isDigitalHuman">每次生成和重新生成都强制使用项目上传的人物图作为唯一参考，并锁定人物、服装、背景、构图和机位。</p>
-        <p v-else>H3 可选参考图生成（人设/场景/看板）或首尾帧。口播人声请到「字幕」步骤按台词生成。</p>
+        <p v-else>H3 可用人设、场景、配图或参考图出视频；故事看板可选。口播人声请到「字幕」步骤按台词生成。</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/images')">← 上一步</GradientButton>
@@ -311,7 +312,7 @@ function next() {
           <Tag v-if="shot.videoAssetId" type="success" size="sm">已完成</Tag>
           <Tag v-else-if="generating.has(shot.id)" type="warning" size="sm">生成中</Tag>
           <Tag v-else-if="shotH3Mode(shot) === 'fl2va' && !shot.lastFrameAssetId" type="error" size="sm">缺尾帧</Tag>
-          <Tag v-else-if="shotH3Mode(shot) !== 'fl2va' && !shot.boardAssetId" type="error" size="sm">缺看板</Tag>
+          <Tag v-else-if="shotH3Mode(shot) !== 'fl2va' && videoRequiresStoryboard(project.current) && !shot.boardAssetId" type="error" size="sm">缺看板</Tag>
           <Tag v-else size="sm">待生成</Tag>
         </div>
 

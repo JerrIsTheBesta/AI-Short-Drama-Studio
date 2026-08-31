@@ -7,7 +7,8 @@ import {
   shell,
   protocol,
   Menu,
-  net
+  net,
+  session
 } from 'electron'
 import path from 'node:path'
 import os from 'node:os'
@@ -16,6 +17,7 @@ import { createReadStream, createWriteStream, existsSync, statSync } from 'node:
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
+import { closeAppDb, getDbPath, kvGet, kvSet, openAppDb } from './sqlite'
 
 const mainDir = path.dirname(fileURLToPath(import.meta.url))
 
@@ -188,11 +190,20 @@ function createWindow() {
   })
   win.setMenuBarVisibility(false)
   win.once('ready-to-show', () => win.show())
+  win.on('close', () => {
+    try {
+      session.defaultSession.flushStorageData()
+    } catch {
+      /* ignore */
+    }
+  })
 }
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
-  await ensureDir(defaultRoot())
+  const root = defaultRoot()
+  await ensureDir(root)
+  await openAppDb(root)
 
   protocol.handle('aicuts', (request) => {
     try {
@@ -209,6 +220,12 @@ app.whenReady().then(async () => {
     const root = defaultRoot()
     await ensureDir(root)
     return root
+  })
+
+  ipcMain.handle('desktop:dbPath', () => getDbPath() || path.join(defaultRoot(), 'app.db'))
+  ipcMain.handle('desktop:kvGet', (_e, key: string) => kvGet(String(key || '')))
+  ipcMain.handle('desktop:kvSet', (_e, key: string, value: string) => {
+    kvSet(String(key || ''), String(value ?? ''))
   })
 
   ipcMain.handle('desktop:ensureProjectDir', async (_e, name: string, id: string) => {
@@ -511,6 +528,10 @@ app.whenReady().then(async () => {
   })
 }).catch((err) => {
   console.error('[electron] startup failed', err)
+})
+
+app.on('before-quit', () => {
+  closeAppDb()
 })
 
 app.on('window-all-closed', () => {

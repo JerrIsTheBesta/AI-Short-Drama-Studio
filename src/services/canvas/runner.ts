@@ -31,8 +31,9 @@ import {
 } from '@/services/ai'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
-import { collectShotRefIds, collectShotBoardRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
+import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import {
   extractPlayDirectives,
   extractSceneSlice
@@ -54,6 +55,7 @@ import {
   scenePropSendPrompt,
   sceneSendPrompt,
   shotImageSendPrompt,
+  defaultShotImagePrompt,
   subjectSendPrompt,
   videoSendPrompt
 } from '@/utils/nodePrompt'
@@ -238,7 +240,7 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
     ...extras.labels
   ].slice(0, 10)
   const prompt = subjectSendPrompt(latest, project.current)
-  if (!latest.sheetPrompt?.trim()) {
+  if (prompt !== (latest.sheetPrompt || '')) {
     project.updateSubject(latest.id, { sheetPrompt: prompt })
   }
   onProgress?.(refs.length ? `生成四视图（${refs.length} 张参考）...` : '生成四视图...')
@@ -391,6 +393,9 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
 export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
+  if (project.current && !videoRequiresStoryboard(project.current)) {
+    return generateShotImage(shot, onProgress, signal)
+  }
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
   const rebound = boundSubjectIds(shot, project.current.subjects ?? [])
@@ -454,13 +459,28 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
     project.updateShot(shot.id, { subjectIds: rebound })
     shot = project.current.shots.find((s) => s.id === shot.id) || { ...shot, subjectIds: rebound }
   }
-  if (!shot.boardAssetId) {
+  if (videoRequiresStoryboard(project.current) && !shot.boardAssetId) {
     await generateShotBoard(shot, onProgress, signal)
+    shot = project.current.shots.find((s) => s.id === shot.id) || shot
+  } else {
+    for (const sub of subjectsForShot(shot, project.current)) {
+      const latest = (project.current.subjects ?? []).find((item) => item.id === sub.id) || sub
+      if (latest.designSheetAssetId) continue
+      onProgress?.(`先补「${latest.name}」角色设计图…`)
+      await generateSubjectSheet(latest, onProgress, signal)
+    }
+    const scene = sceneForShot(shot, project.current)
+    if (scene && !scene.plateAssetId) {
+      onProgress?.(`先补场景「${scene.name}」…`)
+      await generateScenePlate(scene, onProgress, signal)
+    }
     shot = project.current.shots.find((s) => s.id === shot.id) || shot
   }
   const look = lookFromScript(project.current.script)
   const style = look.style
-  const bundle = collectShotRefIds(shot, project.current)
+  const bundle = videoRequiresStoryboard(project.current)
+    ? collectShotRefIds(shot, project.current)
+    : collectShotKeyframeRefIds(shot, project.current)
   const blobs: Blob[] = []
   const labels: string[] = []
   const library = useLibraryStore()
@@ -470,11 +490,14 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
     blobs.push(b)
     labels.push(bundle.labels[i])
   }
-  const prompt = shotImageSendPrompt(shot, project.current)
-  if (!shot.imagePrompt?.trim()) {
+  let prompt = shotImageSendPrompt(shot, project.current)
+  if (!videoRequiresStoryboard(project.current) && !/2\s*列|四宫格|正好\s*4\s*格/.test(prompt)) {
+    prompt = defaultShotImagePrompt(shot, project.current)
+  }
+  if (prompt !== (shot.imagePrompt || '')) {
     project.updateShot(shot.id, { imagePrompt: prompt })
   }
-  onProgress?.(blobs.length ? `图生图（${blobs.length} 张锁定参考）...` : '文生图...')
+  onProgress?.(blobs.length ? `画四宫格关键帧（${blobs.length} 张人物/场景参考）...` : '画四宫格关键帧...')
   const size = imageGenSize('shot')
   const result = await generateImage(
     {
@@ -526,9 +549,12 @@ async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => voi
     await generateScenePlate(scene, onProgress, signal)
   }
   shot = refreshShot(shot.id)
-  if (!shot.boardAssetId) {
+  if (videoRequiresStoryboard(project.current) && !shot.boardAssetId) {
     onProgress?.('先补本镜故事看板…')
     await generateShotBoard(shot, onProgress, signal)
+  } else if (!videoRequiresStoryboard(project.current) && !shot.imageAssetId) {
+    onProgress?.('先生成本镜四宫格关键帧…')
+    await generateShotImage(shot, onProgress, signal)
   }
   return refreshShot(shot.id)
 }
@@ -757,10 +783,22 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   shot = await ensureShotVideoRefs(shot, onProgress, signal)
 
   const allEntries = collectShotVideoEntries(shot, project.current)
-  const packed = packVideoRefEntries(allEntries)
-  if (!packed.length) throw new Error('没有角色设计图、场景图或故事看板，无法出视频。不要用人物+场景配图出片。')
-  if (!packed.some((entry) => entry.kind === 'board')) {
+  let packed = packVideoRefEntries(allEntries)
+  if (!packed.length && shot.imageAssetId) {
+    packed = [
+      {
+        id: shot.imageAssetId,
+        kind: 'keyframe',
+        name: 'keyframe',
+        label: '2x2 four-panel keyframe for [Shot 1]; exactly 4 cells'
+      }
+    ]
+  }
+  if (videoRequiresStoryboard(project.current) && !packed.some((entry) => entry.kind === 'board')) {
     throw new Error('没有本镜故事看板，无法出视频。看板是这一镜的整体故事架构。')
+  }
+  if (!packed.length) {
+    throw new Error('没有参考图，无法出视频。请先做人设、场景、配图，或给这一镜加参考图。')
   }
   const blobs: Blob[] = []
   const library = useLibraryStore()
@@ -787,6 +825,11 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
   const imageSlots = buildH3ImageSlots(packed)
   const imageAssignments = imageSlots.map((slot) => slot.job)
+  const hasIdentityRefs = packed.some(
+    (entry) => entry.kind === 'character' || entry.kind === 'scene' || entry.kind === 'board'
+  )
+  const hasKeyframeFrame = packed.some((entry) => entry.kind === 'keyframe')
+  const h3Mode = hasKeyframeFrame || hasIdentityRefs || packed.length > 1 ? 'R2VA' : 'I2VA'
   let officialPrompt = videoSendPrompt(shot, project.current)
   if (shot.compiledVideoPrompt == null) {
     project.updateShot(shot.id, { compiledVideoPrompt: officialPrompt })
@@ -799,7 +842,9 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
         ? `图${index + 1}场景`
         : entry.kind === 'extra'
           ? `图${index + 1}补充参考`
-          : `图${index + 1}故事看板`
+            : entry.kind === 'keyframe'
+            ? `图${index + 1}四宫格关键帧`
+            : `图${index + 1}故事看板`
   )
   onProgress?.(`生成视频（${slotNames.join('、')}）…`)
   const result = await generateVideo(
@@ -828,7 +873,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       promptStyle,
       videoModel,
       h3GenMode: 'reference',
-      mode: 'R2VA',
+      mode: h3Mode,
       signal,
       resumeTaskId: shot.videoTaskId,
       onTaskSubmitted: async (taskId) => {
@@ -863,7 +908,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       aspectRatio: project.current.settings.aspectRatio,
       cameraMovement: shot.cameraMovement,
       promptStyle,
-      mode: 'R2VA'
+      mode: h3Mode
     }),
     projectId: project.current.id,
     shotId: shot.id
@@ -1703,6 +1748,10 @@ export async function generateMissingPropSheets(onProgress?: (msg: string) => vo
 export async function generateMissingBoards(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
+  if (!videoRequiresStoryboard(p)) {
+    await generateMissingImages(onProgress, signal)
+    return
+  }
   const ids = p.shots.filter((s) => !s.boardAssetId).map((s) => `shotBoard:${s.id}`)
   await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }

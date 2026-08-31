@@ -1,6 +1,7 @@
 import type { ID, Project, Scene, Shot, Subject } from '@/types'
 import { sceneForShotPlace } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export interface ShotRefBundle {
   ids: ID[]
@@ -93,7 +94,7 @@ export function collectShotBoardRefIds(shot: Shot, project: Project): ShotRefBun
   return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 6 })
 }
 
-export type VideoRefKind = 'character' | 'scene' | 'board' | 'extra'
+export type VideoRefKind = 'character' | 'scene' | 'board' | 'extra' | 'keyframe'
 
 export interface VideoRefEntry {
   id: ID
@@ -130,12 +131,20 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       label: `SCENE PLATE of ${scene.name}; lock only space, materials and light; do not generate a four-panel grid`
     })
   }
-  if (shot.boardAssetId && !omitted.has(shot.boardAssetId)) {
+  if (videoRequiresStoryboard(project) && shot.boardAssetId && !omitted.has(shot.boardAssetId)) {
     out.push({
       id: shot.boardAssetId,
       kind: 'board',
       name: `shot ${shot.index + 1}`,
       label: `six-panel STORYBOARD for [Shot 1]; action plan only; one continuous full-frame take; never copy panels or play them as a slideshow`
+    })
+  }
+  if (!videoRequiresStoryboard(project) && shot.imageAssetId && !omitted.has(shot.imageAssetId)) {
+    out.unshift({
+      id: shot.imageAssetId,
+      kind: 'keyframe',
+      name: 'keyframe',
+      label: '2x2 four-panel KEYFRAME for [Shot 1] (exactly 4 cells, never more); action plan only; one continuous full-frame take; never copy the grid'
     })
   }
   const used = new Set(out.map((item) => item.id))
@@ -162,12 +171,20 @@ export function collectShotVideoRefIds(shot: Shot, project: Project): ShotRefBun
   }
 }
 
-/** 最多 9 张：角色设计图 + 场景图 + 故事看板 + 用户补充参考。不传人物+场景配图。 */
+/** 最多 9 张。普通创作关键帧作为成片第一帧排在最前。 */
 export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRefEntry[] {
   const chars = entries.filter((entry) => entry.kind === 'character')
   const extras = entries.filter((entry) => entry.kind === 'extra')
   const scene = entries.find((entry) => entry.kind === 'scene')
   const board = entries.find((entry) => entry.kind === 'board')
+  const keyframe = entries.find((entry) => entry.kind === 'keyframe')
+  if (keyframe) {
+    const reserved = [keyframe, scene].filter((entry): entry is VideoRefEntry => Boolean(entry))
+    const leftover = Math.max(0, max - reserved.length)
+    const extraTake = Math.min(extras.length, leftover)
+    const charTake = Math.max(0, leftover - extraTake)
+    return [keyframe, ...chars.slice(0, charTake), ...reserved.slice(1), ...extras.slice(0, extraTake)]
+  }
   const reserved = [scene, board].filter((entry): entry is VideoRefEntry => Boolean(entry))
   const leftover = Math.max(0, max - reserved.length)
   const extraTake = Math.min(extras.length, leftover)
@@ -180,7 +197,16 @@ export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRef
  * 视频复刻必须带上用户产品图（GPT 编辑最多 4 张）
  */
 export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
-  return packShotRefs(shot, project, { includeBoard: true, includeProps: true, max: 8 })
+  return packShotRefs(shot, project, {
+    includeBoard: videoRequiresStoryboard(project),
+    includeProps: true,
+    max: 8
+  })
+}
+
+/** 普通创作关键帧：只用人设、场景、道具，不带故事看板。 */
+export function collectShotKeyframeRefIds(shot: Shot, project: Project): ShotRefBundle {
+  return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 8 })
 }
 
 function packShotRefs(
@@ -325,7 +351,7 @@ export function imageRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
     seen.add(id)
     slots.push({ id, label, locked })
   }
-  push(shot.boardAssetId, '故事看板', true)
+  push(videoRequiresStoryboard(project) ? shot.boardAssetId : undefined, '故事看板', true)
   for (const sub of subjectsForShot(shot, project)) {
     push(sub.designSheetAssetId, `四视图·${sub.name}`, true)
   }
@@ -359,7 +385,9 @@ export function videoRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
           ? `图${index + 1}：场景·${entry.name}`
           : entry.kind === 'extra'
             ? `图${index + 1}：补充参考`
-            : `图${index + 1}：本镜故事看板`,
+            : entry.kind === 'keyframe'
+              ? `图${index + 1}：四宫格关键帧`
+              : `图${index + 1}：本镜故事看板`,
     locked: false
   }))
 }
@@ -424,11 +452,15 @@ export function composeShotImagePrompt(
       `这是「${dialogueSpeaker}」的出镜对白镜头。单画面起始构图必须已经明确落在${dialogueSpeaker}身上，让${dialogueSpeaker}成为唯一、无歧义的主视觉，脸和嘴清楚可见；可以用中近景、近景、过肩构图或以${dialogueSpeaker}为主体的双人构图，但其他人只能作为闭嘴倾听或反应者，不能与${dialogueSpeaker}争夺视觉中心。`
     )
   }
-  if (shot.boardAssetId) {
+  if (shot.boardAssetId && videoRequiresStoryboard(project)) {
     parts.push(
       filmChapter
         ? '附件中的彩色四/八宫格电影故事看板按左上到右下展示动作过程。视频起始帧采用第一格的开场构图、站位、朝向、天气和道具状态，后续动作顺序由文字提示承接；只生成一张完整的单画面起始帧，绝对不要复制宫格边框、编号或拼贴版式。'
         : '附件中的六格故事看板按左上到右下展示同一镜头的动作过程。视频起始帧采用第一格的开场构图、站位、朝向和道具状态，后续动作顺序由文字提示承接；只生成一张完整上色的单画面起始帧，绝对不要复制六格边框、线稿、编号或拼贴版式。'
+    )
+  } else if (!videoRequiresStoryboard(project)) {
+    parts.push(
+      '这是这一镜的四宫格关键帧：2 列 × 2 行，正好 4 格，不能超过 4 格，也不能少格留白。左上到右下依次是初态、准备、核心事件、结束。用人设图锁脸和服装，用场景图锁地点和光线。禁止 6 格、8 格、空白格或把格子画成四张无关海报。'
     )
   }
   if (chars.length) {

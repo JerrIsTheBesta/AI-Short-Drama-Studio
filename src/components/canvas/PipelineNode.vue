@@ -6,6 +6,7 @@ import { runCanvasNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
@@ -100,7 +101,7 @@ const kindLabel = computed(() => {
   if (type.value === 'sceneProps') return '关键道具'
   if (type.value === 'scene') return '锚点图'
   if (type.value === 'shotBoard') return '看板'
-  if (type.value === 'shotImage') return '配图'
+  if (type.value === 'shotImage') return videoRequiresStoryboard(project.current) ? '配图' : '四宫格'
   if (type.value === 'shotVideo') return '视频'
   if (type.value === 'audio') return '口播'
   if (type.value === 'export') return '合成'
@@ -257,7 +258,9 @@ const genLabel = computed(() => {
   if (type.value === 'sceneProps') return again ? '重新生成' : '生成关键道具图'
   if (type.value === 'scene') return again ? '重新生成' : '生成锚点图'
   if (type.value === 'shotBoard') return again ? '重新生成' : '生成看板'
-  if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
+  if (type.value === 'shotImage') {
+    return again ? '重新生成' : videoRequiresStoryboard(project.current) ? '生成配图' : '生成四宫格'
+  }
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
   if (type.value === 'audio') {
     if (!shot.value || !needsExternalTts(shot.value, project.current)) return ''
@@ -690,10 +693,10 @@ const cropStyle = computed(() => ({
 <template>
   <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating || !!toolBusy }]">
     <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
-    <Handle v-if="type === 'shotBoard'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
-    <Handle v-if="type === 'shotBoard'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
-    <Handle v-if="type === 'shotBoard'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
-    <Handle v-if="type === 'shotImage'" id="board" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
+    <Handle v-if="type === 'shotImage' && videoRequiresStoryboard(project.current)" id="board" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
     <Handle v-if="type === 'shotVideo'" id="image" type="target" :position="Position.Left" class="hndl" />
 
     <transition name="float-up">

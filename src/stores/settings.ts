@@ -1,14 +1,18 @@
 /**
  * 全局应用设置（AI 模式、模型端点、UI 偏好）
- * 密钥只存在本机 localStorage，不进仓库。
+ * 桌面端写入本机 SQLite（文档/AI-Cut/app.db），不走浏览器存储。
+ * Web 端仍用 localStorage。
  */
 
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/services/ai/env'
+import { desktop, isDesktop } from '@/services/desktop'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 const STORAGE_KEY = 'ai-cut:settings'
+const SETTINGS_KV_KEY = 'settings'
+const LEGACY_SETTINGS_FILE = 'settings.json'
 
 export type { VideoPromptStyle }
 
@@ -339,11 +343,10 @@ function buildDefaults(): AppSettings {
   }
 }
 
-function load(): AppSettings {
+function parseSettings(raw: string | null): AppSettings {
   const defaults = buildDefaults()
+  if (!raw) return defaults
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return defaults
     const parsed = JSON.parse(raw) as Partial<AppSettings>
     const savedLlm = parsed.llm
     const legacyQwenPrimary = /^qwen/i.test(savedLlm?.model ?? '')
@@ -442,16 +445,129 @@ function load(): AppSettings {
   }
 }
 
+function loadFromLocal(): AppSettings {
+  try {
+    return parseSettings(localStorage.getItem(STORAGE_KEY))
+  } catch {
+    return buildDefaults()
+  }
+}
+
+function writeLocal(v: AppSettings) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(v))
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+async function settingsFilePath(): Promise<string> {
+  const api = desktop()
+  return api.join(await api.getRoot(), LEGACY_SETTINGS_FILE)
+}
+
+let writing = false
+let queued: AppSettings | null = null
+
+async function writeDisk(v: AppSettings) {
+  if (!isDesktop()) return
+  queued = v
+  if (writing) return
+  writing = true
+  try {
+    while (queued) {
+      const snap = queued
+      queued = null
+      const api = desktop()
+      if (typeof api.kvSet === 'function') {
+        await api.kvSet(SETTINGS_KV_KEY, JSON.stringify(snap))
+      } else {
+        const file = await settingsFilePath()
+        await api.writeText(file, JSON.stringify(snap, null, 2))
+      }
+    }
+  } catch (e) {
+    console.warn('[settings] 写入本地库失败', e)
+  } finally {
+    writing = false
+    if (queued) void writeDisk(queued)
+  }
+}
+
 export const useSettingsStore = defineStore('settings', () => {
-  const config = ref<AppSettings>(load())
+  const config = ref<AppSettings>(loadFromLocal())
+  const persistPath = ref('')
+  const diskReady = ref(false)
+  let skipDisk = false
+  let hydratePromise: Promise<void> | null = null
+  let pendingDisk: AppSettings | null = null
 
   watch(
     config,
     (v) => {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(v))
+      writeLocal(v)
+      if (skipDisk) return
+      if (!diskReady.value) {
+        pendingDisk = v
+        return
+      }
+      void writeDisk(v)
     },
     { deep: true }
   )
+
+  async function ensureHydrated() {
+    if (diskReady.value) return
+    if (hydratePromise) return hydratePromise
+    hydratePromise = (async () => {
+      if (!isDesktop()) {
+        diskReady.value = true
+        return
+      }
+      try {
+        const api = desktop()
+        persistPath.value = typeof api.dbPath === 'function' ? await api.dbPath() : await settingsFilePath()
+        let raw: string | null = null
+        if (typeof api.kvGet === 'function') raw = await api.kvGet(SETTINGS_KV_KEY)
+        if (!raw) {
+          const file = await settingsFilePath()
+          if (await api.exists(file)) raw = await api.readText(file)
+        }
+        if (raw) {
+          skipDisk = true
+          config.value = parseSettings(raw)
+          writeLocal(config.value)
+          skipDisk = false
+          await writeDisk(config.value)
+        } else {
+          await writeDisk(config.value)
+        }
+      } catch (e) {
+        console.warn('[settings] 读取本地库失败', e)
+      } finally {
+        diskReady.value = true
+        const extra = pendingDisk
+        pendingDisk = null
+        if (extra) await writeDisk(extra)
+      }
+    })().finally(() => {
+      hydratePromise = null
+    })
+    return hydratePromise
+  }
+
+  void ensureHydrated()
+
+  if (typeof window !== 'undefined') {
+    const flush = () => {
+      writeLocal(config.value)
+      if (diskReady.value) void writeDisk(config.value)
+    }
+    window.addEventListener('beforeunload', flush)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flush()
+    })
+  }
 
   function update(patch: Partial<AppSettings>) {
     config.value = { ...config.value, ...patch }
@@ -883,6 +999,8 @@ export const useSettingsStore = defineStore('settings', () => {
 
   return {
     config,
+    persistPath,
+    ensureHydrated,
     update,
     patchLlm,
     addLlm,

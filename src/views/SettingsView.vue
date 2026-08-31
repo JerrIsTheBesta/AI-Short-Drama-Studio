@@ -7,6 +7,7 @@ import SetupAgent from '@/components/settings/SetupAgent.vue'
 import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
+import { desktop, isDesktop } from '@/services/desktop'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,10 +31,21 @@ const diag = ref({
 })
 
 onMounted(async () => {
+  await settings.ensureHydrated()
   storage.value = await estimateStorage()
   await assets.refresh()
   await runDiagnostics()
 })
+
+async function openSettingsFolder() {
+  if (!isDesktop()) return
+  try {
+    const root = await desktop().getRoot()
+    await desktop().openPath(root)
+  } catch {
+    toast.error('打不开配置目录')
+  }
+}
 
 async function runDiagnostics() {
   diag.value.userAgent = navigator.userAgent
@@ -211,7 +223,7 @@ function navReady(id: SettingsSection) {
         <img src="/logo.png" alt="" />
         <div>
           <h1>设置</h1>
-          <p>{{ currentNav.desc }}。改完立刻生效，密钥只留在本机。</p>
+          <p>{{ currentNav.desc }}。改完立刻写入本机文件，重启电脑也不会丢。</p>
         </div>
       </div>
     </header>
@@ -280,8 +292,16 @@ function navReady(id: SettingsSection) {
           </section>
 
           <section class="panel">
+            <h2>模型配置</h2>
+            <p class="card-desc">语言模型、生图、配音、视频等密钥写在本机 SQLite，不进安装目录，也不走浏览器。</p>
+            <p v-if="settings.persistPath" class="path">{{ settings.persistPath }}</p>
+            <p v-else class="muted">浏览器端保存在本机 localStorage。</p>
+            <button v-if="isDesktop()" type="button" class="mini" @click="openSettingsFolder">打开配置文件夹</button>
+          </section>
+
+          <section class="panel">
             <h2>存储</h2>
-            <p class="card-desc">项目、素材都存在浏览器 IndexedDB</p>
+            <p class="card-desc">桌面端项目和素材在「文档\AI-Cut」；浏览器端用 IndexedDB。</p>
             <div class="storage-bar"><div class="storage-bar-fill" :style="{ width: storagePct + '%' }" /></div>
             <div class="storage-info">
               <span>已用 {{ formatSize(storage.usage) }} / 配额 {{ formatSize(storage.quota) }}</span>
@@ -311,7 +331,8 @@ function navReady(id: SettingsSection) {
             <div class="about-row"><span>版本</span><b>v0.1.1</b></div>
             <div class="about-row"><span>前端</span><b>Vue 3 + Vite + TypeScript</b></div>
             <div class="about-row"><span>视频引擎</span><b>FFmpeg.wasm 0.12</b></div>
-            <div class="about-row"><span>存储</span><b>IndexedDB / 本地文件夹</b></div>
+            <div class="about-row"><span>配置库</span><b>文档\AI-Cut\app.db</b></div>
+            <div class="about-row"><span>工程文件</span><b>文档\AI-Cut</b></div>
           </section>
         </div>
       </main>
@@ -524,6 +545,16 @@ function navReady(id: SettingsSection) {
 .storage-bar-fill {
   height: 100%;
   background: var(--color-accent);
+}
+.path {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-all;
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  border-radius: 4px;
 }
 .storage-info {
   display: flex;

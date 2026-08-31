@@ -30,7 +30,16 @@ export default defineConfig(({ command }) => ({
     stripMachineEnvOnPack(),
     vue(),
     electron({
-      main: { entry: 'electron/main.ts' },
+      main: {
+        entry: 'electron/main.ts',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: ['node:sqlite']
+            }
+          }
+        }
+      },
       preload: {
         input: path.join(__dirname, 'electron/preload.ts'),
         vite: {

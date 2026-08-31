@@ -32,11 +32,16 @@ export function characterSheetPrompt(
     ? '附件参考图已展示该角色，必须严格按参考图复制身份特征，禁止另造一张脸或换装。'
     : ''
 
+  const whiteBg =
+    '背景必须是无缝纯白（#FFFFFF），四格同一块白底。禁止灰色/米色影棚、渐变、地面线、阴影底板、风景、室内陈设、路人或任何环境。'
+
   const layout = isPhotographicLook(resolved)
     ? `【16:9】「${subject.name}」角色四视图。画风必须是「${medium}」。
-干净浅色棚拍背景（无风景、无路人），从左到右正好四格、不要第五格：
+${whiteBg}
+从左到右正好四格、不要第五格：
 1. 面部特写  2. 全身正面  3. 全身侧面  4. 全身背面。`
     : `【16:9】「${subject.name}」角色四视图。绘制媒介必须是「${medium}」。
+${whiteBg}
 从左到右正好四格：面部特写、全身正面、全身侧面、全身背面。身份特征锁死。
 材料、笔触、质感必须符合「${medium}」。禁止用真人摄影棚或其他画风冒充。`
 
@@ -44,7 +49,26 @@ export function characterSheetPrompt(
 ${refHint}${subject.description}
 
 ${kindHint}。四格必须是同一角色、同一服装、同一配色。不要拼贴无关人物，不要画道具拆解图。
+${whiteBg}
 ${mediumLockText(resolved)}`
+}
+
+const WHITE_BG_HINT = /纯白背景|#FFFFFF|无缝纯白/
+const STUDIO_BG_HINT = /浅色棚拍|中性灰|影棚背景|干净浅色|浅色干净背景/
+
+/** 角色设计图一律纯白底；旧提示词里的浅色棚拍/灰影棚改掉。 */
+export function ensureCharacterSheetWhiteBackground(prompt: string): string {
+  const lock =
+    '背景必须是无缝纯白（#FFFFFF），四格同一块白底。禁止灰色/米色影棚、渐变、地面线、阴影底板、风景、室内陈设、路人或任何环境。'
+  let next = prompt
+    .replace(/干净浅色棚拍背景（无风景、无路人）/g, lock)
+    .replace(/中性灰影棚背景/g, '无缝纯白背景（#FFFFFF）')
+    .replace(/浅色棚拍背景/g, '无缝纯白背景（#FFFFFF）')
+    .replace(/浅色干净背景/g, '无缝纯白背景（#FFFFFF）')
+  if (!WHITE_BG_HINT.test(next) || STUDIO_BG_HINT.test(next)) {
+    next = `${next.trim()}\n${lock}`
+  }
+  return next.trim()
 }
 
 /** 这个角色身上有哪些东西：包、证件、平板、鞋、配饰，单独一张资产图 */
@@ -183,6 +207,66 @@ ${size}${blocking}${prop}${continuity}${performance}${dialogue}
 ${body}
 
 参考图必须用上：人物轮廓、脸、服装跟角色设计图；地点、光、地面跟场景图。禁止另造人物或地点。最终只输出这一张六格黑白故事看板。`
+}
+
+/** 普通创作关键帧：2×2 四宫格，正好 4 格，不能多。 */
+export function shotKeyframePrompt(
+  shot: Pick<
+    Shot,
+    | 'title'
+    | 'duration'
+    | 'cameraMovement'
+    | 'shotSize'
+    | 'blocking'
+    | 'continuity'
+    | 'visualPrompt'
+    | 'videoPrompt'
+    | 'imagePrompt'
+    | 'propFocus'
+    | 'voiceover'
+    | 'audioMode'
+  >,
+  look?: VisualLook,
+  options?: { aspectRatio?: string }
+): string {
+  const ar = options?.aspectRatio || '16:9'
+  const frame = ar === '9:16' ? '竖版 9:16' : ar === '1:1' ? '方形 1:1' : `横版 ${ar}`
+  const body = (shot.visualPrompt || shot.title).trim()
+  const size = shot.shotSize ? `景别：${shot.shotSize}。` : ''
+  const blocking = shot.blocking ? `站位：${shot.blocking}。` : ''
+  const prop = shot.propFocus && shot.propFocus !== '无' ? `关键道具：${shot.propFocus}。` : ''
+  const continuity = shot.continuity ? `动作承接：${shot.continuity}。` : ''
+  const performance = shot.videoPrompt?.trim() ? `动态表演：${shot.videoPrompt.trim()}。` : ''
+  const voiceMode = shot.audioMode ?? 'h3-dialogue'
+  const dialogue = shot.voiceover?.trim()
+    ? voiceMode === 'h3-voiceover' || voiceMode === 'tts' || voiceMode === 'none'
+      ? `这是画外音镜头。四格里所有出镜人物都必须闭嘴。口播只用来理解情绪，禁止画字幕或气泡：${shot.voiceover.trim()}。`
+      : (() => {
+          const speaker = shot.voiceover.trim().match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+          return `这是${speaker ? `「${speaker}」` : '当前说话者'}的对白镜头：开口前构图先落到说话者身上。对白发生在动作中段。画面里禁止对白文字或气泡：${shot.voiceover.trim()}。`
+        })()
+    : ''
+  const camera =
+    shot.cameraMovement === 'static'
+      ? '四格机位、焦段和构图完全固定，只让人物动作、表情和环境细节连续变化。'
+      : `用 4 个连续时间采样清楚表现同一次「${shot.cameraMovement}」运镜，幅度克制，禁止跳轴。`
+  const medium = look ? mediumLockText(look) : ''
+
+  return `【${ar} ${frame}四宫格关键帧】「${shot.title}」，总时长 ${shot.duration} 秒。
+生成一张 2 列 × 2 行、正好 4 格的彩色关键帧。只能有 4 个格子，禁止 5 格、6 格、8 格或更多，禁止少格留白。阅读顺序为左上 → 右上 → 左下 → 右下。整张图的画幅必须是 ${ar}。
+
+四格属于同一个连续镜头的四个时间点，不是四张无关海报，也不是空白格。
+四格依次表现：1. 建立与人物初态；2. 犹豫或动作准备；3. 核心事件（这一镜真正发生的事）；4. 反应与结束姿势。
+${camera}
+
+版式：格子大小整齐，细线分隔；不出现标题、编号、时间码、字幕、对白气泡、说明文字、logo 或水印。禁止空白格子、纯色空格或未画完的框。
+
+连续性：同一地点、同一时段、同一批人物、同一张脸、同一服装、同一道具。禁止另造人、换装、换景。
+${size}${blocking}${prop}${continuity}${performance}${dialogue}
+${body}
+
+参考图必须用上：脸、体型、服装跟人设图；地点、地面、光线跟场景图。最终只输出这一张正好 4 格的彩色四宫格关键帧。
+${medium}`.trim()
 }
 
 export function scenePlatePrompt(scene: Scene, style: VisualStyle, look?: VisualLook): string {

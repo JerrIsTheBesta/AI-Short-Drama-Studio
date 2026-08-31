@@ -175,7 +175,7 @@ function cameraBeatEn(
 }
 
 export function buildH3ImageSlots(
-  entries: Array<{ kind: 'character' | 'scene' | 'board' | 'extra'; name?: string }>
+  entries: Array<{ kind: 'character' | 'scene' | 'board' | 'extra' | 'keyframe'; name?: string }>
 ): H3ImageSlot[] {
   const map = h3NameMap(entries.filter((entry) => entry.kind === 'character').map((entry) => entry.name))
   let place = 0
@@ -201,6 +201,15 @@ export function buildH3ImageSlots(
         name,
         sourceName: entry.name,
         job: `${name} is the location in <Picture ${index}>. Lock only space, materials, weather and light. Use ONE unified place. Do not generate a four-panel grid.`
+      }
+    }
+    if (entry.kind === 'keyframe') {
+      return {
+        index,
+        kind: 'board' as const,
+        name: 'the four-panel keyframe',
+        sourceName: entry.name,
+        job: `<Picture ${index}> is a 2x2 four-panel keyframe for [Shot 1] (exactly 4 cells). Action order only. Never copy the grid, borders, or play four stills as a slideshow.`
       }
     }
     if (entry.kind === 'extra') {

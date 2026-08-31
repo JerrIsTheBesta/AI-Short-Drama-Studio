@@ -5,9 +5,11 @@
 import {
   characterPropSheetPrompt,
   characterSheetPrompt,
+  ensureCharacterSheetWhiteBackground,
   scenePlatePrompt,
   scenePropSheetPrompt,
-  shotBoardPrompt
+  shotBoardPrompt,
+  shotKeyframePrompt
 } from '@/services/ai/consistency'
 import { spokenTextOnly } from '@/services/ai/dialogue'
 import { buildH3ImageSlots, composeH3VideoPrompt } from '@/services/ai/h3Prompt'
@@ -23,10 +25,11 @@ import {
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { lookFromScript } from '@/utils/visualStyle'
 import { resolveH3VoiceMode } from '@/utils/shot'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export function defaultSubjectSheetPrompt(subject: Subject, project: Project): string {
   const look = lookFromScript(project.script)
-  return characterSheetPrompt(subject, look.style, false, look)
+  return ensureCharacterSheetWhiteBackground(characterSheetPrompt(subject, look.style, false, look))
 }
 
 export function defaultScenePlatePrompt(scene: Scene, project: Project): string {
@@ -54,6 +57,10 @@ export function defaultBoardPrompt(shot: Shot, project: Project): string {
 }
 
 export function defaultShotImagePrompt(shot: Shot, project: Project): string {
+  if (!videoRequiresStoryboard(project)) {
+    const look = lookFromScript(project.script)
+    return shotKeyframePrompt(shot, look, { aspectRatio: project.settings.aspectRatio })
+  }
   return composeShotImagePrompt(shot, project, (shot.visualPrompt || shot.title).trim())
 }
 
@@ -123,7 +130,8 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
 }
 
 export function subjectSendPrompt(subject: Subject, project: Project): string {
-  return subject.sheetPrompt?.trim() || defaultSubjectSheetPrompt(subject, project)
+  const raw = subject.sheetPrompt?.trim() || defaultSubjectSheetPrompt(subject, project)
+  return ensureCharacterSheetWhiteBackground(raw)
 }
 
 export function sceneSendPrompt(scene: Scene, project: Project): string {

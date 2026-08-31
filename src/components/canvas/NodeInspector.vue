@@ -5,6 +5,7 @@ import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settin
 import { runCanvasNode, runScriptNode, rewriteShotPerformance } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
@@ -196,7 +197,15 @@ const actionLabel = computed(() => {
   if (t === 'sceneProps') return again ? '重新生成关键道具图' : '生成关键道具图'
   if (t === 'scene') return again ? '重新生成锚点图' : '生成锚点图'
   if (t === 'shotBoard') return again ? '重新生成故事看板' : '生成故事看板'
-  if (t === 'shotImage') return again ? '重新生成配图' : '生成配图'
+  if (t === 'shotImage') {
+    return again
+      ? videoRequiresStoryboard(project.current)
+        ? '重新生成配图'
+        : '重新生成四宫格'
+      : videoRequiresStoryboard(project.current)
+        ? '生成配图'
+        : '生成四宫格'
+  }
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
   if (t === 'audio') {
     if (!shot.value || !needsExternalTts(shot.value, project.current)) return '无需独立配音'
@@ -308,7 +317,7 @@ const kindLabel = computed(() => {
   if (t === 'sceneProps') return '场景 · 关键道具图'
   if (t === 'scene') return '场景 · 锚点图'
   if (t === 'shotBoard') return '分镜 · 故事看板'
-  if (t === 'shotImage') return '分镜 · 配图'
+  if (t === 'shotImage') return videoRequiresStoryboard(project.current) ? '分镜 · 配图' : '分镜 · 四宫格关键帧'
   if (t === 'shotVideo') {
     const d = shot.value?.duration
     return d ? `分镜 · 视频 · ${d}s` : '分镜 · 视频'
@@ -797,7 +806,7 @@ async function resetVideoPrompt() {
         <textarea
           rows="16"
           :value="subject.sheetPrompt ?? ''"
-          placeholder="外貌、服装、四视图要求和画风。改完点重新生成。"
+          placeholder="纯白背景四视图。外貌、服装、画风。改完点重新生成。"
           @input="project.updateSubject(subject.id, { sheetPrompt: ($event.target as HTMLTextAreaElement).value })"
         />
       </template>
@@ -880,7 +889,7 @@ async function resetVideoPrompt() {
         <textarea
           rows="16"
           :value="shot.imagePrompt ?? ''"
-          placeholder="这一镜要画什么。只影响配图，不影响视频提示词。"
+          placeholder="2×2 四宫格，正好四格。左上到右下是这一镜的事件。"
           @input="project.updateShot(shot.id, { imagePrompt: ($event.target as HTMLTextAreaElement).value })"
         />
       </template>
@@ -920,7 +929,7 @@ async function resetVideoPrompt() {
           <option value="tilt">移</option>
           <option value="orbit">环绕</option>
         </select>
-        <p v-if="!isH3Fl2va && !shot.boardAssetId" class="err">这一镜还没有六格故事看板，先生成看板再出视频。</p>
+        <p v-if="videoRequiresStoryboard(project.current) && !isH3Fl2va && !shot.boardAssetId" class="err">这一镜还没有六格故事看板，先生成看板再出视频。</p>
         <p v-else-if="isH3Fl2va && !shot.lastFrameAssetId" class="err">首尾帧模式需要尾帧。请在下方选择尾帧。</p>
       </template>
 

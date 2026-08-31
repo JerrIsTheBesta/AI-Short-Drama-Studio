@@ -2,6 +2,7 @@ import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
 import { sceneHasKeyProps } from '@/utils/consistency'
+import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export interface PipelineStep {
   id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'videos' | 'audio'
@@ -95,11 +96,19 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-scenes'
     }
   }
-  if (p.shots.some((s) => !s.boardAssetId)) {
+  if (videoRequiresStoryboard(p) && p.shots.some((s) => !s.boardAssetId)) {
     return {
       id: 'panels',
       label: '故事看板图',
       tools: [{ tool: 'generate_all_boards' }],
+      focusNodeId: 'group-shots'
+    }
+  }
+  if (!videoRequiresStoryboard(p) && p.shots.some((s) => !s.imageAssetId)) {
+    return {
+      id: 'images',
+      label: '分镜关键帧',
+      tools: [{ tool: 'generate_all_images' }],
       focusNodeId: 'group-shots'
     }
   }
@@ -111,7 +120,7 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-shots'
     }
   }
-  if (p.shots.some((s) => !s.imageAssetId)) {
+  if (videoRequiresStoryboard(p) && p.shots.some((s) => !s.imageAssetId)) {
     return {
       id: 'images',
       label: '分镜配图',
@@ -223,7 +232,7 @@ export function clarifyMessage(p: Project | null | undefined): string {
   if (n) {
     return `下一步是「${n.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
   }
-  return '人设、场景宫格、故事看板和视频目前都齐了。可以点「合成视频」出结果；要改某一镜可以说「重新生成第1镜看板」。'
+  return '人设、场景和视频目前都齐了。可以点「合成视频」出结果。'
 }
 
 export function continueQuestion(next: PipelineStep | null, justDid: string) {
@@ -246,8 +255,8 @@ export const TOOL_LABEL: Record<string, string> = {
   generate_all_scenes: '补齐场景锚点图',
   generate_shot_board: '生成故事看板',
   generate_all_boards: '补齐故事看板',
-  generate_shot_image: '生成分镜配图',
-  generate_all_images: '补齐分镜配图',
+  generate_shot_image: '生成关键帧',
+  generate_all_images: '补齐关键帧',
   generate_video: '生成分镜视频',
   generate_all_videos: '补齐分镜视频',
   generate_audio: '生成口播',

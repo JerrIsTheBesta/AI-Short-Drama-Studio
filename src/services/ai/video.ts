@@ -1049,7 +1049,7 @@ export async function generateVideo(
         throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
       }
     } else if (!input.imageBlob) {
-      throw new Error('[video] 真实模式需要角色设计图、场景图和故事看板作为参考输入')
+      throw new Error('[video] 真实模式需要至少一张参考图')
     }
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
     if (input.videoModel === 'wan-prime') {
