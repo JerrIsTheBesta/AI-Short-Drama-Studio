@@ -2,14 +2,14 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { exportVideo, parseSRT, buildCuesFromClips } from '@/services/ffmpeg'
+import { exportVideo, parseSRT, buildCuesFromClips, probeMedia, trimTimelineBySpeech } from '@/services/ffmpeg'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt } from '@/services/ai'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
-import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { effectiveShotAudioMode, isDigitalHumanSpeechProject, needsExternalTts } from '@/utils/shot'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -17,9 +17,14 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 
 const format = ref<'mp4' | 'webm'>('mp4')
+const isDigitalHuman = computed(() => isDigitalHumanSpeechProject(project.current))
 const burnCaptions = computed({
   get: () => project.current?.settings.burnCaptions !== false,
   set: (v: boolean) => project.setSettings({ burnCaptions: v })
+})
+const captionHighlight = computed({
+  get: () => project.current?.settings.captionHighlight === true,
+  set: (v: boolean) => project.setSettings({ captionHighlight: v })
 })
 const bgmAssetId = ref<string>('')
 const bgmPrompt = ref('')
@@ -40,6 +45,8 @@ const progress = ref(0)
 const progressMsg = ref('')
 const resultUrl = ref<string | null>(null)
 const resultSize = ref(0)
+
+const isSpeech = computed(() => project.current?.pipelineMode === 'smart-speech')
 
 const audioAssets = computed(() =>
   assets.all.filter((a) => a.kind === 'audio' && !String(a.filename).startsWith('vo_'))
@@ -146,36 +153,6 @@ async function doExport() {
   resultUrl.value = null
 
   try {
-    // 构造 voiceover map
-    const voiceoverMap = new Map<string, string>()
-    for (const clip of timeline.value) {
-      if (!clip.enabled) continue
-      const shot = shots.value.find((s) => s.id === clip.shotId)
-      voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
-    }
-
-    const captionCues = (() => {
-      const srt = project.current!.captionSrt?.trim()
-      if (srt) return parseSRT(srt).filter((c) => c.text.trim())
-      return buildCuesFromClips(
-        timeline.value
-          .filter((c) => c.enabled)
-          .map((c) => {
-            const shot = shots.value.find((s) => s.id === c.shotId)
-            return {
-              startTime: c.startTime,
-              duration: c.duration,
-              text: shot?.voiceover ?? ''
-            }
-          })
-      ).filter((c) => c.text.trim())
-    })()
-
-    if (burnCaptions.value && captionCues.length === 0) {
-      toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕视频。')
-    }
-
-    // 构造 mediaMap
     const mediaMap = new Map<string, { blob: Blob; kind: 'video' | 'image' }>()
     for (const clip of timeline.value) {
       if (mediaMap.has(clip.shotId)) continue
@@ -197,15 +174,62 @@ async function doExport() {
       return
     }
 
-    if (!bgmAssetId.value) {
+    let workingTimeline = timeline.value.filter((c) => c.enabled)
+    if (isDigitalHuman.value && project.current.speechWorkflow?.options.removePauses !== false) {
+      progressMsg.value = '正在切掉句首句尾气口...'
+      workingTimeline = await trimTimelineBySpeech(
+        workingTimeline,
+        async (shotId) => mediaMap.get(shotId)?.blob
+      )
+      project.setTimeline(workingTimeline)
+      for (const clip of workingTimeline) {
+        const shot = shots.value.find((s) => s.id === clip.shotId)
+        if (shot && Math.abs((shot.duration || 0) - clip.duration) > 0.05) {
+          project.updateShot(shot.id, { duration: clip.duration })
+        }
+      }
+    }
+
+    const voiceoverMap = new Map<string, string>()
+    for (const clip of workingTimeline) {
+      const shot = shots.value.find((s) => s.id === clip.shotId)
+      voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
+    }
+
+    const captionCues = (() => {
+      if (isDigitalHuman.value) {
+        return buildCuesFromClips(
+          workingTimeline.map((c) => ({
+            startTime: c.startTime,
+            duration: c.duration,
+            text: shots.value.find((s) => s.id === c.shotId)?.voiceover ?? ''
+          }))
+        ).filter((c) => c.text.trim())
+      }
+      const srt = project.current!.captionSrt?.trim()
+      if (srt) return parseSRT(srt).filter((c) => c.text.trim())
+      return buildCuesFromClips(
+        workingTimeline.map((c) => ({
+          startTime: c.startTime,
+          duration: c.duration,
+          text: shots.value.find((s) => s.id === c.shotId)?.voiceover ?? ''
+        }))
+      ).filter((c) => c.text.trim())
+    })()
+
+    if (burnCaptions.value && captionCues.length === 0) {
+      toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕视频。')
+    }
+
+    if (!isSpeech.value && !bgmAssetId.value) {
       progressMsg.value = '生成整片背景音乐...'
       await generateBgm()
     }
 
     let bgmBlob: Blob | undefined
-    if (bgmAssetId.value) {
+    if (!isSpeech.value && bgmAssetId.value) {
       bgmBlob = await assets.getBlob(bgmAssetId.value)
-    } else {
+    } else if (!isSpeech.value && !bgmAssetId.value) {
       toast.warn(
         keepAmbientAudio.value
           ? '没有配乐：视频会保留环境音并叠口播（若有）。'
@@ -213,21 +237,23 @@ async function doExport() {
       )
     }
 
+    const digitalHuman = isDigitalHuman.value
     const voiceoverAudioMap = new Map<string, Blob>()
     const sourceAudioMap = new Map<string, boolean>()
     let missingVo = 0
-    for (const clip of timeline.value) {
+    for (const clip of workingTimeline) {
       if (!clip.enabled || voiceoverAudioMap.has(clip.shotId)) continue
       const shot = shots.value.find((s) => s.id === clip.shotId)
       if (!shot) continue
       const audioMode = effectiveShotAudioMode(shot)
       sourceAudioMap.set(
         clip.shotId,
-        audioMode === 'h3-dialogue' || audioMode === 'h3-voiceover'
-          ? true
-          : keepAmbientAudio.value
+        isSpeech.value ||
+          audioMode === 'h3-dialogue' ||
+          audioMode === 'h3-voiceover' ||
+          keepAmbientAudio.value
       )
-      if (!needsExternalTts(shot)) continue
+      if (digitalHuman || !needsExternalTts(shot, project.current)) continue
       if (!shot.audioAssetId) {
         missingVo++
         continue
@@ -235,16 +261,37 @@ async function doExport() {
       const blob = await assets.getBlob(shot.audioAssetId)
       if (blob) voiceoverAudioMap.set(clip.shotId, blob)
     }
-    if (missingVo > 0) {
+    if (missingVo > 0 && !digitalHuman) {
       toast.warn(`${missingVo} 个分镜有口播文案但还没配音，视频这些段会没有人声。可回「字幕」页生成口播。`)
     }
 
+    let width = project.current.settings.width
+    let height = project.current.settings.height
+    if (isSpeech.value) {
+      for (const media of mediaMap.values()) {
+        if (media.kind !== 'video') continue
+        const info = await probeMedia(media.blob).catch(() => ({ width: 0, height: 0 }))
+        if ((info.width || 0) >= 16 && (info.height || 0) >= 16) {
+          width = info.width % 2 === 0 ? info.width : info.width - 1
+          height = info.height % 2 === 0 ? info.height : info.height - 1
+          break
+        }
+      }
+    }
+    const exportTimeline = isSpeech.value
+      ? workingTimeline.map((clip) => ({
+          ...clip,
+          transitionIn: 'none' as const,
+          transitionDuration: 0
+        }))
+      : workingTimeline
+
     const blob = await exportVideo({
-      timeline: timeline.value,
+      timeline: exportTimeline,
       mediaMap,
       voiceoverMap,
-      width: project.current.settings.width,
-      height: project.current.settings.height,
+      width,
+      height,
       fps: project.current.settings.fps,
       captionStyle: project.current.settings.captionStyle,
       burnCaptions: burnCaptions.value,
@@ -255,8 +302,8 @@ async function doExport() {
       captionHighlightScale: project.current.settings.captionHighlightScale,
       bgm: bgmBlob,
       bgmVolume: project.current.settings.bgmVolume,
-      originalVolume: ambientVolume.value,
-      keepAmbientAudio: keepAmbientAudio.value,
+      originalVolume: isSpeech.value ? 1 : ambientVolume.value,
+      keepAmbientAudio: isSpeech.value ? true : keepAmbientAudio.value,
       sourceAudioMap,
       voiceoverAudioMap,
       format: format.value,
@@ -319,7 +366,8 @@ const segmentSummary = computed(() => {
     <header class="page-head">
       <div>
         <h1>🚀 导出视频</h1>
-        <p>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠配乐和字幕</p>
+        <p v-if="isDigitalHuman">各段视频已经带上传音频。导出时自动切掉没声音的气口再拼接，并烧录字幕和划重点，不再另配一层人声。</p>
+        <p v-else>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠配乐和字幕</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/caption')">← 上一步</GradientButton>
@@ -373,9 +421,13 @@ const segmentSummary = computed(() => {
               <input v-model="burnCaptions" type="checkbox" />
               <span>将字幕烧录到视频上（无法再编辑）</span>
             </label>
+            <label class="check">
+              <input v-model="captionHighlight" type="checkbox" :disabled="!burnCaptions" />
+              <span>自动划重点</span>
+            </label>
           </div>
 
-          <div class="field">
+          <div v-if="!isSpeech" class="field">
             <span>其他分镜原声（环境音效）</span>
             <div class="format-grid">
               <button
@@ -415,7 +467,7 @@ const segmentSummary = computed(() => {
             </p>
           </div>
 
-          <div class="field">
+          <div v-if="!isSpeech" class="field">
             <span>背景音乐</span>
             <p class="hint" style="margin-bottom: 8px;">
               {{
@@ -531,7 +583,7 @@ const segmentSummary = computed(() => {
           <div class="kv">
             <span>字幕</span>
             <Tag :type="burnCaptions ? 'success' : 'default'" size="sm">
-              {{ burnCaptions ? '烧录' : '不烧录' }}
+              {{ burnCaptions ? (project.current?.settings.captionHighlight ? '烧录 + 划重点' : '烧录') : '不烧录' }}
             </Tag>
           </div>
         </GlassCard>

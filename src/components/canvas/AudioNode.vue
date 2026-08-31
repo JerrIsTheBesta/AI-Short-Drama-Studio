@@ -44,7 +44,7 @@ const nodeMeta = computed(() => project.current?.canvas?.nodes.find((n) => n.id 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
 const generating = computed(() => isNodeRunning(props.id))
 const mode = computed(() => (shot.value ? effectiveShotAudioMode(shot.value) : 'none'))
-const canTts = computed(() => Boolean(shot.value && needsExternalTts(shot.value)))
+const canTts = computed(() => Boolean(shot.value && needsExternalTts(shot.value, project.current)))
 const gateBlocked = computed(() => needsPlayReview(project.current))
 const title = computed(() =>
   shot.value ? `${shot.value.index + 1}. ${shot.value.title}` : props.data.label || '口播'

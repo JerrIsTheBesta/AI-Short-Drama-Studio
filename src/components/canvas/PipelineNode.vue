@@ -260,7 +260,7 @@ const genLabel = computed(() => {
   if (type.value === 'shotImage') return again ? '重新生成' : '生成配图'
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
   if (type.value === 'audio') {
-    if (!shot.value || !needsExternalTts(shot.value)) return ''
+    if (!shot.value || !needsExternalTts(shot.value, project.current)) return ''
     return again ? '重新生成' : '生成口播'
   }
   if (type.value === 'export' || type.value === 'final') {

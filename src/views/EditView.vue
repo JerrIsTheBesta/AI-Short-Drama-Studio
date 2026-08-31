@@ -10,6 +10,7 @@ import Tag from '@/components/common/Tag.vue'
 import TimelineView from '@/components/timeline/TimelineView.vue'
 import type { Shot, TimelineClip, TransitionType } from '@/types'
 import { buildTimelineFromShots } from '@/utils/timeline'
+import { isDigitalHumanSpeechProject } from '@/utils/shot'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -43,6 +44,7 @@ const selectedShot = computed(() => {
   if (!selectedClip.value) return null
   return shots.value.find((s) => s.id === selectedClip.value!.shotId) ?? null
 })
+const isDigitalHuman = computed(() => isDigitalHumanSpeechProject(project.current))
 
 function autoBuildTimeline() {
   if (!project.current) return
@@ -181,10 +183,11 @@ function next() {
     <header class="page-head">
       <div>
         <h1>✂️ 剪辑时间线</h1>
-        <p>把分镜视频片段按顺序拼接，可调时长、加转场、变速</p>
+        <p v-if="isDigitalHuman">各段视频已经带声音，按顺序拼接即可。下一步去确认字幕和划重点，不必再配音。</p>
+        <p v-else>把分镜视频片段按顺序拼接，可调时长、加转场、变速</p>
       </div>
       <div class="head-actions">
-        <GradientButton type="ghost" @click="router.push('/videos')">← 上一步</GradientButton>
+        <GradientButton type="ghost" @click="router.push(isDigitalHuman ? '/smart-speech' : '/videos')">← 上一步</GradientButton>
         <GradientButton
           type="secondary"
           icon="🔄"

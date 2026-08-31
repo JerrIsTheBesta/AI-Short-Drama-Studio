@@ -107,7 +107,7 @@ export const useAssetsStore = defineStore('assets', () => {
       asset = { ...base, kind: 'audio', duration: info.duration ?? 0 }
     }
     await saveAsset(asset, typed, thumbBlob)
-    await refresh()
+    all.value = [asset, ...all.value.filter((item) => item.id !== asset.id)]
     return asset
   }
 

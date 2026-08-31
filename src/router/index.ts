@@ -93,9 +93,7 @@ router.beforeEach(async (to) => {
   const project = useProjectStore()
   const assets = useAssetsStore()
   await project.ensureLoaded()
-  if (assets.all.length === 0) {
-    await assets.refresh()
-  }
+  await assets.refresh()
   project.startAutoSave()
   if (to.name !== 'home' && to.name !== 'settings') {
     if (!project.current && project.allProjects.length > 0) {

@@ -10,7 +10,7 @@ import Tag from '@/components/common/Tag.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import type { CaptionStyle, Shot, ShotAudioMode } from '@/types'
 import { ensureTimelineFromShots } from '@/utils/timeline'
-import { effectiveShotAudioMode } from '@/utils/shot'
+import { effectiveShotAudioMode, isDigitalHumanSpeechProject } from '@/utils/shot'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -23,13 +23,15 @@ const generating = ref<Set<string>>(new Set())
 const generatingAll = ref(false)
 const showSrt = ref(false)
 
+const isDigitalHuman = computed(() => isDigitalHumanSpeechProject(project.current))
+
 onMounted(async () => {
   if (project.current?.captionSrt?.trim()) {
     srtText.value = project.current.captionSrt
   } else {
     buildFromTimeline()
   }
-  await loadAudios()
+  if (!isDigitalHuman.value) await loadAudios()
   nextTick(() => drawPreview())
 })
 
@@ -192,6 +194,10 @@ async function saveVoiceover(shot: Shot, blob: Blob, mimeType: string, text: str
 }
 
 async function generateLine(shotId: string) {
+  if (isDigitalHuman.value) {
+    toast.info('数字人口播视频已经带上传音频，不需要再配音')
+    return
+  }
   const shot = shots.value.find((s) => s.id === shotId)
   if (!shot) return
   const text = shot.voiceover.trim()
@@ -217,6 +223,10 @@ async function generateLine(shotId: string) {
 }
 
 async function generateAllVoices() {
+  if (isDigitalHuman.value) {
+    toast.info('数字人口播视频已经带上传音频，不需要再配音')
+    return
+  }
   const todo = lines.value.filter((l) => l.text.trim())
   if (todo.length === 0) {
     toast.warn('没有台词可以配音')
@@ -351,7 +361,7 @@ function next() {
     if (built) project.setTimeline(clips)
   }
   project.setCaptionSrt(srtText.value)
-  if (pendingVoice.value > 0) {
+  if (!isDigitalHuman.value && pendingVoice.value > 0) {
     toast.warn(`${pendingVoice.value} 段台词还没配音，导出时这些段会没有人声`)
   }
   router.push('/export')
@@ -363,20 +373,24 @@ function next() {
     <header class="page-head">
       <div>
         <h1>💬 字幕与文字</h1>
-        <p>按每段台词配音，并调整字幕样式。导出时人声叠到对应片段上。</p>
+        <p v-if="isDigitalHuman">各段视频已经带上传音频，不需要再配音。这里改字幕文案、烧录和自动划重点。</p>
+        <p v-else>按每段台词配音，并调整字幕样式。导出时人声叠到对应片段上。</p>
       </div>
       <div class="head-actions">
-        <label class="voice-pick">
-          <TtsModelSelect />
-        </label>
-        <label class="voice-pick">
-          <span>音色</span>
-          <select v-model="ttsVoice" class="input" style="width: auto; min-width: 160px;">
-            <option v-for="v in TTS_VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
-          </select>
-        </label>
+        <template v-if="!isDigitalHuman">
+          <label class="voice-pick">
+            <TtsModelSelect />
+          </label>
+          <label class="voice-pick">
+            <span>音色</span>
+            <select v-model="ttsVoice" class="input" style="width: auto; min-width: 160px;">
+              <option v-for="v in TTS_VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
+            </select>
+          </label>
+        </template>
         <GradientButton type="ghost" @click="router.push('/edit')">← 上一步</GradientButton>
         <GradientButton
+          v-if="!isDigitalHuman"
           icon="🎙"
           :loading="generatingAll"
           :disabled="generatingAll || lines.every((l) => !l.text.trim())"
@@ -390,7 +404,35 @@ function next() {
 
     <div class="layout">
       <main class="left">
-        <GlassCard padding="md">
+        <GlassCard v-if="isDigitalHuman" padding="md">
+          <div class="card-head">
+            <h3>字幕文案</h3>
+            <div class="head-tools">
+              <button class="mini-btn" @click="buildFromTimeline">从分镜同步字幕</button>
+            </div>
+          </div>
+          <p class="cue-hint">声音已经在视频里。下面只改烧到画面上的字幕，不会再生成配音。</p>
+          <p v-if="lines.length === 0" class="cue-hint">还没有分镜或时间线。</p>
+          <div v-else class="line-list">
+            <div v-for="line in lines" :key="line.key" class="line-card">
+              <div class="line-head">
+                <div class="shot-num">{{ line.index }}</div>
+                <div class="line-meta">
+                  <div class="line-title">{{ line.title }}</div>
+                  <div class="line-time">{{ formatClock(line.start) }} · {{ line.duration }}s</div>
+                </div>
+              </div>
+              <textarea
+                class="line-text"
+                rows="3"
+                :value="line.text"
+                placeholder="这一段要烧到画面上的字幕..."
+                @input="updateLineText(line.shotId, ($event.target as HTMLTextAreaElement).value)"
+              />
+            </div>
+          </div>
+        </GlassCard>
+        <GlassCard v-else padding="md">
           <div class="card-head">
             <h3>🎙 台词配音</h3>
             <div class="head-tools">

@@ -241,11 +241,11 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       position: cell(i, 0, AUDIO_NODE_H),
       data: {
         shotId: shot.id,
-        label: needsExternalTts(shot) ? '后期 TTS' : effectiveShotAudioMode(shot).startsWith('h3-') ? 'H3 人声' : '无口播'
+        label: needsExternalTts(shot, project) ? '后期 TTS' : effectiveShotAudioMode(shot).startsWith('h3-') ? 'H3 人声' : '无口播'
       },
       status: persistStatus(
         prev.get(audId)?.status,
-        Boolean(shot.audioAssetId) || !needsExternalTts(shot)
+        Boolean(shot.audioAssetId) || !needsExternalTts(shot, project)
       ),
       parentGroupId: 'group-audio'
     })

@@ -102,7 +102,7 @@ export function buildProjectContext(userText: string) {
         missingBoards: p.shots.filter((s) => !s.boardAssetId).length,
         missingImages: 0,
         missingVideos: p.shots.filter((s) => !s.videoAssetId).length,
-        missingAudio: p.shots.filter((s) => needsExternalTts(s) && !s.audioAssetId).length
+        missingAudio: p.shots.filter((s) => needsExternalTts(s, p) && !s.audioAssetId).length
       }
     },
     agent: {

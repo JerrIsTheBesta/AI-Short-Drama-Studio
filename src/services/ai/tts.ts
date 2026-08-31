@@ -63,14 +63,54 @@ const SPELL_ACRONYMS = new Set([
   'OK'
 ])
 
+const DIGIT_CN = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+const DIGIT_YAO = ['零', '幺', '二', '三', '四', '五', '六', '七', '八', '九']
+
+function spellDigits(digits: string, yao = false): string {
+  const table = yao ? DIGIT_YAO : DIGIT_CN
+  return [...digits].map((ch) => (/[0-9]/.test(ch) ? table[Number(ch)] : '')).join('')
+}
+
 /**
- * 送给 TTS 的文本预处理：
+ * 平台号 / 客服号 / 活动日：必须按位读。
+ * 否则 1688 会被念成「一千六百八十八」或「一千六百88」。
+ */
+const SPELLED_NUMBER_CODES: Array<{ pattern: RegExp; spoken?: string; yao?: boolean }> = [
+  { pattern: /1688/g, spoken: '一六八八' },
+  { pattern: /12306/g, yao: true },
+  { pattern: /10086/g, yao: true },
+  { pattern: /10010/g, yao: true },
+  { pattern: /10000(?![元万亿])/g, yao: true },
+  { pattern: /95588/g, yao: true },
+  { pattern: /95533/g, yao: true },
+  { pattern: /95566/g, yao: true },
+  { pattern: /(?<!\d)618(?!\d)/g, spoken: '六一八' },
+  { pattern: /(?<!\d)1111(?!\d)/g, spoken: '双十一' },
+  { pattern: /(?<!\d)1212(?!\d)/g, spoken: '双十二' },
+  { pattern: /58(?=同城)/g, spoken: '五八' },
+  { pattern: /(?<!\d)(?:110|119|120|122|114)(?!\d)/g, yao: true }
+]
+
+function normalizeSpokenNumbers(text: string): string {
+  let next = text
+  for (const item of SPELLED_NUMBER_CODES) {
+    next = next.replace(item.pattern, (match) => item.spoken || spellDigits(match.replace(/\D/g, ''), item.yao))
+  }
+  next = next.replace(/(?<!\d)([48]00)[- ]?(\d{3,4})[- ]?(\d{3,4})(?!\d)/g, (_all, a, b, c) =>
+    `${spellDigits(a, true)}，${spellDigits(b, true)}，${spellDigits(c, true)}`
+  )
+  return next
+}
+
+/**
+ * 送给 TTS / 口播模型的文本预处理，字幕原文不改，只影响发音。
  * 中文模型遇到 POLO / NIKE 这种全大写，会当成缩写念成 P-O-L-O。
  * 有元音、长度≥3 的全大写词改成首字母大写（Polo），按单词读。
- * 字幕原文不改，只影响发音。
+ * 1688、12306 这类平台号按位读，避免念成一千六百八十八。
  */
 export function normalizeForSpeech(text: string): string {
-  return text.replace(/[A-Za-z][A-Za-z0-9]*/g, (word) => {
+  const branded = normalizeSpokenNumbers(text)
+  return branded.replace(/[A-Za-z][A-Za-z0-9]*/g, (word) => {
     if (!/^[A-Z0-9]+$/.test(word)) return word
     if (SPELL_ACRONYMS.has(word)) return word
     if (word.length <= 2) return word

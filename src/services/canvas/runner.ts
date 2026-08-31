@@ -25,9 +25,10 @@ import {
   DIGITAL_HUMAN_SCENE_NAME,
   DIGITAL_HUMAN_SCENE_DESCRIPTION,
   DIGITAL_HUMAN_SCENE_ANCHOR,
-  DIGITAL_HUMAN_IMAGE_ASSIGNMENT
+  DIGITAL_HUMAN_IMAGE_ASSIGNMENT,
+  cloneVoiceFromSample,
+  synthesizeClonedSpeech
 } from '@/services/ai'
-import { replaceVideoAudio } from '@/services/ffmpeg'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
 import { collectShotRefIds, collectShotBoardRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
@@ -61,6 +62,7 @@ import { mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
+import { toDigitalHumanWav } from '@/services/ffmpeg'
 import type { CanvasNode, ID, Scene, Shot, Subject, VideoGenModel } from '@/types'
 import { normalizeH3GenMode, normalizeVideoGenModel } from '@/types'
 import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
@@ -557,11 +559,38 @@ async function regenerateDigitalHumanShot(
   }
   const spoken = spokenTextOnly(shot.voiceover || '')
   if (!spoken) throw new Error('该镜头没有口播原文')
-  if (!shot.audioAssetId) {
-    throw new Error('该镜头缺少克隆语音，已阻止生成，避免得到错误声音的视频。')
+  let cloned = flow.clonedVoiceId
+    ? { voiceId: flow.clonedVoiceId, model: flow.clonedVoiceModel || 'qwen3-tts-vc-2026-01-22' }
+    : null
+  if (!cloned) {
+    const sampleId = flow.voiceSampleAssetId || flow.audioAssetId
+    const sampleBlob = sampleId ? await assets.getBlob(sampleId) : undefined
+    if (!sampleBlob) throw new Error('缺少声音样本，无法克隆音色后再按台词合成')
+    onProgress?.('正在用上传音频克隆音色…')
+    cloned = await cloneVoiceFromSample(sampleBlob, `aicut${p.id.replace(/[^a-z0-9]/gi, '').slice(-8)}`, signal)
+    p.speechWorkflow = {
+      ...flow,
+      clonedVoiceId: cloned.voiceId,
+      clonedVoiceModel: cloned.model,
+      updatedAt: Date.now()
+    }
+    await project.save()
   }
-  const clonedSpeech = await assets.getBlob(shot.audioAssetId)
-  if (!clonedSpeech) throw new Error('该镜头的克隆语音文件读取失败')
+  onProgress?.('正在用克隆音色按台词合成人声…')
+  const rawSpeech = await synthesizeClonedSpeech(spoken, cloned.voiceId, cloned.model, signal)
+  const speechBlob = (await toDigitalHumanWav(rawSpeech, onProgress)).blob
+  const speechAsset = await assets.add(speechBlob, 'audio', 'ai-generated', {
+    filename: `口播_${String(shot.index + 1).padStart(2, '0')}_${Date.now().toString(36)}.wav`,
+    prompt: spoken,
+    projectId: p.id,
+    shotId: shot.id
+  })
+  project.assignShotAudio(shot.id, speechAsset.id)
+  const speechIds = [...(flow.generatedSpeechAssetIds || [])]
+  speechIds[shot.index] = speechAsset.id
+  if (p.speechWorkflow) {
+    p.speechWorkflow = { ...p.speechWorkflow, generatedSpeechAssetIds: speechIds, updatedAt: Date.now() }
+  }
 
   if (shot.imageAssetId !== referenceId) {
     project.updateShot(shot.id, { imageAssetId: referenceId })
@@ -584,11 +613,14 @@ async function regenerateDigitalHumanShot(
       sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
       shotTitle: 'Locked single-person talking head',
       imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
-      duration: Math.min(15, Math.max(3, Math.ceil(shot.duration))),
+      duration: Math.min(15, Math.max(5, Math.ceil(shot.duration))),
       width: p.settings.width,
       height: p.settings.height,
       aspectRatio: p.settings.aspectRatio,
       cameraMovement: 'static',
+      audioBlob: speechBlob,
+      audioSync: true,
+      promptAsIs: true,
       mode: 'I2VA',
       signal,
       resumeTaskId: shot.videoTaskId,
@@ -600,11 +632,9 @@ async function regenerateDigitalHumanShot(
     onProgress
   )
   ensureNotCancelled(signal)
-  onProgress?.('重新写入本镜克隆语音…')
-  const finalBlob = await replaceVideoAudio(result.blob, clonedSpeech, onProgress)
-  const quality = await reviewVideoQuality(finalBlob, result.prompt, signal)
+  const quality = await reviewVideoQuality(result.blob, result.prompt, signal)
   if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
-  const asset = await assets.add(finalBlob, 'video', 'ai-generated', {
+  const asset = await assets.add(result.blob, 'video', 'ai-generated', {
     filename: `digital_human_${shot.index + 1}_${Date.now().toString(36)}.mp4`,
     prompt: result.prompt,
     projectId: p.id,
@@ -877,7 +907,7 @@ export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) =
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  if (!needsExternalTts(shot)) throw new Error('该分镜未选择后期 TTS，不需要生成独立配音')
+  if (!needsExternalTts(shot, project.current)) throw new Error('该分镜未选择后期 TTS，不需要生成独立配音')
   const text = spokenTextOnly(shot.voiceover || '')
   if (!text) throw new Error('该分镜没有口播文案')
   onProgress?.('合成口播...')
@@ -1703,6 +1733,6 @@ export async function generateMissingVideos(onProgress?: (msg: string) => void, 
 export async function generateMissingAudio(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
-  const ids = p.shots.filter((s) => needsExternalTts(s) && !s.audioAssetId).map((s) => `audio:${s.id}`)
+  const ids = p.shots.filter((s) => needsExternalTts(s, p) && !s.audioAssetId).map((s) => `audio:${s.id}`)
   await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }

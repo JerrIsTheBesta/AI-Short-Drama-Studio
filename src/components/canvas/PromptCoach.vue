@@ -23,7 +23,7 @@ const feed = ref<Array<{ id: string; role: 'user' | 'assistant'; content: string
     id: 'welcome',
     role: 'assistant',
     content:
-      '选中画布上的图片或视频节点。我只帮你把这个节点的提示词写得更有画面，不会改别的节点。有剧本或剧情备注就贴到下面，扩写时会对照。'
+      '选中画布上的图片或视频节点。我只加厚当前提示词的画面，标题和分段格式一律不动。有剧本或剧情备注就贴到下面，扩写时会对照。'
   }
 ])
 
@@ -57,9 +57,9 @@ const scriptText = computed({
 })
 
 const chips = [
-  { label: '更有画面感', text: '补构图、光影、材质和空气感，不要改剧情。' },
-  { label: '写清动作表情', text: '把眉眼嘴、手和身体怎么动写具体。' },
-  { label: '按剧情对齐', text: '对照剧情参考，只写这一镜该发生的事。' }
+  { label: '更有画面感', text: '补构图、光影、材质和空气感。不要改剧情，不要改原文格式。' },
+  { label: '写清动作表情', text: '把眉眼嘴、手和身体怎么动写具体。不要改原文格式和分段标题。' },
+  { label: '按剧情对齐', text: '对照剧情参考，只写这一镜该发生的事。不要改原文格式。' }
 ]
 
 const llmList = computed(() => settings.config.llms ?? [])
@@ -120,7 +120,7 @@ async function optimize() {
     return
   }
 
-  const userLine = hint || '帮助优化当前节点的提示词，让画面更仔细。'
+  const userLine = hint || '帮助优化当前节点的提示词，让画面更仔细。不要改原文格式。'
   feed.value.push({ id: `u-${Date.now()}`, role: 'user', content: userLine })
   input.value = ''
   busy.value = true

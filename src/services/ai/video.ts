@@ -4,8 +4,9 @@
  *   POST {base}/api/v1/comfyui/comfyui_workflow/{workflow_id}
  *   GET  {base}/api/v1/comfyui/comfyui_workflow/result/{task_id}
  *
- * 入参：prompt、duration、resolution（768p横/768p竖）、ref_image_0..8
- * 工作流：minimax_h3_image_audio_to_video_v2_15s（H3 图+音频生视频，最长 15 秒）
+ * 参考图：prompt、duration、resolution、ref_image_0..8
+ * 数字人音画同步：只传 audio_duration、ref_audio_0、ref_image_0、resolution
+ * 工作流：minimax_h3_image_audio_to_video_v2_15s / minimax_h3_image_audio_to_video / minimax_h3_b99_002
  */
 
 import { getAIMode } from './client'
@@ -15,6 +16,7 @@ import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } fro
 import {
   VIDEO_AUTODL_ROOT,
   VIDEO_DEFAULT_WORKFLOW_ID,
+  VIDEO_DIGITAL_HUMAN_WORKFLOW_ID,
   VIDEO_FL2VA_WORKFLOW_ID,
   migrateVideoBaseUrl,
   migrateVideoWorkflowId
@@ -24,6 +26,7 @@ import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
 import { isLandscapeAspect } from '@/utils/aspect'
+import { toDigitalHumanWav } from '@/services/ffmpeg'
 
 export interface VideoGenInput {
   /** 第一张参考图：角色设计图 / 场景图 / 故事看板之一，不是人物+场景配图 */
@@ -80,6 +83,10 @@ export interface VideoGenInput {
   h3GenMode?: H3VideoGenMode
   /** 首尾帧模式的尾帧图 */
   lastFrameBlob?: Blob
+  /** 数字人口播：与画面同步的口播音频 */
+  audioBlob?: Blob
+  /** 走 MiniMax H3 图+音频同步工作流 */
+  audioSync?: boolean
   /** H3 任务类型。多图人设/场景/看板用 R2VA；单张首帧用 I2VA。 */
   mode?: 'I2VA' | 'T2VA' | 'R2VA'
   /** 已提交的 AutoDL 工作流 task_id；传入后跳过提交，直接恢复轮询。 */
@@ -251,6 +258,13 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = () => reject(new Error('读取图片失败'))
     reader.readAsDataURL(blob)
   })
+}
+
+async function blobToTypedDataUrl(blob: Blob, mime: string): Promise<string> {
+  const url = await blobToDataUrl(blob)
+  const comma = url.indexOf(',')
+  const b64 = comma >= 0 ? url.slice(comma + 1) : url
+  return `data:${mime};base64,${b64}`
 }
 
 /** Keep a three-reference JSON request below common proxy body limits. */
@@ -565,9 +579,12 @@ async function realWorkflowVideo(
   const baseUrl = migrateVideoBaseUrl(cfg.baseUrl || VIDEO_AUTODL_ROOT)
   const apiKey = cfg.apiKey
   const isFl2va = input.h3GenMode === 'fl2va'
+  const isAudioSync = input.audioSync === true
   const workflowId = isFl2va
     ? VIDEO_FL2VA_WORKFLOW_ID
-    : migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
+    : isAudioSync
+      ? VIDEO_DIGITAL_HUMAN_WORKFLOW_ID
+      : migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
   const root = workflowApiRoot(baseUrl)
   throwIfAborted(input.signal)
 
@@ -577,10 +594,15 @@ async function realWorkflowVideo(
 
   const allBlobs = isFl2va
     ? [input.imageBlob, input.lastFrameBlob].filter((b): b is Blob => !!b)
-    : [input.imageBlob, ...(input.referenceImages ?? [])].filter((b): b is Blob => !!b).slice(0, MAX_REF_IMAGES)
+    : isAudioSync
+      ? [input.imageBlob].filter((b): b is Blob => !!b)
+      : [input.imageBlob, ...(input.referenceImages ?? [])].filter((b): b is Blob => !!b).slice(0, MAX_REF_IMAGES)
 
   if (isFl2va && allBlobs.length < 2) {
     throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
+  }
+  if (isAudioSync && !input.audioBlob) {
+    throw new Error('[video] 数字人口播需要上传与台词对应的音频')
   }
   if (allBlobs.length === 0) {
     throw new Error('[video] 没有可用图片')
@@ -601,27 +623,44 @@ async function realWorkflowVideo(
     onProgress?.(`视频时长 clamp 到 ${targetDuration} 秒（接口限制 ${MIN_DUR}-${MAX_DUR}s）`)
   }
 
-  let finalPrompt = buildPrompt(input)
+  let finalPrompt = isAudioSync ? (input.prompt || input.voiceover || '数字人口播').trim() : buildPrompt(input)
   if (finalPrompt.length > 10000) {
     finalPrompt = finalPrompt.slice(0, 10000)
     onProgress?.('提示词超过 10000 字，已截断')
   }
 
   const resolution = autodlResolution(input)
-  const body: Record<string, string | number> = {
-    prompt: finalPrompt,
-    duration: targetDuration,
-    resolution
-  }
-  if (isFl2va) {
-    body.first_frame = dataUrls[0]
-    body.last_frame = dataUrls[1]
-    body.ref_image_0 = dataUrls[0]
-    body.ref_image_1 = dataUrls[1]
+  let audioDuration = Math.max(5, Math.min(15, targetDuration))
+  let body: Record<string, string | number>
+  if (isAudioSync && input.audioBlob) {
+    onProgress?.('准备口播音频...')
+    const prepared = await toDigitalHumanWav(input.audioBlob, onProgress)
+    const audioUrl = await blobToTypedDataUrl(prepared.blob, 'audio/wav')
+    audioDuration = Math.max(5, Math.min(15, prepared.duration || targetDuration))
+    // 该工作流只认这 4 个字段；时长必须 5–15，音频必须是 WAV/MP3
+    body = {
+      audio_duration: audioDuration,
+      ref_audio_0: audioUrl,
+      ref_image_0: dataUrls[0],
+      resolution
+    }
+    onProgress?.(`口播音频已准备：${audioDuration}s WAV，约 ${(audioUrl.length / 1024 / 1024).toFixed(1)} MB`)
   } else {
-    dataUrls.forEach((url, index) => {
-      body[`ref_image_${index}`] = url
-    })
+    body = {
+      prompt: finalPrompt,
+      duration: targetDuration,
+      resolution
+    }
+    if (isFl2va) {
+      body.first_frame = dataUrls[0]
+      body.last_frame = dataUrls[1]
+      body.ref_image_0 = dataUrls[0]
+      body.ref_image_1 = dataUrls[1]
+    } else {
+      dataUrls.forEach((url, index) => {
+        body[`ref_image_${index}`] = url
+      })
+    }
   }
   let taskId = String(input.resumeTaskId || '').trim()
   if (taskId) {
@@ -629,9 +668,11 @@ async function realWorkflowVideo(
     log(`↻ 恢复任务: ${taskId}`)
   } else {
     onProgress?.(
-      isFl2va
-        ? `提交首尾帧任务（${input.aspectRatio || resolution}）...`
-        : `提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`
+      isAudioSync
+        ? `提交数字人口播任务（${resolution}，${audioDuration}s）...`
+        : isFl2va
+          ? `提交首尾帧任务（${input.aspectRatio || resolution}）...`
+          : `提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`
     )
     const submitCtl = controlledSignal(input.signal, 120_000)
     let submitResp: AutodlHttpResult
@@ -999,7 +1040,11 @@ export async function generateVideo(
 ): Promise<VideoGenOutput> {
   const mode = getAIMode()
   if (mode === 'real') {
-    if (input.h3GenMode === 'fl2va') {
+    if (input.audioSync) {
+      if (!input.imageBlob || !input.audioBlob) {
+        throw new Error('[video] 数字人口播需要人物参考图和对应音频')
+      }
+    } else if (input.h3GenMode === 'fl2va') {
       if (!input.imageBlob || !input.lastFrameBlob) {
         throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
       }

@@ -1,0 +1,10 @@
+{
+  "files.watcherExclude": {
+    "**/release/**": true,
+    "**/dist/**": true,
+    "**/dist-electron/**": true
+  },
+  "search.exclude": {
+    "**/release": true
+  }
+}

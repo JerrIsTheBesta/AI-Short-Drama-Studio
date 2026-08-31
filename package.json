@@ -16,7 +16,7 @@
   "build": {
     "appId": "com.aicuts.desktop",
     "productName": "剧流 Studio",
-    "icon": "logo.png",
+    "icon": "logo.ico",
     "directories": {
       "output": "release"
     },
@@ -34,15 +34,15 @@
       }
     ],
     "win": {
-      "icon": "logo.png",
+      "icon": "logo.ico",
       "target": [
         "nsis"
       ]
     },
     "nsis": {
-      "installerIcon": "logo.png",
-      "uninstallerIcon": "logo.png",
-      "installerHeaderIcon": "logo.png"
+      "installerIcon": "logo.ico",
+      "uninstallerIcon": "logo.ico",
+      "installerHeaderIcon": "logo.ico"
     }
   },
   "dependencies": {

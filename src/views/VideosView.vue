@@ -404,7 +404,7 @@ function next() {
               <option value="static">固定</option>
             </select>
           </label>
-          <label class="info-row">
+          <label v-if="!isDigitalHuman" class="info-row">
             <span>人声</span>
             <select
               class="cam-select"
@@ -417,6 +417,10 @@ function next() {
               <option value="none">无口播，仅环境声</option>
             </select>
           </label>
+          <div v-else class="info-row">
+            <span>人声</span>
+            <strong>成片已带上传音频</strong>
+          </div>
         </div>
 
         <div class="shot-prompt">
@@ -656,6 +660,11 @@ function next() {
 .info-row span {
   flex-shrink: 0;
   white-space: nowrap;
+}
+.info-row strong {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-1);
 }
 .info-row:last-child {
   grid-column: 1 / -1;

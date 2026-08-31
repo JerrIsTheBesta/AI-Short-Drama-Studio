@@ -123,25 +123,32 @@ export async function deleteProject(id: string): Promise<void> {
   }
 }
 
+let saveAssetChain: Promise<void> = Promise.resolve()
+
 export async function saveAsset(asset: Asset, blob: Blob, thumbBlob?: Blob): Promise<void> {
-  const dir = activeDir
-  if (!dir) throw new Error('没有打开的项目目录，无法存素材')
-  const ext = extOf(asset)
-  const rel = `assets/${kindFolder(asset.kind)}/${asset.id}.${ext}`
-  const abs = await desktop().join(dir, rel)
-  await desktop().writeBuffer(abs, await bufferFromBlob(blob))
-  const stored: Asset = { ...toPlain(asset), fileRelPath: rel }
-  if (thumbBlob) {
-    const tRel = `thumbs/${asset.id}.jpg`
-    const tAbs = await desktop().join(dir, tRel)
-    await desktop().writeBuffer(tAbs, await bufferFromBlob(thumbBlob))
+  const run = async () => {
+    const dir = activeDir
+    if (!dir) throw new Error('没有打开的项目目录，无法存素材')
+    const ext = extOf(asset)
+    const rel = `assets/${kindFolder(asset.kind)}/${asset.id}.${ext}`
+    const abs = await desktop().join(dir, rel)
+    await desktop().writeBuffer(abs, await bufferFromBlob(blob))
+    const stored: Asset = { ...toPlain(asset), fileRelPath: rel }
+    if (thumbBlob) {
+      const tRel = `thumbs/${asset.id}.jpg`
+      const tAbs = await desktop().join(dir, tRel)
+      await desktop().writeBuffer(tAbs, await bufferFromBlob(thumbBlob))
+    }
+    const list = await loadManifest(dir)
+    const idx = list.findIndex((a) => a.id === asset.id)
+    if (idx >= 0) list[idx] = stored
+    else list.unshift(stored)
+    await saveManifest(dir, list)
+    assetCache = list
   }
-  const list = await loadManifest(dir)
-  const idx = list.findIndex((a) => a.id === asset.id)
-  if (idx >= 0) list[idx] = stored
-  else list.unshift(stored)
-  await saveManifest(dir, list)
-  assetCache = list
+  const next = saveAssetChain.then(run, run)
+  saveAssetChain = next.catch(() => undefined)
+  return next
 }
 
 export async function loadAssetBlob(id: string): Promise<Blob | undefined> {

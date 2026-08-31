@@ -10,6 +10,8 @@ export const VIDEO_AUTODL_ROOT = 'https://autodl.art'
 export const VIDEO_DEFAULT_WORKFLOW_ID = 'minimax_h3_image_audio_to_video_v2_15s'
 /** H3 首尾帧工作流 */
 export const VIDEO_FL2VA_WORKFLOW_ID = 'minimax_h3_b99_002'
+/** 数字人口播：图+音频同步 */
+export const VIDEO_DIGITAL_HUMAN_WORKFLOW_ID = 'minimax_h3_image_audio_to_video'
 
 export function isLegacyVideoConfig(value: string): boolean {
   return /seetacloud|:8443|\/api\/workflow|U09-API|U06-API|9图版|light2v-1|lightx2v_no_pic|lightx2v_v5/i.test(value)

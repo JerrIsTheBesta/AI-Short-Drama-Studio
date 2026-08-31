@@ -4,6 +4,7 @@ import type { AspectRatio, Shot } from '@/types'
 import { englishOrOmit, h3NameMap, h3UniqueName } from '@/utils/h3Names'
 import { normalizeCameraMovement, stripFrameLead, type VideoPromptStyle } from '@/utils/shotPrompt'
 import { spokenTextOnly } from './dialogue'
+import { normalizeForSpeech } from './tts'
 import { callLLM, getAIMode } from './client'
 
 export interface H3ImageSlot {
@@ -110,7 +111,7 @@ export function isH3FillTemplate(text: string): boolean {
 }
 
 function sanitizeDialogue(text: string): string {
-  return spokenTextOnly(text)
+  return normalizeForSpeech(spokenTextOnly(text))
     .replace(/<\/?d>/gi, '')
     .replace(/\[(?:Chinese|English|Japanese|Korean)\]/gi, '')
     .replace(/^[“”「」'"]+|[“”「」'"]+$/g, '')

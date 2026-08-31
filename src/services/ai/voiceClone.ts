@@ -1,5 +1,6 @@
 /** Qwen3-TTS 声音复刻与非实时合成。复用设置页中的百炼 TTS 地址和 API Key。 */
 import { getTtsConfig } from './runtime'
+import { normalizeForSpeech } from './tts'
 
 const CLONE_MODEL = 'qwen3-tts-vc-2026-01-22'
 
@@ -106,7 +107,7 @@ export async function synthesizeClonedSpeech(
 ): Promise<Blob> {
   const data = await request(
     '/services/aigc/multimodal-generation/generation',
-    { model, input: { text: text.trim(), voice: voiceId } },
+    { model, input: { text: normalizeForSpeech(text.trim()), voice: voiceId } },
     signal
   )
   const audio = data?.output?.audio ?? data?.audio

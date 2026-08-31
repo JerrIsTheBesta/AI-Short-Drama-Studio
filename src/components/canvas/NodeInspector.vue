@@ -199,7 +199,7 @@ const actionLabel = computed(() => {
   if (t === 'shotImage') return again ? '重新生成配图' : '生成配图'
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
   if (t === 'audio') {
-    if (!shot.value || !needsExternalTts(shot.value)) return '无需独立配音'
+    if (!shot.value || !needsExternalTts(shot.value, project.current)) return '无需独立配音'
     return again ? '重新生成口播' : '生成口播'
   }
   if (t === 'export' || t === 'final') return again ? '重新合成视频' : '合成视频'
@@ -290,7 +290,7 @@ const canRun = computed(() => {
   if (props.node?.type === 'export' || props.node?.type === 'final') {
     return canBuildExport(project.current)
   }
-  if (props.node?.type === 'audio' && shot.value && !needsExternalTts(shot.value)) return false
+  if (props.node?.type === 'audio' && shot.value && !needsExternalTts(shot.value, project.current)) return false
   return true
 })
 

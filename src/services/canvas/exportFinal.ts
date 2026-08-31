@@ -2,10 +2,10 @@
  * 画布内合成最终视频（不跳转经典导出页）
  */
 
-import { exportVideo, parseSRT, buildCuesFromClips } from '@/services/ffmpeg'
+import { exportVideo, parseSRT, buildCuesFromClips, probeMedia, trimTimelineBySpeech } from '@/services/ffmpeg'
 import { useAssetsStore, useProjectStore } from '@/stores'
 import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
-import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { effectiveShotAudioMode, isDigitalHumanSpeechProject, needsExternalTts } from '@/utils/shot'
 
 export async function generateFinalCut(onProgress?: (msg: string) => void) {
   const project = useProjectStore()
@@ -26,27 +26,7 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
   }
 
   onProgress?.('准备素材...')
-  const voiceoverMap = new Map<string, string>()
-  for (const clip of timeline) {
-    const shot = p.shots.find((s) => s.id === clip.shotId)
-    voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
-  }
-
-  const captionCues = (() => {
-    const srt = p.captionSrt?.trim()
-    if (srt) return parseSRT(srt).filter((c) => c.text.trim())
-    return buildCuesFromClips(
-      timeline.map((c) => {
-        const shot = p.shots.find((s) => s.id === c.shotId)
-        return {
-          startTime: c.startTime,
-          duration: c.duration,
-          text: shot?.voiceover ?? ''
-        }
-      })
-    ).filter((c) => c.text.trim())
-  })()
-
+  const digitalHuman = isDigitalHumanSpeechProject(p)
   const mediaMap = new Map<string, { blob: Blob; kind: 'video' | 'image' }>()
   for (const clip of timeline) {
     if (mediaMap.has(clip.shotId)) continue
@@ -63,36 +43,95 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
   }
   if (mediaMap.size === 0) throw new Error('没有可用的分镜素材')
 
+  let working = timeline
+  if (digitalHuman && p.speechWorkflow?.options.removePauses !== false) {
+    onProgress?.('正在切掉句首句尾气口...')
+    working = await trimTimelineBySpeech(working, async (shotId) => mediaMap.get(shotId)?.blob)
+    project.setTimeline(working)
+  }
+
+  const voiceoverMap = new Map<string, string>()
+  for (const clip of working) {
+    const shot = p.shots.find((s) => s.id === clip.shotId)
+    voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
+  }
+
+  const captionCues = (() => {
+    if (digitalHuman) {
+      return buildCuesFromClips(
+        working.map((c) => {
+          const shot = p.shots.find((s) => s.id === c.shotId)
+          return {
+            startTime: c.startTime,
+            duration: c.duration,
+            text: shot?.voiceover ?? ''
+          }
+        })
+      ).filter((c) => c.text.trim())
+    }
+    const srt = p.captionSrt?.trim()
+    if (srt) return parseSRT(srt).filter((c) => c.text.trim())
+    return buildCuesFromClips(
+      working.map((c) => {
+        const shot = p.shots.find((s) => s.id === c.shotId)
+        return {
+          startTime: c.startTime,
+          duration: c.duration,
+          text: shot?.voiceover ?? ''
+        }
+      })
+    ).filter((c) => c.text.trim())
+  })()
+
   let bgmBlob: Blob | undefined
-  if (p.bgmAssetId) {
+  if (p.pipelineMode !== 'smart-speech' && p.bgmAssetId) {
     bgmBlob = await assets.getBlob(p.bgmAssetId)
   }
 
+  const isSpeech = p.pipelineMode === 'smart-speech'
   const voiceoverAudioMap = new Map<string, Blob>()
   const sourceAudioMap = new Map<string, boolean>()
-  for (const clip of timeline) {
+  for (const clip of working) {
     if (voiceoverAudioMap.has(clip.shotId)) continue
     const shot = p.shots.find((s) => s.id === clip.shotId)
     if (!shot) continue
     const audioMode = effectiveShotAudioMode(shot)
     sourceAudioMap.set(
       clip.shotId,
-      audioMode === 'h3-dialogue' || audioMode === 'h3-voiceover'
-        ? true
-        : p.settings.keepAmbientAudio !== false
+      isSpeech ||
+        audioMode === 'h3-dialogue' ||
+        audioMode === 'h3-voiceover' ||
+        p.settings.keepAmbientAudio !== false
     )
-    if (!needsExternalTts(shot) || !shot.audioAssetId) continue
+    if (digitalHuman || !needsExternalTts(shot, p) || !shot.audioAssetId) continue
     const blob = await assets.getBlob(shot.audioAssetId)
     if (blob) voiceoverAudioMap.set(clip.shotId, blob)
   }
 
-  const keepAmbient = p.settings.keepAmbientAudio !== false
+  let width = p.settings.width
+  let height = p.settings.height
+  if (isSpeech) {
+    for (const media of mediaMap.values()) {
+      if (media.kind !== 'video') continue
+      const info = await probeMedia(media.blob).catch(() => ({ width: 0, height: 0 }))
+      if ((info.width || 0) >= 16 && (info.height || 0) >= 16) {
+        width = info.width % 2 === 0 ? info.width : info.width - 1
+        height = info.height % 2 === 0 ? info.height : info.height - 1
+        break
+      }
+    }
+  }
+  const exportTimeline = isSpeech
+    ? working.map((clip) => ({ ...clip, transitionIn: 'none' as const, transitionDuration: 0 }))
+    : working
+
+  const keepAmbient = isSpeech ? true : p.settings.keepAmbientAudio !== false
   const blob = await exportVideo({
-    timeline,
+    timeline: exportTimeline,
     mediaMap,
     voiceoverMap,
-    width: p.settings.width,
-    height: p.settings.height,
+    width,
+    height,
     fps: p.settings.fps,
     captionStyle: p.settings.captionStyle,
     burnCaptions: p.settings.burnCaptions !== false,
@@ -103,7 +142,7 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
     captionHighlightScale: p.settings.captionHighlightScale,
     bgm: bgmBlob,
     bgmVolume: p.settings.bgmVolume,
-    originalVolume: p.settings.originalVolume ?? 0.55,
+    originalVolume: isSpeech ? 1 : p.settings.originalVolume ?? 0.55,
     keepAmbientAudio: keepAmbient,
     sourceAudioMap,
     voiceoverAudioMap,

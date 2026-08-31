@@ -119,7 +119,7 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-shots'
     }
   }
-  if (p.shots.some((s) => needsExternalTts(s) && !s.audioAssetId)) {
+  if (p.shots.some((s) => needsExternalTts(s, p) && !s.audioAssetId)) {
     return {
       id: 'audio',
       label: '口播',

@@ -20,8 +20,8 @@ const showLayout = computed(
 )
 
 onMounted(async () => {
-  await assets.refresh()
   await project.ensureLoaded()
+  await assets.refresh()
   project.startAutoSave()
 })
 </script>

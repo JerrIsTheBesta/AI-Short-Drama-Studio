@@ -199,6 +199,8 @@ export interface SpeechWorkflow {
   /** 已提交到 H3 的远端任务，暂停/超时/重启后继续轮询，不重复提交。 */
   activeVideoTaskId?: string
   activeVideoTaskSegmentIndex?: number
+  /** 并发提交中的任务，按下标恢复轮询。 */
+  activeVideoTasks?: Array<{ index: number; taskId: string }>
   videoAssetIds: ID[]
   referenceAssetIds: ID[]
   options: SpeechWorkflowOptions

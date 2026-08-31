@@ -131,7 +131,7 @@ function counts() {
     boards: (p?.shots ?? []).filter((s) => !s.boardAssetId).length,
     images: (p?.shots ?? []).filter((s) => !s.imageAssetId).length,
     videos: (p?.shots ?? []).filter((s) => !s.videoAssetId).length,
-    audio: (p?.shots ?? []).filter((s) => needsExternalTts(s) && !s.audioAssetId).length
+    audio: (p?.shots ?? []).filter((s) => needsExternalTts(s, p) && !s.audioAssetId).length
   }
 }
 
@@ -198,7 +198,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     }
 
     if (action.tool === 'generate_audio') {
-      if (!needsExternalTts(shot)) return { state: 'skip', detail: `第 ${shot.index + 1} 镜由 H3 负责声音，不需要独立 TTS` }
+      if (!needsExternalTts(shot, project)) return { state: 'skip', detail: `第 ${shot.index + 1} 镜由 H3 负责声音，不需要独立 TTS` }
       if (shot.audioAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜口播已经存在` }
     }
 
@@ -259,7 +259,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
   }
 
   if (action.tool === 'generate_all_audio') {
-    if (!(project.shots ?? []).some((shot) => needsExternalTts(shot) && !shot.audioAssetId)) {
+    if (!(project.shots ?? []).some((shot) => needsExternalTts(shot, project) && !shot.audioAssetId)) {
       return { state: 'skip', detail: '没有需要补的独立 TTS' }
     }
   }
@@ -307,9 +307,9 @@ export function verifyRegisteredTool(raw: unknown): string | null {
     case 'generate_all_videos':
       return project.shots.every((item) => item.videoAssetId) ? null : '仍有分镜视频缺失'
     case 'generate_audio':
-      return !shot || !needsExternalTts(shot) || shot.audioAssetId ? null : '独立口播没有落库'
+      return !shot || !needsExternalTts(shot, project) || shot.audioAssetId ? null : '独立口播没有落库'
     case 'generate_all_audio':
-      return project.shots.every((item) => !needsExternalTts(item) || item.audioAssetId) ? null : '仍有独立口播缺失'
+      return project.shots.every((item) => !needsExternalTts(item, project) || item.audioAssetId) ? null : '仍有独立口播缺失'
     default:
       return null
   }

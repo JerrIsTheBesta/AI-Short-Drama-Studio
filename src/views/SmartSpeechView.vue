@@ -18,14 +18,23 @@ import {
   DIGITAL_HUMAN_SCENE_ANCHOR,
   DIGITAL_HUMAN_IMAGE_ASSIGNMENT
 } from '@/services/ai'
-import { replaceVideoAudio } from '@/services/ffmpeg'
+import { detectSpeechWindow, toDigitalHumanWav } from '@/services/ffmpeg'
+import type { SpeechWindow } from '@/services/ffmpeg'
+import {
+  DIGITAL_HUMAN_CONCURRENCY,
+  durationFromSpeechText,
+  planDigitalSpeechShots,
+  runPool
+} from '@/utils/digitalSpeech'
 import type {
   AspectRatio,
+  SpeechWorkflow,
   SpeechWorkflowMode,
   SpeechWorkflowOptions,
   TimelineClip,
   Shot
 } from '@/types'
+import { isDigitalHumanSpeechProject } from '@/utils/shot'
 
 const route = useRoute()
 const router = useRouter()
@@ -48,20 +57,68 @@ const referenceUrls = ref<string[]>([])
 const saving = ref(false)
 const building = ref(false)
 const generationController = ref<AbortController | null>(null)
-const generatedPreviewUrls = ref<string[]>([])
-const showWorkspace = ref(
-  route.query.new !== '1' && project.current?.pipelineMode === 'smart-speech'
+const generatedPreviews = ref<Array<{ id: string; index: number; url: string }>>([])
+let previewTick = 0
+const creatingNew = computed(() => String(route.query.new || '') === '1')
+const showWorkspace = computed(() => {
+  if (creatingNew.value) return false
+  const p = project.current
+  return Boolean(p && (p.pipelineMode === 'smart-speech' || p.speechWorkflow))
+})
+function normalizeDigitalHumanProject() {
+  const p = project.current
+  if (!p || !isDigitalHumanSpeechProject(p) || !p.speechWorkflow) return
+  let changed = false
+  const flow = p.speechWorkflow
+  if (!flow.options.captions || !flow.options.keywordCallouts) {
+    p.speechWorkflow = {
+      ...flow,
+      options: {
+        ...flow.options,
+        captions: true,
+        keywordCallouts: true
+      },
+      updatedAt: Date.now()
+    }
+    changed = true
+  }
+  if (p.settings.burnCaptions === false || !p.settings.captionHighlight) {
+    project.setSettings({ burnCaptions: true, captionHighlight: true })
+    changed = true
+  }
+  const spoken = p.shots.map((shot) => shot.voiceover || '').join('')
+  const duration = p.timeline.reduce((sum, clip) => sum + clip.duration, 0)
+  if (!p.captionSrt?.trim() && spoken.trim() && duration > 0) {
+    project.setCaptionSrt(approximateSrt(spoken, duration))
+    changed = true
+  }
+  const shots = p.shots.map((shot) =>
+    shot.audioMode === 'h3-dialogue' ? shot : { ...shot, audioMode: 'h3-dialogue' as const }
+  )
+  if (shots.some((shot, index) => shot !== p.shots[index])) {
+    project.setShots(shots)
+    changed = true
+  }
+  if (changed) void project.save()
+}
+
+watch(
+  () => [showWorkspace.value, project.current?.id, project.current?.speechWorkflow?.mode] as const,
+  ([show]) => {
+    if (show) normalizeDigitalHumanProject()
+  },
+  { immediate: true }
 )
 
 const options = ref<SpeechWorkflowOptions>({
   removePauses: true,
   removeStumbles: true,
-  beauty: true,
+  beauty: false,
   captions: true,
-  titles: true,
+  titles: false,
   keywordCallouts: true,
-  soundEffects: true,
-  bgm: true,
+  soundEffects: false,
+  bgm: false,
   aigcInserts: false
 })
 
@@ -76,8 +133,8 @@ const modes: Array<{
     id: 'digital-human',
     eyebrow: '图片 + 音频',
     title: '数字人口播',
-    desc: '使用人物图锁定形象，用声音样本复刻音色，再让人物按文案开口说话。',
-    input: '人物图片、声音样本、口播文案'
+    desc: '上传人物图和声音样本。按文案克隆音色念出台词（1688 念一六八八），再交给 H3 对口型。',
+    input: '人物图片、声音样本、要念的口播文案'
   },
   {
     id: 'human-edit',
@@ -95,26 +152,40 @@ const modes: Array<{
   }
 ]
 
-const currentFlow = computed(() =>
-  project.current?.pipelineMode === 'smart-speech' ? project.current.speechWorkflow : undefined
+const currentFlow = computed(() => project.current?.speechWorkflow)
+
+watch(
+  () => project.current?.id,
+  async (id) => {
+    if (!id) return
+    await assets.refresh()
+  },
+  { immediate: true }
 )
 
-const completedVideoCount = computed(() => currentFlow.value?.generatedVideoAssetIds?.length || 0)
+const completedVideoCount = computed(
+  () => currentFlow.value?.generatedVideoAssetIds?.filter(Boolean).length || 0
+)
 const totalDigitalSegments = computed(() =>
-  currentFlow.value?.mode === 'digital-human' ? digitalSpeechSegments(project.current?.script?.content || '').length : 0
+  currentFlow.value?.mode === 'digital-human'
+    ? planDigitalSpeechShots(project.current?.script?.content || '').length
+    : 0
 )
 
 watch(
   () => (currentFlow.value?.generatedVideoAssetIds || []).join('|'),
   async () => {
-    generatedPreviewUrls.value.forEach(revoke)
-    generatedPreviewUrls.value = []
-    const urls: string[] = []
-    for (const id of currentFlow.value?.generatedVideoAssetIds || []) {
+    const tick = ++previewTick
+    const ids = currentFlow.value?.generatedVideoAssetIds || []
+    const next: Array<{ id: string; index: number; url: string }> = []
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index]
+      if (!id) continue
       const url = await assets.getUrl(id)
-      if (url) urls.push(url)
+      if (url) next.push({ id, index, url })
     }
-    generatedPreviewUrls.value = urls
+    if (tick !== previewTick) return
+    generatedPreviews.value = next
   },
   { immediate: true }
 )
@@ -192,8 +263,21 @@ function removeReference(index: number) {
 function setMode(next: SpeechWorkflowMode) {
   mode.value = next
   options.value.aigcInserts = next === 'human-aigc'
-  if (next === 'digital-human') options.value.beauty = false
-  else options.value.beauty = true
+  if (next === 'digital-human') {
+    options.value.beauty = false
+    options.value.captions = true
+    options.value.titles = false
+    options.value.keywordCallouts = true
+    options.value.soundEffects = false
+    options.value.bgm = false
+    options.value.removePauses = true
+  } else {
+    options.value.beauty = true
+    options.value.captions = true
+    options.value.titles = true
+    options.value.keywordCallouts = true
+    options.value.soundEffects = true
+  }
 }
 
 function sizeForAspect(ar: AspectRatio) {
@@ -216,6 +300,16 @@ async function createSpeechProject() {
     const now = Date.now()
     const size = sizeForAspect(aspectRatio.value)
     p.pipelineMode = 'smart-speech'
+    p.speechWorkflow = {
+      mode: mode.value,
+      stage: 'ready',
+      videoAssetIds: [],
+      referenceAssetIds: [],
+      options: { ...options.value },
+      progress: '正在入库素材…',
+      createdAt: now,
+      updatedAt: now
+    }
     p.script = {
       id: `s_${now.toString(36)}`,
       topic: name.value.trim(),
@@ -236,8 +330,8 @@ async function createSpeechProject() {
       captionHighlight: options.value.captions && options.value.keywordCallouts,
       captionHighlightColor: '#ffd84d',
       captionHighlightScale: 1.2,
-      bgmVolume: options.value.bgm ? p.settings.bgmVolume : 0,
-      keepAmbientAudio: mode.value === 'digital-human' ? false : p.settings.keepAmbientAudio
+      bgmVolume: 0,
+      keepAmbientAudio: true
     }
 
     let imageAssetId: string | undefined
@@ -263,7 +357,7 @@ async function createSpeechProject() {
       referenceAssetIds,
       options: { ...options.value },
       progress: mode.value === 'digital-human'
-        ? '人物形象与声音样本已入库，等待克隆音色并生成口播视频'
+        ? `人物图和声音样本已入库，将克隆音色并按台词合成 ${planDigitalSpeechShots(script.value).length} 段，再提交音画同步`
         : '素材与文案已入库，等待生成基础工程',
       createdAt: now,
       updatedAt: now
@@ -271,11 +365,13 @@ async function createSpeechProject() {
     project.setScript(p.script)
     project.setSettings(p.settings)
     await project.save()
-    showWorkspace.value = true
+    await router.replace({ name: 'smart-speech' })
     toast.success('智能口播项目已创建')
   } catch (error: any) {
     toast.error(error?.message || '智能口播项目创建失败')
-    if (created) showWorkspace.value = true
+    if (created && project.current?.speechWorkflow) {
+      await router.replace({ name: 'smart-speech' }).catch(() => undefined)
+    }
   } finally {
     saving.value = false
   }
@@ -322,20 +418,46 @@ function approximateSrt(text: string, duration: number) {
     .join('\n\n')
 }
 
-async function buildBaseline() {
+function writeFlow(flow: SpeechWorkflow) {
   const p = project.current
-  const flow = currentFlow.value
-  if (!p || !flow || building.value) return
+  if (!p) return
+  p.pipelineMode = 'smart-speech'
+  p.speechWorkflow = { ...flow, updatedAt: Date.now() }
+}
+
+async function buildBaseline() {
+  if (building.value) {
+    toast.info('正在生成，请稍候')
+    return
+  }
+  const p = project.current
+  if (!p) {
+    toast.warn('没有打开的项目。请先创建口播项目。')
+    return
+  }
+  const flow = p.speechWorkflow
+  if (!flow) {
+    toast.warn('口播素材状态丢失。请点右上角「新建口播项目」重新上传素材。')
+    return
+  }
   building.value = true
+  writeFlow({
+    ...flow,
+    progress: flow.mode === 'digital-human' ? '开始克隆音色并按台词生成口播…' : '正在生成可编辑基础工程…',
+    error: undefined
+  })
   generationController.value = new AbortController()
   try {
+    await assets.refresh()
     const digital = flow.mode === 'digital-human'
     if (digital) {
       await buildDigitalHumanVideo(p, flow, generationController.value.signal)
       return
     }
-    const primaryId = digital ? flow.imageAssetId : flow.videoAssetIds[0]
-    if (!primaryId) throw new Error('找不到主素材，请重新创建项目')
+    const primaryId =
+      flow.videoAssetIds?.[0] ||
+      assets.all.find((item) => item.kind === 'video' && item.projectId === p.id)?.id
+    if (!primaryId) throw new Error('找不到主视频素材，请重新创建项目并重新上传口播原片')
     const primary = assets.getMeta(primaryId)
     const audio = flow.audioAssetId ? assets.getMeta(flow.audioAssetId) : undefined
     const duration = Math.max(
@@ -356,7 +478,7 @@ async function buildBaseline() {
         : '保留真人原片，后续根据逐字识别结果完成卡顿和气口清理。',
       audioDescription: '清晰人声，背景音乐不盖过口播。',
       voiceover: p.script?.content || '',
-      audioMode: digital ? 'tts' : 'none',
+      audioMode: digital ? 'h3-dialogue' : 'none',
       duration,
       cameraMovement: 'static',
       imageAssetId: digital ? primaryId : undefined,
@@ -379,7 +501,7 @@ async function buildBaseline() {
     }
     project.setShots([shot])
     project.setTimeline([clip])
-    if (flow.options.captions && p.script?.content) {
+    if (flow.options?.captions && p.script?.content) {
       project.setCaptionSrt(approximateSrt(p.script.content, duration))
     }
     p.speechWorkflow = {
@@ -425,37 +547,6 @@ function cancelGeneration() {
   generationController.value?.abort()
 }
 
-function digitalSpeechSegments(text: string): string[] {
-  const units = text
-    .replace(/\s+/g, '')
-    .split(/(?<=[。！？；])/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-  const output: string[] = []
-  for (const unit of units.length ? units : [text.trim()]) {
-    if (unit.length <= 30) {
-      output.push(unit)
-      continue
-    }
-    const clauses = unit.split(/(?<=[，、：])/).filter(Boolean)
-    let current = ''
-    for (const clause of clauses) {
-      if (current && current.length + clause.length > 30) {
-        output.push(current)
-        current = ''
-      }
-      if (clause.length <= 30) current += clause
-      else {
-        if (current) output.push(current)
-        current = ''
-        for (let i = 0; i < clause.length; i += 28) output.push(clause.slice(i, i + 28))
-      }
-    }
-    if (current) output.push(current)
-  }
-  return output.filter(Boolean)
-}
-
 async function updateFlowProgress(message: string) {
   const p = project.current
   if (!p?.speechWorkflow) return
@@ -474,206 +565,281 @@ async function buildDigitalHumanVideo(
   const imageBlob = await assets.getBlob(imageId)
   const sampleBlob = await assets.getBlob(sampleId)
   if (!imageBlob || !sampleBlob) throw new Error('人物图片或声音样本读取失败')
-  const sampleMeta = assets.getMeta(sampleId)
-  const sampleDuration = sampleMeta?.kind === 'audio' ? sampleMeta.duration || 0 : 0
-  if (sampleDuration > 0 && sampleDuration < 5) {
-    throw new Error('声音样本至少需要 5 秒连续清晰人声，推荐 10–20 秒')
-  }
-
-  await updateFlowProgress('正在分析声音样本并创建克隆音色…')
+  const planned = planDigitalSpeechShots(p.script?.content || '')
+  if (!planned.length) throw new Error('没有可生成的口播文案')
   const cloned = flow.clonedVoiceId
     ? { voiceId: flow.clonedVoiceId, model: flow.clonedVoiceModel || 'qwen3-tts-vc-2026-01-22' }
-    : await cloneVoiceFromSample(sampleBlob, `aicut${p.id.replace(/[^a-z0-9]/gi, '').slice(-8)}`, signal)
+    : await (async () => {
+        await updateFlowProgress('正在用上传音频克隆音色，之后按文案念词，不会直接用参考音频当口播…')
+        return cloneVoiceFromSample(sampleBlob, `aicut${p.id.replace(/[^a-z0-9]/gi, '').slice(-8)}`, signal)
+      })()
   if (!p.speechWorkflow) throw new Error('口播流程状态丢失')
   p.speechWorkflow = {
     ...p.speechWorkflow,
     clonedVoiceId: cloned.voiceId,
     clonedVoiceModel: cloned.model,
-    progress: '克隆音色已创建，开始按文案生成语音和人物视频…',
+    progress: `音色已克隆，开始按台词合成 ${planned.length} 段人声…`,
     updatedAt: Date.now()
   }
   await project.save()
+  await updateFlowProgress(`音色已克隆，正在按台词合成 ${planned.length} 段人声（1688 会念成一六八八）…`)
 
-  const parts = digitalSpeechSegments(p.script?.content || '')
-  if (!parts.length) throw new Error('没有可生成的口播文案')
-  const shots: Shot[] = []
-  const timeline: TimelineClip[] = []
-  const videoIds: string[] = []
-  const speechIds: string[] = []
-  let cursor = 0
+  const parts = planned.map((item) => item.text)
+  const existingVideos = [...(flow.generatedVideoAssetIds || [])]
+  const existingSpeech = [...(flow.generatedSpeechAssetIds || [])]
+  const videoIds = Array.from({ length: parts.length }, (_, i) => existingVideos[i] || undefined)
+  const speechIds = Array.from({ length: parts.length }, (_, i) => existingSpeech[i] || undefined)
+  const speechBlobs = new Map<number, Blob>()
+  const speechDurations = new Map<number, number>()
+  const speechWindows = new Map<string, SpeechWindow>()
+  const trimPauses = flow.options?.removePauses !== false
+  const shotIds = parts.map((_, index) => {
+    const videoAsset = videoIds[index] ? assets.getMeta(videoIds[index]) : undefined
+    const speechAsset = speechIds[index] ? assets.getMeta(speechIds[index]) : undefined
+    return videoAsset?.shotId || speechAsset?.shotId || `speech_${Date.now().toString(36)}_${index}`
+  })
 
-  // 兼容已经生成过一部分的旧任务：数组顺序与文案分段顺序一致。
-  // 只有视频、语音两个资产都仍然存在时才算完成，绝不重复消耗生成算力。
-  const existingVideos = flow.generatedVideoAssetIds || []
-  const existingSpeech = flow.generatedSpeechAssetIds || []
-  const reusableCount = Math.min(parts.length, existingVideos.length, existingSpeech.length)
-  for (let index = 0; index < reusableCount; index++) {
-    const videoAsset = assets.getMeta(existingVideos[index])
-    const speechAsset = assets.getMeta(existingSpeech[index])
-    if (videoAsset?.kind !== 'video' || speechAsset?.kind !== 'audio') break
-    const duration = Math.min(
-      Math.max(0.1, speechAsset.duration || parts[index].length / 4.2),
-      Math.max(0.1, videoAsset.duration || 15)
-    )
-    const shotId = videoAsset.shotId || speechAsset.shotId || `speech_resume_${index}`
-    videoIds.push(videoAsset.id)
-    speechIds.push(speechAsset.id)
-    shots.push(makeDigitalShot(index, shotId, parts[index], duration, imageId, videoAsset.id, speechAsset.id))
-    timeline.push(makeDigitalClip(index, shotId, cursor, duration))
-    cursor += duration
+  function isComplete(index) {
+    const videoAsset = videoIds[index] ? assets.getMeta(videoIds[index]) : undefined
+    const speechAsset = speechIds[index] ? assets.getMeta(speechIds[index]) : undefined
+    return videoAsset?.kind === 'video' && speechAsset?.kind === 'audio'
   }
 
-  if (videoIds.length) {
+  async function measureSpeechWindow(videoId: string) {
+    if (!trimPauses || speechWindows.has(videoId)) return
+    const blob = await assets.getBlob(videoId)
+    if (!blob) return
+    try {
+      speechWindows.set(videoId, await detectSpeechWindow(blob))
+    } catch {
+      /* 切气口失败时仍用整段，避免挡住生成 */
+    }
+  }
+
+  function rebuildTimeline() {
+    const shots = []
+    const timeline = []
+    let cursor = 0
+    const spoken = []
+    for (let index = 0; index < parts.length; index++) {
+      if (!isComplete(index)) continue
+      const videoAsset = assets.getMeta(videoIds[index])
+      const speechAsset = assets.getMeta(speechIds[index])
+      if (!videoAsset || !speechAsset || videoAsset.kind !== 'video' || speechAsset.kind !== 'audio') continue
+      const win = speechWindows.get(videoAsset.id)
+      const full = Math.max(
+        0.1,
+        videoAsset.duration || speechDurations.get(index) || speechAsset.duration || 8
+      )
+      const sourceIn = win?.sourceIn ?? 0
+      const duration = Math.max(0.1, win?.duration ?? full)
+      shots.push(makeDigitalShot(index, shotIds[index], parts[index], duration, imageId, videoAsset.id, speechAsset.id))
+      timeline.push(makeDigitalClip(index, shotIds[index], cursor, duration, sourceIn))
+      spoken.push(parts[index])
+      cursor += duration
+    }
     project.setShots(shots)
     project.setTimeline(timeline)
-    if (flow.options.captions) project.setCaptionSrt(approximateSrt(parts.slice(0, videoIds.length).join(''), cursor))
-    await updateFlowProgress(`已恢复 ${videoIds.length}/${parts.length} 段，继续生成剩余内容…`)
+    if (flow.options.captions && spoken.length) {
+      project.setCaptionSrt(approximateSrt(spoken.join(''), cursor))
+    }
   }
 
-  const resumeStartIndex = videoIds.length
-  for (let index = resumeStartIndex; index < parts.length; index++) {
-    if (signal.aborted) throw new DOMException('生成已取消', 'AbortError')
-    const text = parts[index]
-    const shotId = `speech_${Date.now().toString(36)}_${index}`
-    let speechBlob: Blob
-    let speechAssetId: string
-    let speechDuration: number
-    const pendingSpeechId =
-      p.speechWorkflow?.pendingSegmentIndex === index
-        ? p.speechWorkflow.pendingSpeechAssetId
-        : undefined
-    const pendingSpeechMeta = pendingSpeechId ? assets.getMeta(pendingSpeechId) : undefined
-    const pendingSpeechBlob = pendingSpeechId ? await assets.getBlob(pendingSpeechId) : undefined
-    if (pendingSpeechMeta?.kind === 'audio' && pendingSpeechBlob) {
-      speechBlob = pendingSpeechBlob
-      speechAssetId = pendingSpeechMeta.id
-      speechDuration = Math.max(2, pendingSpeechMeta.duration || text.length / 4.2)
-      await updateFlowProgress(`已恢复第 ${index + 1}/${parts.length} 段克隆语音，不重复合成…`)
-    } else {
-      await updateFlowProgress(`正在生成第 ${index + 1}/${parts.length} 段克隆语音…`)
-      speechBlob = await synthesizeClonedSpeech(text, cloned.voiceId, cloned.model, signal)
-      const speechAsset = await assets.add(speechBlob, 'audio', 'ai-generated', {
-        filename: `克隆口播_${String(index + 1).padStart(2, '0')}.mp3`, projectId: p.id, shotId
-      })
-      speechAssetId = speechAsset.id
-      speechDuration = Math.max(
-        2,
-        (speechAsset.kind === 'audio' ? speechAsset.duration : 0) || text.length / 4.2
-      )
-      p.speechWorkflow = {
-        ...p.speechWorkflow!,
-        pendingSegmentIndex: index,
-        pendingSpeechAssetId: speechAsset.id,
-        updatedAt: Date.now()
-      }
+  let persistChain = Promise.resolve()
+  const persistFlow = (
+    patch: Record<string, unknown> | ((flow: NonNullable<typeof p.speechWorkflow>) => Record<string, unknown>),
+    progress: string
+  ) => {
+    const write = async () => {
+      if (!p.speechWorkflow) return
+      const next = typeof patch === 'function' ? patch(p.speechWorkflow) : patch
+      p.speechWorkflow = { ...p.speechWorkflow, ...next, progress, updatedAt: Date.now() }
       await project.save()
     }
-    if (speechDuration > 15) {
-      throw new Error(`第 ${index + 1} 段克隆语音为 ${speechDuration.toFixed(1)} 秒，超过 H3 单镜 15 秒限制，请把该句拆短后重试`)
-    }
+    persistChain = persistChain.then(write, write)
+    return persistChain
+  }
 
-    await updateFlowProgress(`正在生成第 ${index + 1}/${parts.length} 段人物开口视频…`)
-    const legacyTaskId =
-      index === resumeStartIndex
-        ? String(flow.error || '').match(/task_id=([^\s]+)/i)?.[1]?.trim()
-        : undefined
-    const resumeTaskId =
-      p.speechWorkflow?.activeVideoTaskSegmentIndex === index
-        ? p.speechWorkflow.activeVideoTaskId
-        : legacyTaskId
-    if (legacyTaskId && !p.speechWorkflow?.activeVideoTaskId) {
-      p.speechWorkflow = {
-        ...p.speechWorkflow!,
-        activeVideoTaskId: legacyTaskId,
-        activeVideoTaskSegmentIndex: index,
-        error: undefined,
-        progress: `已从旧任务恢复第 ${index + 1}/${parts.length} 段 (${legacyTaskId})，不会重复提交…`,
-        updatedAt: Date.now()
-      }
-      await project.save()
+  const restored = parts.filter((_, index) => isComplete(index)).length
+  if (restored) {
+    for (let index = 0; index < parts.length; index++) {
+      if (isComplete(index) && videoIds[index]) await measureSpeechWindow(videoIds[index])
     }
-    const generated = await generateVideo(
-      {
-        imageBlob,
-        prompt: DIGITAL_HUMAN_VISUAL_LOCK,
-        aesthetic: DIGITAL_HUMAN_AESTHETIC,
-        audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
-        voiceover: text,
-        voiceMode: 'dialogue',
-        speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
-        speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
-        onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
-        sceneName: DIGITAL_HUMAN_SCENE_NAME,
-        sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
-        sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
-        shotTitle: 'Locked single-person talking head',
-        imageAssignments: [
-          DIGITAL_HUMAN_IMAGE_ASSIGNMENT
-        ],
-        duration: Math.min(15, Math.max(3, Math.ceil(speechDuration + 0.4))),
-        width: p.settings.width,
-        height: p.settings.height,
-        aspectRatio: p.settings.aspectRatio,
-        cameraMovement: 'static',
-        signal,
-        resumeTaskId,
-        onTaskSubmitted: async (taskId) => {
-          p.speechWorkflow = {
-            ...p.speechWorkflow!,
-            activeVideoTaskId: taskId,
-            activeVideoTaskSegmentIndex: index,
-            progress: `第 ${index + 1}/${parts.length} 段任务已提交 (${taskId})，正在等待结果…`,
-            updatedAt: Date.now()
-          }
-          await project.save()
-        }
-      },
-      (message) => void updateFlowProgress(`第 ${index + 1}/${parts.length} 段：${message}`)
-    )
-    await updateFlowProgress(`正在封装第 ${index + 1}/${parts.length} 段克隆声音视频…`)
-    const talkingVideo = await replaceVideoAudio(generated.blob, speechBlob, (message) =>
+    rebuildTimeline()
+    await updateFlowProgress(`已恢复 ${restored}/${parts.length} 段，准备并发提交剩余任务…`)
+  }
+
+  for (let index = 0; index < parts.length; index++) {
+    if (signal.aborted) throw new DOMException('生成已取消', 'AbortError')
+    if (isComplete(index) && speechIds[index]) {
+      const blob = await assets.getBlob(speechIds[index])
+      if (blob) {
+        const prepared = await toDigitalHumanWav(blob)
+        speechBlobs.set(index, prepared.blob)
+        speechDurations.set(index, prepared.duration)
+      }
+      continue
+    }
+    const shotId = shotIds[index]
+    const text = parts[index]
+    await updateFlowProgress(`正在用克隆音色念第 ${index + 1}/${parts.length} 段台词…`)
+    const raw = await synthesizeClonedSpeech(text, cloned.voiceId, cloned.model, signal)
+    const prepared = await toDigitalHumanWav(raw, (message) =>
       void updateFlowProgress(`第 ${index + 1}/${parts.length} 段：${message}`)
     )
-    const videoAsset = await assets.add(talkingVideo, 'video', 'ai-generated', {
-      filename: `数字人口播_${String(index + 1).padStart(2, '0')}.mp4`,
-      prompt: generated.prompt,
-      projectId: p.id,
-      shotId
-    })
-    videoIds.push(videoAsset.id)
-    speechIds.push(speechAssetId)
-    const duration = Math.min(
-      speechDuration,
-      (videoAsset.kind === 'video' ? videoAsset.duration : 0) || generated.duration
-    )
-    shots.push(makeDigitalShot(index, shotId, text, duration, imageId, videoAsset.id, speechAssetId, generated.prompt))
-    timeline.push(makeDigitalClip(index, shotId, cursor, duration))
-    cursor += duration
-    p.speechWorkflow = {
-      ...p.speechWorkflow!,
-      generatedVideoAssetIds: [...videoIds],
-      generatedSpeechAssetIds: [...speechIds],
-      pendingSegmentIndex: undefined,
-      pendingSpeechAssetId: undefined,
-      activeVideoTaskId: undefined,
-      activeVideoTaskSegmentIndex: undefined,
-      updatedAt: Date.now()
+    if (prepared.duration > 15) {
+      throw new Error(`第 ${index + 1} 段音频为 ${prepared.duration.toFixed(1)} 秒，超过 H3 单镜 15 秒限制，请把该句拆短后重试`)
     }
-    project.setShots([...shots])
-    project.setTimeline([...timeline])
-    if (flow.options.captions) project.setCaptionSrt(approximateSrt(parts.slice(0, videoIds.length).join(''), cursor))
-    await project.save()
+    const speechAsset = speechIds[index]
+      ? assets.getMeta(speechIds[index])
+      : await assets.add(prepared.blob, 'audio', 'ai-generated', {
+          filename: `口播_${String(index + 1).padStart(2, '0')}.wav`,
+          prompt: text,
+          projectId: p.id,
+          shotId
+        })
+    if (!speechAsset || speechAsset.kind !== 'audio') throw new Error(`第 ${index + 1} 段音频落库失败`)
+    speechIds[index] = speechAsset.id
+    speechBlobs.set(index, prepared.blob)
+    speechDurations.set(index, prepared.duration)
+    await persistFlow(
+      {
+        generatedSpeechAssetIds: [...speechIds],
+        pendingSegmentIndex: undefined,
+        pendingSpeechAssetId: undefined
+      },
+      `音频已备齐 ${speechIds.filter(Boolean).length}/${parts.length} 段`
+    )
   }
 
-  project.setShots(shots)
-  project.setTimeline(timeline)
-  if (flow.options.captions) project.setCaptionSrt(approximateSrt(p.script?.content || '', cursor))
+  for (let index = 0; index < parts.length; index++) {
+    if (!isComplete(index) || !videoIds[index]) continue
+    const blob = await assets.getBlob(videoIds[index]!)
+    if (!blob || blob.size < 80_000) videoIds[index] = undefined
+  }
+
+  const todo = parts.map((_, index) => index).filter((index) => !isComplete(index))
+  const parallel = Math.min(DIGITAL_HUMAN_CONCURRENCY, todo.length)
+  if (todo.length) {
+    await updateFlowProgress(`同时提交 ${parallel} 路音画同步（共 ${todo.length} 段待生成）…`)
+  }
+
+  const running = new Set<number>()
+  const failures: Array<{ index: number; message: string }> = []
+  const legacyTaskId = String(flow.error || '').match(/task_id=([^\s]+)/i)?.[1]?.trim()
+
+  await runPool(
+    todo,
+    DIGITAL_HUMAN_CONCURRENCY,
+    async (index) => {
+      if (signal.aborted) throw new DOMException('生成已取消', 'AbortError')
+      const speechBlob = speechBlobs.get(index)
+      const speechAssetId = speechIds[index]
+      const speechDuration = speechDurations.get(index) || planned[index]?.duration || durationFromSpeechText(parts[index])
+      if (!speechBlob || !speechAssetId) throw new Error(`第 ${index + 1} 段音频未就绪`)
+      running.add(index)
+      const resumeTaskId =
+        (p.speechWorkflow?.activeVideoTasks || []).find((item) => item.index === index)?.taskId ||
+        (p.speechWorkflow?.activeVideoTaskSegmentIndex === index ? p.speechWorkflow.activeVideoTaskId : undefined) ||
+        (todo[0] === index ? legacyTaskId : undefined)
+      try {
+        const generated = await generateVideo(
+          {
+            imageBlob,
+            prompt: DIGITAL_HUMAN_VISUAL_LOCK,
+            aesthetic: DIGITAL_HUMAN_AESTHETIC,
+            audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
+            voiceover: parts[index],
+            voiceMode: 'dialogue',
+            speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
+            speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
+            onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
+            sceneName: DIGITAL_HUMAN_SCENE_NAME,
+            sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
+            sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
+            shotTitle: 'Locked single-person talking head',
+            imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
+            duration: Math.min(15, Math.max(5, Math.ceil(speechDuration))),
+            width: p.settings.width,
+            height: p.settings.height,
+            aspectRatio: p.settings.aspectRatio,
+            cameraMovement: 'static',
+            audioBlob: speechBlob,
+            audioSync: true,
+            promptAsIs: true,
+            mode: 'I2VA',
+            signal,
+            resumeTaskId,
+            onTaskSubmitted: async (taskId) => {
+              await persistFlow((current) => {
+                const activeVideoTasks = [
+                  ...(current.activeVideoTasks || []).filter((item) => item.index !== index),
+                  { index, taskId }
+                ].sort((a, b) => a.index - b.index)
+                return {
+                  activeVideoTasks,
+                  activeVideoTaskId: taskId,
+                  activeVideoTaskSegmentIndex: index
+                }
+              }, `已提交任务，完成 ${videoIds.filter(Boolean).length}/${parts.length}`)
+            }
+          },
+          (message) =>
+            void updateFlowProgress(
+              `并发生成中：完成 ${videoIds.filter(Boolean).length}/${parts.length}，进行中 ${running.size} 路。第 ${index + 1} 段：${message}`
+            )
+        )
+        const videoAsset = await assets.add(generated.blob, 'video', 'ai-generated', {
+          filename: `数字人口播_${String(index + 1).padStart(2, '0')}.mp4`,
+          prompt: generated.prompt,
+          projectId: p.id,
+          shotId: shotIds[index]
+        })
+        videoIds[index] = videoAsset.id
+        await measureSpeechWindow(videoAsset.id)
+        rebuildTimeline()
+        await persistFlow((current) => ({
+          generatedVideoAssetIds: [...videoIds],
+          generatedSpeechAssetIds: [...speechIds],
+          activeVideoTasks: (current.activeVideoTasks || []).filter((item) => item.index !== index),
+          activeVideoTaskId: undefined,
+          activeVideoTaskSegmentIndex: undefined,
+          pendingSegmentIndex: undefined,
+          pendingSpeechAssetId: undefined
+        }), `并发生成中：已完成 ${videoIds.filter(Boolean).length}/${parts.length}`)
+      } catch (error: unknown) {
+        const err = error as { name?: string; message?: string }
+        if (signal.aborted || err?.name === 'AbortError') throw error
+        failures.push({ index, message: err?.message || String(error) })
+      } finally {
+        running.delete(index)
+      }
+    },
+    signal
+  )
+
+  for (let index = 0; index < parts.length; index++) {
+    if (isComplete(index) && videoIds[index]) await measureSpeechWindow(videoIds[index])
+  }
+  rebuildTimeline()
+  const completed = videoIds.filter(Boolean).length
+  if (signal.aborted) throw new DOMException('生成已取消', 'AbortError')
+  if (failures.length) {
+    throw new Error(`第 ${failures.map((item) => item.index + 1).join('、')} 段失败。${failures[0].message}`)
+  }
+  if (completed < parts.length) {
+    throw new Error(`只完成了 ${completed}/${parts.length} 段，请继续生成剩余片段`)
+  }
+
   p.speechWorkflow = {
-    ...p.speechWorkflow!,
+    ...p.speechWorkflow,
     stage: 'editing',
-    generatedVideoAssetIds: videoIds,
-    generatedSpeechAssetIds: speechIds,
-    progress: `数字人口播已生成：${parts.length} 段动态视频，已使用克隆音色并写入剪辑时间线。`,
+    generatedVideoAssetIds: [...videoIds],
+    generatedSpeechAssetIds: [...speechIds],
+    activeVideoTasks: [],
+    activeVideoTaskId: undefined,
+    activeVideoTaskSegmentIndex: undefined,
+    progress: `数字人口播已生成：${parts.length} 段音画同步视频，已按台词顺序拼进时间线。`,
     error: undefined,
     updatedAt: Date.now()
   }
@@ -697,9 +863,9 @@ function makeDigitalShot(
     title: `数字人口播 ${index + 1}`,
     visualPrompt: '保持人物身份、服装、背景和机位稳定，自然面向镜头口播。',
     videoPrompt,
-    audioDescription: '使用上传声音样本复刻的清晰人声。',
+    audioDescription: '克隆音色按台词合成的口播，H3 对口型。',
     voiceover: text,
-    audioMode: 'tts',
+    audioMode: 'h3-dialogue',
     duration,
     cameraMovement: 'static',
     imageAssetId: imageId,
@@ -709,23 +875,28 @@ function makeDigitalShot(
   }
 }
 
-function makeDigitalClip(index: number, shotId: string, startTime: number, duration: number): TimelineClip {
+function makeDigitalClip(
+  index: number,
+  shotId: string,
+  startTime: number,
+  duration: number,
+  sourceIn = 0
+): TimelineClip {
   return {
     id: `clip_${shotId}`,
     shotId,
     startTime,
     duration,
-    sourceIn: 0,
-    transitionIn: index ? 'fade' : 'none',
-    transitionDuration: index ? 0.18 : 0,
+    sourceIn,
+    transitionIn: 'none',
+    transitionDuration: 0,
     speed: 1,
-    volume: 0,
+    volume: 1,
     enabled: true
   }
 }
 
 function startNew() {
-  showWorkspace.value = false
   router.replace({ name: 'smart-speech', query: { new: '1' } })
 }
 
@@ -734,7 +905,6 @@ onBeforeUnmount(() => {
   revoke(audioUrl.value)
   videoUrls.value.forEach(revoke)
   referenceUrls.value.forEach(revoke)
-  generatedPreviewUrls.value.forEach(revoke)
 })
 </script>
 
@@ -750,7 +920,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <button v-if="showWorkspace" class="new-task" type="button" @click="startNew">新建口播项目</button>
-      <span v-else class="top-note">自动剪辑 · 字幕 · 包装 · AIGC</span>
+      <span v-else class="top-note">{{ mode === 'digital-human' ? '音画同步 · 按序拼接' : '自动剪辑 · 字幕 · 包装 · AIGC' }}</span>
     </header>
 
     <div v-if="!showWorkspace" class="setup-shell">
@@ -783,7 +953,8 @@ onBeforeUnmount(() => {
             <span>01</span>
             <div>
               <h2>项目与口播文案</h2>
-              <p>文案将用于校对语音、拆语义段落和生成字幕包装。</p>
+              <p v-if="mode === 'digital-human'">文案是要念的台词。上传音频只用来克隆音色，不会直接放进成片。</p>
+              <p v-else>文案将用于校对语音、拆语义段落和生成字幕包装。</p>
             </div>
           </div>
           <label class="field">
@@ -832,7 +1003,7 @@ onBeforeUnmount(() => {
                   </template>
                   <template v-else>
                     <strong>上传声音样本</strong>
-                    <span>仅用于克隆音色，推荐 10–20 秒清晰人声</span>
+                    <span>用来克隆音色，推荐 10–20 秒清晰人声</span>
                   </template>
                   <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac" hidden @change="pickAudio" />
                 </label>
@@ -880,14 +1051,14 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="option-grid">
-              <label v-if="mode !== 'digital-human'"><input v-model="options.removePauses" type="checkbox" /> 去除气口长停顿</label>
+              <label><input v-model="options.removePauses" type="checkbox" /> {{ mode === 'digital-human' ? '自动切掉句首句尾气口' : '去除气口长停顿' }}</label>
               <label v-if="mode !== 'digital-human'"><input v-model="options.removeStumbles" type="checkbox" /> 去除卡顿与重复</label>
               <label v-if="mode !== 'digital-human'"><input v-model="options.beauty" type="checkbox" /> 轻量美颜与肤色</label>
               <label><input v-model="options.captions" type="checkbox" /> 口播字幕</label>
-              <label><input v-model="options.titles" type="checkbox" /> 标题与信息条</label>
-              <label><input v-model="options.keywordCallouts" type="checkbox" /> 关键词花字</label>
-              <label><input v-model="options.soundEffects" type="checkbox" /> 转场与提示音效</label>
-              <label><input v-model="options.bgm" type="checkbox" /> BGM 与人声闪避</label>
+              <label v-if="mode !== 'digital-human'"><input v-model="options.titles" type="checkbox" /> 标题与信息条</label>
+              <label><input v-model="options.keywordCallouts" type="checkbox" /> 关键词花字 / 自动划重点</label>
+              <label v-if="mode !== 'digital-human'"><input v-model="options.soundEffects" type="checkbox" /> 转场与提示音效</label>
+              <p v-if="mode === 'digital-human'" class="option-note">先克隆音色，再按文案念词（1688 念一六八八），最后用这轨音频和图片走 H3 对口型。</p>
               <label v-if="mode === 'human-aigc'"><input v-model="options.aigcInserts" type="checkbox" /> 自动插入 AI 分镜</label>
             </div>
           </GlassCard>
@@ -912,9 +1083,10 @@ onBeforeUnmount(() => {
           <span class="kicker">智能口播工作台</span>
           <h1>{{ project.current?.name }}</h1>
           <p>{{ currentFlow?.progress || '素材已经入库，等待处理。' }}</p>
+          <p v-if="currentFlow?.error" class="work-error">{{ currentFlow.error }}</p>
         </div>
         <div class="workspace-actions">
-          <GradientButton type="ghost" @click="router.push('/caption')">字幕包装</GradientButton>
+          <GradientButton type="ghost" @click="router.push('/caption')">字幕与划重点</GradientButton>
           <GradientButton type="ghost" @click="router.push('/export')">导出成片</GradientButton>
           <GradientButton @click="router.push('/edit')">打开剪辑台</GradientButton>
         </div>
@@ -934,10 +1106,14 @@ onBeforeUnmount(() => {
               <span>当前任务</span>
               <h2>
                 {{ currentFlow?.stage === 'editing'
-                  ? '数字人口播视频已经就绪'
-                  : completedVideoCount
-                    ? `已完成 ${completedVideoCount}/${totalDigitalSegments} 段`
-                    : '生成可编辑数字人口播视频' }}
+                  ? currentFlow?.mode === 'digital-human'
+                    ? '数字人口播视频已经就绪'
+                    : '可编辑基础工程已经就绪'
+                  : currentFlow?.mode === 'digital-human'
+                    ? completedVideoCount
+                      ? `已完成 ${completedVideoCount}/${totalDigitalSegments} 段`
+                      : '克隆音色并按台词生成口播'
+                    : '生成可编辑基础工程' }}
               </h2>
             </div>
             <span class="status-pill">
@@ -946,30 +1122,31 @@ onBeforeUnmount(() => {
           </div>
           <p class="work-desc">
             <template v-if="currentFlow?.mode === 'digital-human'">
-              系统会先从样本音频复刻音色，再按文案分段合成语音，并用人物图逐段生成真实的开口视频。生成结果会自动拼入时间线，原始声音样本不会被当作成片音轨。
+              按文案拆成多段（每段 5–15 秒）。先克隆上传音频的音色，再按台词合成人声（1688 念一六八八），最后用这轨音频和图片走 H3 对口型。最多同时提交 10 路。
             </template>
             <template v-else>
               当前会保留真人原片与原声，生成主时间线和近似字幕。ASR / VAD 接入后，卡顿、气口与多 take 选择会自动写回精剪区间。
             </template>
           </p>
           <div class="deliverable-list">
-            <div><span>主素材</span><strong>{{ currentFlow?.mode === 'digital-human' ? '人物图片 + 克隆声音样本' : `${currentFlow?.videoAssetIds.length || 0} 条真人视频` }}</strong></div>
-            <div><span>字幕</span><strong>{{ currentFlow?.options.captions ? '自动生成初稿' : '关闭' }}</strong></div>
-            <div><span>包装</span><strong>{{ currentFlow?.options.titles ? '标题 / 花字 / CTA 待编排' : '简洁模式' }}</strong></div>
-            <div><span>AIGC</span><strong>{{ currentFlow?.options.aigcInserts ? '启用智能插入' : '不插入' }}</strong></div>
+            <div><span>主素材</span><strong>{{ currentFlow?.mode === 'digital-human' ? '人物图片 + 口播音频' : `${currentFlow?.videoAssetIds?.length || 0} 条真人视频` }}</strong></div>
+            <div v-if="currentFlow?.mode === 'digital-human'"><span>声音</span><strong>克隆音色 + 按台词合成</strong></div>
+            <div><span>字幕</span><strong>{{ currentFlow?.options.captions ? (currentFlow?.options.keywordCallouts ? '烧录 + 自动划重点' : '自动生成初稿') : '关闭' }}</strong></div>
+            <div v-if="currentFlow?.mode !== 'digital-human'"><span>包装</span><strong>{{ currentFlow?.options.titles ? '标题 / 花字 / CTA 待编排' : '简洁模式' }}</strong></div>
+            <div v-if="currentFlow?.mode !== 'digital-human'"><span>AIGC</span><strong>{{ currentFlow?.options.aigcInserts ? '启用智能插入' : '不插入' }}</strong></div>
           </div>
-          <section v-if="currentFlow?.mode === 'digital-human' && generatedPreviewUrls.length" class="generated-section">
+          <section v-if="currentFlow?.mode === 'digital-human' && generatedPreviews.length" class="generated-section">
             <div class="generated-head">
               <div>
                 <strong>已生成视频</strong>
                 <span>每完成一段立即保存，可播放、可进入剪辑台查看</span>
               </div>
-              <em>{{ generatedPreviewUrls.length }} / {{ totalDigitalSegments }}</em>
+              <em>{{ generatedPreviews.length }} / {{ totalDigitalSegments }}</em>
             </div>
             <div class="generated-strip">
-              <article v-for="(url, index) in generatedPreviewUrls" :key="url">
-                <video :src="url" controls preload="metadata" />
-                <span>第 {{ index + 1 }} 段 · 已保存</span>
+              <article v-for="item in generatedPreviews" :key="item.id">
+                <video :src="item.url" controls preload="metadata" />
+                <span>第 {{ item.index + 1 }} 段 · 已保存</span>
               </article>
             </div>
           </section>
@@ -977,11 +1154,16 @@ onBeforeUnmount(() => {
             <GradientButton v-if="building" type="ghost" size="lg" @click="cancelGeneration">
               暂停生成并保留进度
             </GradientButton>
-            <GradientButton v-else-if="currentFlow?.stage !== 'editing'" size="lg" @click="buildBaseline">
+            <GradientButton
+              v-else-if="currentFlow?.stage !== 'editing'"
+              size="lg"
+              :loading="building"
+              @click="buildBaseline"
+            >
               {{ currentFlow?.mode === 'digital-human'
                 ? completedVideoCount
                   ? `继续生成剩余 ${Math.max(0, totalDigitalSegments - completedVideoCount)} 段`
-                  : '克隆声音并生成口播视频'
+                  : '克隆音色并按台词生成口播'
                 : '生成可编辑基础工程' }}
             </GradientButton>
             <GradientButton v-else size="lg" @click="router.push('/edit')">进入剪辑台检查</GradientButton>
@@ -992,11 +1174,12 @@ onBeforeUnmount(() => {
         <aside class="capability-panel">
           <h2>自动化能力状态</h2>
           <div class="capability ready"><span />素材入库与项目持久化<strong>已就绪</strong></div>
-          <div class="capability ready"><span />基础时间线与字幕初稿<strong>已就绪</strong></div>
-          <div class="capability"><span />ASR / VAD 卡顿气口清理<strong>待接入</strong></div>
+          <div class="capability ready"><span />{{ currentFlow?.mode === 'digital-human' ? '按序拼接时间线' : '基础时间线与字幕初稿' }}<strong>已就绪</strong></div>
+          <div v-if="currentFlow?.mode === 'digital-human'" class="capability ready"><span />句首句尾气口自动切除<strong>已接入</strong></div>
+          <div v-else class="capability"><span />ASR / VAD 卡顿气口清理<strong>待接入</strong></div>
           <template v-if="currentFlow?.mode === 'digital-human'">
-            <div class="capability ready"><span />声音样本复刻与文案配音<strong>已接入</strong></div>
-            <div class="capability ready"><span />人物图动态口播视频生成<strong>已接入</strong></div>
+            <div class="capability ready"><span />克隆音色并按台词合成人声<strong>已接入</strong></div>
+            <div class="capability ready"><span />H3 图+音频同步口播<strong>已接入</strong></div>
             <div class="capability"><span />音频波形级唇形重定向质检<strong>待增强</strong></div>
           </template>
           <div v-else class="capability"><span />人脸跟踪与轻量美颜<strong>待接入</strong></div>
@@ -1046,6 +1229,8 @@ onBeforeUnmount(() => {
 .kicker { display: block; color: var(--color-accent); font-weight: 650; font-size: 12px; letter-spacing: .08em; margin-bottom: 10px; }
 .intro h1, .workspace-head h1 { font-size: 32px; line-height: 1.2; margin: 0 0 12px; letter-spacing: -.03em; }
 .intro p, .workspace-head p { color: var(--color-text-2); line-height: 1.7; margin: 0; }
+.work-error { color: var(--color-error); margin-top: 8px !important; }
+.work-error { color: var(--color-error); margin-top: 8px !important; }
 .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 22px; }
 .mode-card {
   position: relative;
@@ -1100,6 +1285,7 @@ onBeforeUnmount(() => {
 .option-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
 .option-grid label { display: flex; gap: 8px; align-items: center; color: var(--color-text-2); font-size: 12px; }
 .option-grid input { accent-color: var(--color-accent); }
+.option-note { grid-column: 1 / -1; margin: 0; color: var(--color-text-3); font-size: 12px; line-height: 1.6; }
 .create-bar { position: sticky; bottom: 16px; margin-top: 20px; padding: 16px 18px; display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--color-border-strong); border-radius: var(--radius-lg); background: var(--color-bg-1); box-shadow: var(--shadow-lg); }
 .create-bar strong { display: block; font-size: 13px; }
 .create-bar span { display: block; color: var(--color-text-3); font-size: 11px; margin-top: 3px; }

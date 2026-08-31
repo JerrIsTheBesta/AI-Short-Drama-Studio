@@ -8,13 +8,15 @@ const route = useRoute()
 const router = useRouter()
 const project = useProjectStore()
 
+const steps = computed(() => [...workflowSteps])
+
 const currentStepIndex = computed(() => {
-  return workflowSteps.findIndex((s) => s.route === route.path)
+  return steps.value.findIndex((s) => s.route === route.path)
 })
 
 function isStepDone(index: number): boolean {
   if (!project.current) return false
-  const step = workflowSteps[index]
+  const step = steps.value[index]
   if (!step) return false
   switch (step.id) {
     case 'script':
@@ -37,7 +39,7 @@ function isStepDone(index: number): boolean {
 }
 
 function isStepReachable(index: number): boolean {
-  const step = workflowSteps[index]
+  const step = steps.value[index]
   if (!step) return false
   if (step.id === 'drafts') return true
   if (index === 0) return true
@@ -47,7 +49,7 @@ function isStepReachable(index: number): boolean {
 
 function goStep(index: number) {
   if (isStepReachable(index)) {
-    router.push(workflowSteps[index].route)
+    router.push(steps.value[index].route)
   }
 }
 </script>
@@ -56,7 +58,7 @@ function goStep(index: number) {
   <aside class="stepnav">
     <div class="steps">
       <button
-        v-for="(s, i) in workflowSteps"
+        v-for="(s, i) in steps"
         :key="s.id"
         class="step"
         :class="{

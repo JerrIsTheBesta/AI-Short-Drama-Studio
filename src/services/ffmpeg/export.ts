@@ -208,19 +208,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
 
     const concatName = 'concated.mp4'
     input.onProgress?.('拼接片段...')
-    await safeExec(
-      ffmpeg,
-      [
-        '-f',
-        'concat',
-        '-safe',
-        '0',
-        '-i',
-        'list.txt',
-        ...encodeArgs(concatName, true)
-      ],
-      '拼接'
-    )
+    await concatClips(ffmpeg, concatName)
     log(`✓ concat 完成 → ${concatName}`)
 
     let finalName = concatName
@@ -555,71 +543,30 @@ async function transcodeClip(
     return
   }
 
-  // 优先保留原片音轨中的环境音效（牛喝水、雨声等）；失败或不存在则静音
-  if (keepAmbient && volume > 0.01) {
-    log(`  尝试保留原片环境音（音量 ${volume.toFixed(2)}）`)
-    const ambientName = outName.replace(/\.mp4$/, '') + '_amb.wav'
-    let hasAmbient = false
+  // 口播成片已是 mp4：画面直通，音轨统一重编码，避免 wasm 里 1080p libx264 把内存打爆。
+  // 音轨不能 -c copy：按时长裁切 AAC 会切到帧中间，拼起来几秒后就是电流声。
+  if (opts.speed === 1 && (keepAmbient || volume > 0.01)) {
+    if (await remuxNormalizeAudio(ffmpeg, inName, outName, duration, sourceIn, volume)) {
+      log('  画面直通，音轨已重采样为 AAC 44100 立体声')
+      return
+    }
+    log('  直通失败，改为单次转码并保留原声')
     try {
-      await safeExec(
-        ffmpeg,
-        [
-          '-ss',
-          String(sourceIn),
-          '-i',
-          inName,
-          '-t',
-          String(duration),
-          '-vn',
-          '-af',
-          `volume=${volume},aresample=44100,aformat=sample_fmts=s16:channel_layouts=stereo`,
-          '-ar',
-          '44100',
-          '-ac',
-          '2',
-          '-y',
-          ambientName
-        ],
-        '提取环境音'
-      )
-      hasAmbient = true
+      await encodeKeepAudio(ffmpeg, inName, outName, duration, sourceIn, videoFilter, volume)
+      return
     } catch (e) {
-      log(`  原片无可用音轨，使用静音：${errorMessage(e)}`)
+      if (!isOom(e)) throw e
+      log(`  转码内存不足，再试直通：${errorMessage(e)}`)
+      if (await remuxNormalizeAudio(ffmpeg, inName, outName, duration, sourceIn, volume)) return
+      throw e
     }
-
-    await safeExec(
-      ffmpeg,
-      [
-        '-ss',
-        String(sourceIn),
-        '-i',
-        inName,
-        '-i',
-        hasAmbient ? ambientName : 'silence.wav',
-        '-t',
-        String(duration),
-        '-shortest',
-        '-vf',
-        videoFilter,
-        '-map',
-        '0:v:0',
-        '-map',
-        '1:a:0',
-        ...encodeArgs(outName, true)
-      ],
-      hasAmbient ? '视频转码（保留环境音）' : '视频转码（静音）'
-    )
-    if (hasAmbient) {
-      try {
-        await ffmpeg.deleteFile(ambientName)
-      } catch {
-        /* ignore */
-      }
-    }
-    return
   }
 
   log(`  使用静音轨（已关闭保留环境音）`)
+  if (opts.speed === 1 && (await remuxVideoWithSilence(ffmpeg, inName, outName, duration, sourceIn))) {
+    log('  画面直通 + 静音音轨，未重编码画面')
+    return
+  }
   await safeExec(
     ffmpeg,
     [
@@ -641,6 +588,170 @@ async function transcodeClip(
       ...encodeArgs(outName, true)
     ],
     '视频转码（静音）'
+  )
+}
+
+function isOom(e: unknown) {
+  return /memory access out of bounds|out of memory|Aborted\(\d+\)/i.test(errorMessage(e))
+}
+
+async function remuxNormalizeAudio(
+  ffmpeg: { exec: (args: string[]) => Promise<unknown> },
+  inName: string,
+  outName: string,
+  duration: number,
+  sourceIn: number,
+  volume = 1
+): Promise<boolean> {
+  const audioFilter =
+    volume > 0.99 && volume < 1.01
+      ? 'aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo'
+      : `volume=${volume},aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo`
+  const args = ['-fflags', '+genpts']
+  if (sourceIn > 0.04) args.push('-ss', String(sourceIn))
+  if (duration > 0.04) args.push('-t', String(duration))
+  args.push(
+    '-i',
+    inName,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k',
+    '-ar',
+    '44100',
+    '-ac',
+    '2',
+    '-af',
+    audioFilter,
+    '-shortest',
+    '-avoid_negative_ts',
+    'make_zero',
+    '-movflags',
+    '+faststart',
+    '-y',
+    outName
+  )
+  return (await execCode(ffmpeg, args)) === 0
+}
+
+async function concatClips(
+  ffmpeg: { exec: (args: string[]) => Promise<unknown> },
+  concatName: string
+) {
+  const copyCode = await execCode(ffmpeg, [
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    'list.txt',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k',
+    '-ar',
+    '44100',
+    '-ac',
+    '2',
+    '-af',
+    'aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo',
+    '-fflags',
+    '+genpts',
+    '-avoid_negative_ts',
+    'make_zero',
+    '-movflags',
+    '+faststart',
+    '-y',
+    concatName
+  ])
+  if (copyCode === 0) {
+    log('  拼接：画面直通，音轨统一重编码')
+    return
+  }
+  log('  拼接直通失败，改为整段重编码')
+  await safeExec(
+    ffmpeg,
+    ['-f', 'concat', '-safe', '0', '-i', 'list.txt', ...encodeArgs(concatName, true)],
+    '拼接'
+  )
+}
+
+async function remuxVideoWithSilence(
+  ffmpeg: { exec: (args: string[]) => Promise<unknown> },
+  inName: string,
+  outName: string,
+  duration: number,
+  sourceIn: number
+): Promise<boolean> {
+  const code = await execCode(ffmpeg, [
+    '-ss',
+    String(sourceIn),
+    '-t',
+    String(duration),
+    '-i',
+    inName,
+    '-i',
+    'silence.wav',
+    '-map',
+    '0:v:0',
+    '-map',
+    '1:a:0',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-ar',
+    '44100',
+    '-ac',
+    '2',
+    '-shortest',
+    '-y',
+    outName
+  ])
+  return code === 0
+}
+
+async function encodeKeepAudio(
+  ffmpeg: Parameters<typeof writeFile>[0],
+  inName: string,
+  outName: string,
+  duration: number,
+  sourceIn: number,
+  videoFilter: string,
+  volume: number
+) {
+  const audioFilter = volume > 0.99 && volume < 1.01 ? 'anull' : `volume=${volume}`
+  await safeExec(
+    ffmpeg,
+    [
+      '-ss',
+      String(sourceIn),
+      '-i',
+      inName,
+      '-t',
+      String(duration),
+      '-shortest',
+      '-vf',
+      videoFilter,
+      '-af',
+      `${audioFilter},aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo`,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0',
+      ...encodeArgs(outName, true)
+    ],
+    '视频转码（保留原声）'
   )
 }
 

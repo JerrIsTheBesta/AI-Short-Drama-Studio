@@ -23,6 +23,12 @@ export function effectiveVideoPrompt(shot: Shot): string {
   return composeShotVisualPrompt(shot, 'video')
 }
 
+export function isDigitalHumanSpeechProject(
+  project?: { pipelineMode?: string; speechWorkflow?: { mode?: string } | null } | null
+): boolean {
+  return project?.pipelineMode === 'smart-speech' && project.speechWorkflow?.mode === 'digital-human'
+}
+
 /** 默认使用 H3 出镜对白；已有独立音频的旧项目继续按 TTS 处理。 */
 export function effectiveShotAudioMode(shot: Shot): ShotAudioMode {
   return shot.audioMode ?? (shot.audioAssetId ? 'tts' : 'h3-dialogue')
@@ -45,7 +51,11 @@ export function resolveH3VoiceMode(shot: Shot, onScreenNames: string[] = []): 'd
   return onScreen ? 'dialogue' : 'voiceover'
 }
 
-export function needsExternalTts(shot: Shot): boolean {
+export function needsExternalTts(
+  shot: Shot,
+  project?: { pipelineMode?: string; speechWorkflow?: { mode?: string } | null } | null
+): boolean {
+  if (isDigitalHumanSpeechProject(project)) return false
   return effectiveShotAudioMode(shot) === 'tts' && Boolean(shot.voiceover.trim())
 }
 
