@@ -10,6 +10,7 @@ import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph, NODE_W, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
 import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
+import { rebindShotScenes, seedEmptyShotVideoPrompts } from '@/services/canvas/runner'
 import {
   appendCanvasReferenceSource,
   canvasNodeProducesImage
@@ -234,6 +235,8 @@ onMounted(async () => {
   } else {
     project.setCanvas(rebuildCanvasGraph(project.current, true))
   }
+  rebindShotScenes()
+  seedEmptyShotVideoPrompts()
   pullStrandedFreeformIntoView()
   await assets.refresh()
   document.querySelectorAll('body > input[type="file"]').forEach((el) => el.remove())

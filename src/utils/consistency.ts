@@ -1,8 +1,8 @@
 import type { ID, Project, Scene, Shot, Subject } from '@/types'
-import { sceneForShotPlace } from '@/utils/shotPlace'
+import { sceneForShotPlace, shotMentionsScene } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
-import { stillModeForShot } from '@/utils/videoStill'
+import { shotVideoNode, stillModeForShot } from '@/utils/videoStill'
 
 export interface ShotRefBundle {
   ids: ID[]
@@ -124,7 +124,7 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       label: `CHARACTER DESIGN SHEET of ${sub.name}; lock only this person's face, hair, body and outfit; do not generate a four-view grid`
     })
   }
-  const scene = sceneForShot(shot, project)
+  const scene = sceneAssetForShot(shot, project)
   if (scene?.plateAssetId && !omitted.has(scene.plateAssetId)) {
     out.push({
       id: scene.plateAssetId,
@@ -220,10 +220,8 @@ function packShotRefs(
   const omitted = new Set(shot.omittedRefAssetIds ?? [])
   const keep = (list: { id: ID; label: string }[]) =>
     omitted.size ? list.filter((item) => !omitted.has(item.id)) : list
-  const scenes = project.scenes ?? []
   const chars = castRefEntries(shot, project, { includeProps: opts.includeProps })
-  const scene =
-    (shot.sceneId && scenes.find((s) => s.id === shot.sceneId)) || scenes[0]
+  const scene = sceneAssetForShot(shot, project)
   const sceneEntry = scene?.plateAssetId
     ? {
         id: scene.plateAssetId,
@@ -325,6 +323,33 @@ export function sceneForShot(shot: Shot, project: Project): Scene | undefined {
   return sceneForShotPlace(shot, project)
 }
 
+function sceneFromVideoEdges(shot: Shot, project: Project): Scene | undefined {
+  const node = shotVideoNode(project, shot.id)
+  const canvas = project.canvas
+  if (!node || !canvas) return undefined
+  const scenes = project.scenes ?? []
+  for (const edge of canvas.edges ?? []) {
+    if (edge.target !== node.id) continue
+    const src = canvas.nodes.find((item) => item.id === edge.source)
+    if (src?.type !== 'scene') continue
+    const scene = scenes.find((item) => item.id === src.data.sceneId)
+    if (scene) return scene
+  }
+  return undefined
+}
+
+/**
+ * 出图/出视频用的场景底板。提示词仍走 sceneForShot（冲突时空不灌词），
+ * 图必须跟画布连线一致：已绑定的场景、连到本镜视频节点的场景、名字对得上的场景，最后才退回第一张场景卡。
+ */
+export function sceneAssetForShot(shot: Shot, project: Project): Scene | undefined {
+  const all = project.scenes ?? []
+  if (!all.length) return undefined
+  const bound = shot.sceneId ? all.find((item) => item.id === shot.sceneId) : undefined
+  if (bound) return bound
+  return sceneFromVideoEdges(shot, project) || all.find((item) => shotMentionsScene(shot, item)) || all[0]
+}
+
 export type ShotRefSlot = {
   id: ID
   label: string
@@ -358,7 +383,7 @@ export function imageRefSlots(shot: Shot, project: Project): ShotRefSlot[] {
   for (const sub of subjectsForShot(shot, project)) {
     push(sub.designSheetAssetId, `四视图·${sub.name}`, true)
   }
-  const scene = sceneForShot(shot, project)
+  const scene = sceneAssetForShot(shot, project)
   push(scene?.plateAssetId, scene ? `锚点·${scene.name}` : '锚点图', true)
   push(scene?.propSheetAssetId, scene ? `关键道具·${scene.name}` : '关键道具图', true)
   if (project.pipelineMode === 'remake') {

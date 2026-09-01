@@ -27,6 +27,7 @@ import { normalizeCameraMovement, synthesizeVideoPerformance, isVideoPerformance
 import { extractJsonText, parseJsonRobust } from '@/utils/jsonRepair'
 import { boundSubjectIds, inferSubjectsFromText, shotCastText, subjectMatchKeys } from '@/utils/consistency'
 import { sceneConflictsWithShot, shotMentionsScene } from '@/utils/shotPlace'
+import { isPlaceholderSpokenLine } from './dialogue'
 import { mergeContinuedPlay } from '@/utils/playContinue'
 import {
   extractPlayDirectives,
@@ -537,8 +538,16 @@ function asShotOutlineList(raw: unknown): ShotOutline[] {
     .filter((item) => item.visualPrompt || item.voiceover || item.title)
 }
 
+function cleanShotVoiceover(raw: string | undefined): string {
+  const v = String(raw || '').trim()
+  if (!v) return ''
+  const body = v.replace(/^[^：:\n]{1,12}[：:]\s*/, '').trim()
+  if (isPlaceholderSpokenLine(v) || isPlaceholderSpokenLine(body)) return ''
+  return v
+}
+
 function inferOutlineAudioMode(voiceover: string, requested?: string): ShotAudioMode | undefined {
-  const vo = (voiceover || '').trim()
+  const vo = cleanShotVoiceover(voiceover)
   if (!vo) return 'none'
   if (
     requested === 'h3-dialogue' ||
@@ -1726,11 +1735,11 @@ export function normalizeStoryboard(
       []
     ).slice(0, 3)
     const sceneIds = resolveIds(s?.sceneId ?? s?.sceneName ?? s?.location, scnMap, [])
-    const voiceover = String(
-      s?.voiceover ?? s?.dialogue ?? s?.narration ?? s?.spokenText ?? s?.caption ?? ''
-    ).trim()
+    const voiceover = cleanShotVoiceover(
+      String(s?.voiceover ?? s?.dialogue ?? s?.narration ?? s?.spokenText ?? s?.caption ?? '')
+    )
     const requestedAudioMode = String(s?.audioMode || '')
-    const audioMode: ShotAudioMode = inferOutlineAudioMode(voiceover, requestedAudioMode) || 'h3-dialogue'
+    const audioMode: ShotAudioMode = inferOutlineAudioMode(voiceover, requestedAudioMode) || 'none'
     const purpose = optStr(s?.purpose)
     const shotSize = optStr(s?.shotSize)
     const blocking = optStr(s?.blocking)
@@ -1969,7 +1978,7 @@ export function storyboardToShots(
     visualPrompt: s.visualPrompt,
     videoPrompt: s.videoPrompt,
     audioDescription: s.audioDescription ?? '',
-    voiceover: s.voiceover,
+    voiceover: cleanShotVoiceover(s.voiceover),
     audioMode: s.audioMode,
     speakerHint: s.speakerHint,
     duration: s.duration,

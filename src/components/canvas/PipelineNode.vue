@@ -261,6 +261,7 @@ const promptValue = computed({
 
 const promptHint = computed(() => {
   if (type.value === 'audio') return '改口播后重新合成配音'
+  if (type.value === 'shotVideo') return '拆分镜后会自动填入发给视频模型的全文。空着点开也会补上，改完原样发送。'
   return '这里就是实际发出去的全文。改完原样发送，不会再背后加词。'
 })
 
@@ -316,15 +317,22 @@ function onPromptPaste() {
 
 watch(assetId, () => loadMedia(), { immediate: true })
 watch(
-  () => props.selected,
-  (on) => {
+  () =>
+    [
+      props.selected,
+      type.value,
+      shot.value?.id,
+      subject.value?.id,
+      scene.value?.id,
+      Boolean((shot.value?.compiledVideoPrompt || '').trim())
+    ] as const,
+  ([on]) => {
     panelOpen.value = Boolean(on)
     if (!on) {
       persistShotVideoPrompt()
       moreOpen.value = false
       cropOn.value = false
       trimOn.value = false
-      return
     }
     const p = project.current
     const t = type.value
@@ -343,6 +351,9 @@ watch(
       if (patch) project.updateShot(shot.value.id, patch)
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
+      if (patch) project.updateShot(shot.value.id, patch)
+    } else if (t === 'shotVideo' && shot.value) {
+      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
     }
   },

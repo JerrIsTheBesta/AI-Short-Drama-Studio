@@ -346,7 +346,7 @@ const historyIds = computed(() => {
 })
 
 const videoPromptPlaceholder = computed(() =>
-  '粘贴或编辑后原样发送。生成视频不会改回默认模板。空着再点「优化提示词」或「按分镜重铺」才会重写。'
+  '拆分镜后会自动填入发给视频模型的全文。空着点开或生成时会按分镜补上，改完原样发送。'
 )
 
 watch(
@@ -370,6 +370,9 @@ watch(
       if (patch) project.updateShot(shot.value.id, patch)
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
+      if (patch) project.updateShot(shot.value.id, patch)
+    } else if (t === 'shotVideo' && shot.value) {
+      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
     }
   },

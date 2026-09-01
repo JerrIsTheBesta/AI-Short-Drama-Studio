@@ -183,7 +183,7 @@ onBeforeUnmount(() => {
       这镜还没绑人物，人设图不会进关键帧。到「人物」分组点重新提取，或在画面描述里写出角色名字。
     </p>
     <p v-else-if="mode === 'image' && !slots.length" class="hint">关键帧是 2×2 四宫格（正好四格）。用人设图和场景图来画这一镜正在发生的事。</p>
-    <p v-else-if="mode === 'video' && !slots.length" class="hint">先生成关键帧（事件画面），再出视频。也可以自己加人设、场景或参考图。</p>
+    <p v-else-if="mode === 'video' && !slots.length" class="hint">先做人设图和场景图，再出视频。本镜会带上绑定场景的场景图。</p>
     <AssetPicker
       :open="pickerOpen"
       kind="image"

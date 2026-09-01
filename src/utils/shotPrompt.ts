@@ -229,7 +229,10 @@ export function synthesizeVideoPerformance(shot: Shot): string {
   const look = (shot.eyeline || '').trim()
   const line = (shot.voiceover || '').trim()
   const speaker = line.match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim() || ''
-  const spoken = line.replace(/^([^：:\n]{1,12})[：:]\s*/, '').trim()
+  const spokenRaw = line.replace(/^([^：:\n]{1,12})[：:]\s*/, '').trim()
+  const spoken = /^(?:无|没有|暂无|空|无对白|无台词|无口播|none|n\/a)$/i.test(spokenRaw.replace(/[。.\s]/g, ''))
+    ? ''
+    : spokenRaw
   const movement = normalizeCameraMovement(shot.cameraMovement)
   const bits = [
     `${happening.replace(/[。；;]+$/, '')}。`,

@@ -7,6 +7,23 @@ const SPEAKER_RE = /^(旁白|画外音|解说|主持人|人声|台词|对白|nar
 const NAME_RE = /^(?:[\u3400-\u9fff]{1,6})(?:说|问|答)?$/
 const DIRECTION_RE =
   /景别|镜头|站位|中景|近景|特写|全景|远景|推近|拉远|横摇|运镜|机位|构图|画面中|四宫|六格|分镜|过肩|正反打|视线|承接上一镜|本镜可见|留给下一镜/
+const PLACEHOLDER_SPEECH_RE =
+  /^(?:无|没有|暂无|空|无对白|无台词|无口播|不对白|不说话|没有台词|没有对白|none|n\/a|na|null|nil|-|—|–|\/|／)$/i
+const PERF_HINT_RE =
+  /哭腔|哽咽|抽泣|颤抖|低声|轻声|小声|大声|喊道|怒吼|冷冷|喘|气音|破音|沙哑|咬牙|画外|旁白|哭着|笑着|泣|带着哭|带着笑|压着嗓|压低|OS|VO/
+const PERF_PREFIX_RE =
+  /^(?:带着[^：:\n]{1,8}|哭着|笑着|低声|轻声|小声|大声|哽咽|颤抖|喘着气|冷冷地|平静地|泣声)[地的]?\s*[：:]\s*/
+
+/** 「无」「无对白」不是台词，不能进 <d>，否则会被念出来。 */
+export function isPlaceholderSpokenLine(text: string): boolean {
+  const t = String(text || '')
+    .replace(/<\/?d>/gi, '')
+    .replace(/\[(?:Chinese|English|Japanese|Korean)\]/gi, '')
+    .replace(/[“”「」'"'']/g, '')
+    .replace(/[。.!！？?\s]/g, '')
+    .trim()
+  return !t || PLACEHOLDER_SPEECH_RE.test(t)
+}
 
 function clipSpokenBody(body: string): string {
   const cut = body.search(/[。！？!?]\s*(?:镜头|画面|景别|运镜|机位|构图|站位)/)
@@ -23,6 +40,19 @@ export function looksLikeShotDirection(text: string): boolean {
   return false
 }
 
+/** 表演提示不能进 <d>，否则会被念出来。只留真正要说的字。 */
+export function stripSpokenStageDirection(text: string): string {
+  let t = String(text || '').trim()
+  if (!t) return ''
+  t = t.replace(/^(?:[（(【[][^）)】\]]{1,24}[）)】\]]\s*[：:]?\s*)+/, '')
+  t = t.replace(/[（(【[][^）)】\]]{1,24}[）)】\]]/g, (block) => (PERF_HINT_RE.test(block) ? '' : block))
+  t = t.replace(PERF_PREFIX_RE, '')
+  t = t.replace(/^[“”「」『』"'']+|[“”「」『』"'']+$/g, '')
+  t = t.replace(/[“”「」『』]/g, '')
+  t = t.replace(/^[：:\s]+|[：:\s]+$/g, '')
+  return t.replace(/\s+/g, ' ').trim()
+}
+
 export function spokenTextOnly(input: string): string {
   const cleaned = input
     .split(/\r?\n/)
@@ -36,15 +66,17 @@ export function spokenTextOnly(input: string): string {
       if (!match) return trimmed
 
       const label = match[1].trim().replace(/^[【\[(（]|[】\])）]$/g, '')
-      const looksLikeSpeaker = SPEAKER_RE.test(label) || NAME_RE.test(label)
-      return looksLikeSpeaker ? match[2].trim() : trimmed
+      const looksLikeSpeaker = SPEAKER_RE.test(label) || NAME_RE.test(label) || PERF_HINT_RE.test(label)
+      const body = looksLikeSpeaker ? match[2].trim() : trimmed
+      return isPlaceholderSpokenLine(body) ? '' : body
     })
     .filter(Boolean)
     .join(' ')
     .trim()
 
-  const spoken = clipSpokenBody(cleaned)
+  const spoken = stripSpokenStageDirection(clipSpokenBody(cleaned))
   if (!spoken) return ''
   if (looksLikeShotDirection(spoken)) return ''
+  if (isPlaceholderSpokenLine(spoken)) return ''
   return spoken
 }

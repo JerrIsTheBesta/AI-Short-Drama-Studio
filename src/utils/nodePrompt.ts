@@ -12,7 +12,7 @@ import {
   shotKeyframePrompt
 } from '@/services/ai/consistency'
 import { spokenTextOnly } from '@/services/ai/dialogue'
-import { buildH3ImageSlots, composeH3VideoPrompt } from '@/services/ai/h3Prompt'
+import { composeH3VideoPrompt, compiledH3PromptNeedsRebuild, sanitizeDTagContents, buildH3ImageSlots } from '@/services/ai/h3Prompt'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import type { Project, Scene, Shot, Subject } from '@/types'
 import {
@@ -109,8 +109,8 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
     prompt: shotDirectorBrief(shot, project),
     aesthetic: project.script?.h3Aesthetic || project.script?.aesthetic,
     audioDescription: shot.audioDescription,
-    voiceover: shot.voiceover || '',
-    voiceMode: resolveH3VoiceMode(shot, onScreenNames),
+    voiceover: spoken,
+    voiceMode: spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none',
     speakerHint: shot.speakerHint,
     speakerName: visibleSpeaker,
     onScreenNames,
@@ -125,6 +125,10 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
     aspectRatio: project.settings.aspectRatio,
     cameraMovement: shot.cameraMovement,
     shotSize: shot.shotSize,
+    blocking: shot.blocking,
+    eyeline: shot.eyeline,
+    continuity: shot.continuity,
+    purpose: shot.purpose,
     promptStyle: getVideoPromptStyle(),
     mode: 'R2VA',
     forceIntegrated: true
@@ -157,9 +161,8 @@ function hasStoredPrompt(value: string | undefined): boolean {
 }
 
 export function videoSendPrompt(shot: Shot, project: Project): string {
-  if (shot.compiledVideoPrompt != null && shot.compiledVideoPrompt.trim()) {
-    return shot.compiledVideoPrompt
-  }
+  const stored = (shot.compiledVideoPrompt || '').trim()
+  if (stored && !compiledH3PromptNeedsRebuild(stored)) return sanitizeDTagContents(stored)
   return defaultVideoSendPrompt(shot, project)
 }
 
@@ -212,6 +215,11 @@ export function fillEmptyGeneratePrompt(
     if (hasStoredPrompt(shot.imagePrompt)) return null
     return { imagePrompt: defaultShotImagePrompt(shot, project) }
   }
-  // 分镜视频：框里有字就永远保留。空着也不自动填默认模板，避免粘贴后被生成/再点开覆盖。
-  return null
+  const stored = (shot.compiledVideoPrompt || '').trim()
+  if (stored && !compiledH3PromptNeedsRebuild(stored)) {
+    const sanitized = sanitizeDTagContents(stored)
+    if (sanitized !== stored) return { compiledVideoPrompt: sanitized }
+    return null
+  }
+  return { compiledVideoPrompt: defaultVideoSendPrompt(shot, project) }
 }

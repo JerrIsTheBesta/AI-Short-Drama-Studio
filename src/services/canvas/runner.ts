@@ -36,7 +36,7 @@ import {
 } from '@/services/ai'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
-import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
+import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneAssetForShot, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
@@ -63,7 +63,8 @@ import {
   defaultShotImagePrompt,
   subjectSendPrompt,
   videoSendPrompt,
-  shotDirectorBrief
+  shotDirectorBrief,
+  fillEmptyGeneratePrompt
 } from '@/utils/nodePrompt'
 import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
 import { isNodeRunning, mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
@@ -485,7 +486,7 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
       onProgress?.(`先补「${latest.name}」角色设计图…`)
       await generateSubjectSheet(latest, onProgress, signal)
     }
-    const scene = sceneForShot(shot, project.current)
+    const scene = sceneAssetForShot(shot, project.current)
     if (scene && !scene.plateAssetId) {
       onProgress?.(`先补场景「${scene.name}」…`)
       await generateScenePlate(scene, onProgress, signal)
@@ -559,10 +560,16 @@ async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => voi
     onProgress?.(`先补「${latest.name}」角色设计图…`)
     await generateSubjectSheet(latest, onProgress, signal)
   }
-  const scene = sceneForShot(shot, project.current)
-  if (scene && !scene.plateAssetId) {
-    onProgress?.(`先补场景「${scene.name}」…`)
-    await generateScenePlate(scene, onProgress, signal)
+  const scene = sceneAssetForShot(shot, project.current)
+  if (scene) {
+    if (shot.sceneId !== scene.id) {
+      project.updateShot(shot.id, { sceneId: scene.id })
+    }
+    const latestScene = (project.current.scenes ?? []).find((item) => item.id === scene.id) || scene
+    if (!latestScene.plateAssetId) {
+      onProgress?.(`先补场景「${latestScene.name}」…`)
+      await generateScenePlate(latestScene, onProgress, signal)
+    }
   }
   shot = refreshShot(shot.id)
   const stillMode = stillModeForShot(shot, project.current)
@@ -729,12 +736,39 @@ function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
   return videoModel !== 'wan-prime' && normalizeH3GenMode(shot.h3GenMode) === 'fl2va'
 }
 
+export function seedEmptyShotVideoPrompts() {
+  const project = useProjectStore()
+  const p = project.current
+  if (!p) return
+  for (const shot of p.shots) {
+    const patch = fillEmptyGeneratePrompt('shotVideo', p, shot)
+    if (patch) project.updateShot(shot.id, patch)
+  }
+}
+
+export function rebindShotScenes() {
+  const project = useProjectStore()
+  const p = project.current
+  if (!p) return
+  for (const shot of p.shots) {
+    const scene = sceneAssetForShot(shot, p)
+    if (scene && shot.sceneId !== scene.id) {
+      project.updateShot(shot.id, { sceneId: scene.id })
+    }
+  }
+}
+
 export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   shot = refreshShot(shot.id)
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
+  const promptPatch = fillEmptyGeneratePrompt('shotVideo', project.current, shot)
+  if (promptPatch) {
+    project.updateShot(shot.id, promptPatch)
+    shot = refreshShot(shot.id)
+  }
   if (
     project.current.pipelineMode === 'smart-speech' &&
     project.current.speechWorkflow?.mode === 'digital-human'
@@ -831,6 +865,14 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   }
   if (stillMode === 'keyframe' && !packed.some((entry) => entry.kind === 'keyframe')) {
     throw new Error('没有本镜四宫格关键帧，无法出视频。当前模型需要分镜关键帧。')
+  }
+  if ((project.current.scenes ?? []).length && !packed.some((entry) => entry.kind === 'scene')) {
+    const scene = sceneAssetForShot(shot, project.current)
+    throw new Error(
+      scene
+        ? `没有场景「${scene.name}」的场景图，无法出视频。请先生成该场景图。`
+        : '没有场景图，无法出视频。请先做场景图，或把本镜绑到场景。'
+    )
   }
   if (!packed.length) {
     throw new Error(
@@ -1024,7 +1066,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
       .join('\n\n'),
     aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
     audioDescription: shot.audioDescription,
-    voiceover: cueLines.length ? cueLines.join('\n') : shot.voiceover || '',
+    voiceover: cueLines.length ? cueLines.join('\n') : '',
     voiceMode,
     speakerHint: shot.speakerHint,
     speakerName: visibleSpeaker,
@@ -1042,6 +1084,10 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     aspectRatio: p.settings.aspectRatio,
     cameraMovement: shot.cameraMovement,
     shotSize: shot.shotSize,
+    blocking: shot.blocking,
+    eyeline: shot.eyeline,
+    continuity: shot.continuity,
+    purpose: shot.purpose,
     promptStyle: getVideoPromptStyle(),
     mode: 'R2VA',
     forceIntegrated: true,
@@ -1337,6 +1383,8 @@ export async function runExtractStoryboard(
         for (const shot of stageShots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
       }
       project.setShots(mergeShotAssets(stageShots, project.current.shots))
+      rebindShotScenes()
+      seedEmptyShotVideoPrompts()
     }
     project.setCanvas(rebuildCanvasGraph(project.current, true))
     const landed =
@@ -1375,6 +1423,8 @@ export async function runExtractStoryboard(
       for (const shot of shots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
     }
     project.setShots(mergeShotAssets(shots, project.current.shots))
+    rebindShotScenes()
+    seedEmptyShotVideoPrompts()
   }
   if (project.current.script) {
     project.setScript({
@@ -1610,6 +1660,8 @@ export async function runVideoRemake(
     project.setShots(shots)
     project.setSubjects(analysis.result.subjects ?? [])
     project.setScenes(analysis.result.scenes ?? [])
+    rebindShotScenes()
+    seedEmptyShotVideoPrompts()
     project.setScript({
       ...project.current.script,
       topic: analysis.topic || topic,
