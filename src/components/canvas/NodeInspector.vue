@@ -13,6 +13,7 @@ import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
@@ -30,7 +31,7 @@ import {
 import { VISUAL_STYLE_LABEL } from '@/utils/visualStyle'
 import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
-import { normalizeH3GenMode, normalizeVideoGenModel, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VisualStyle } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel, normalizeVideoResolution, videoAllows1080p, videoMaxSeconds, videoMinSeconds, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VideoResolution, type VisualStyle } from '@/types'
 
 const props = defineProps<{
   node: CanvasNode | null
@@ -259,7 +260,27 @@ const showAspect = computed(() => {
 const videoModel = computed({
   get: () => normalizeVideoGenModel(props.node?.data.videoModel),
   set: (v: VideoGenModel) => {
-    if (props.node) project.patchCanvasNode(props.node.id, { videoModel: v })
+    if (!props.node) return
+    const min = videoMinSeconds(v)
+    const max = videoMaxSeconds(v)
+    project.patchCanvasNode(props.node.id, {
+      videoModel: v,
+      videoResolution: normalizeVideoResolution(props.node.data.videoResolution, v),
+      ...(props.node.type === 'videoGen'
+        ? { duration: Math.min(max, Math.max(min, Math.round(props.node.data.duration || min))) }
+        : {})
+    })
+    if (props.node.type === 'shotVideo' && shot.value) {
+      project.updateShot(shot.value.id, {
+        duration: Math.min(max, Math.max(min, Math.round(shot.value.duration || min)))
+      })
+    }
+  }
+})
+const videoResolution = computed({
+  get: () => normalizeVideoResolution(props.node?.data.videoResolution, videoModel.value),
+  set: (v: VideoResolution) => {
+    if (props.node) project.patchCanvasNode(props.node.id, { videoResolution: v })
   }
 })
 const isH3Video = computed(
@@ -981,11 +1002,11 @@ async function optimizeVideoPrompt() {
         <label>时长（秒）</label>
         <input
           type="number"
-          min="5"
-          max="10"
+          :min="videoMinSeconds(videoModel)"
+          :max="videoMaxSeconds(videoModel)"
           step="1"
           :value="shot.duration"
-          @change="project.updateShot(shot.id, { duration: Math.min(10, Math.max(5, Math.round(Number(($event.target as HTMLInputElement).value) || shot.duration))) })"
+          @change="project.updateShot(shot.id, { duration: Math.min(videoMaxSeconds(videoModel), Math.max(videoMinSeconds(videoModel), Math.round(Number(($event.target as HTMLInputElement).value) || shot.duration))) })"
         />
         <label>运镜</label>
         <select
@@ -1070,6 +1091,10 @@ async function optimizeVideoPrompt() {
 
       <ImageModelSelect v-if="isImageNode" />
       <VideoModelSelect v-if="node.type === 'shotVideo' || node.type === 'videoGen'" v-model="videoModel" />
+      <VideoResolutionSeg
+        v-if="(node.type === 'shotVideo' || node.type === 'videoGen') && videoAllows1080p(videoModel) && !isH3Fl2va"
+        v-model="videoResolution"
+      />
       <template v-if="node.type === 'script' && isPlayReady(project.current?.script)">
         <label>续写方向（可选）</label>
         <textarea

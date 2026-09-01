@@ -8,6 +8,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import { isDesktop, desktop } from '@/services/desktop'
 import { pickCoverAssetId, projectCoverUrl } from '@/services/storage'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import { runVideoRemake } from '@/services/canvas/runner'
 import { openLightbox } from '@/composables/useLightbox'
 import type { AspectRatio } from '@/types'
@@ -158,8 +159,15 @@ function closeCreateModal() {
   resetCreateForm()
 }
 
-function onPickRemakeVideo(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0]
+async function pickRemakeVideo() {
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'video', multiple: false })
+  } catch (err: any) {
+    toast.error(err?.message || '读取视频失败')
+    return
+  }
+  const file = files[0]
   if (!file) return
   if (!file.type.startsWith('video/')) {
     toast.warn('请上传视频文件')
@@ -170,12 +178,17 @@ function onPickRemakeVideo(e: Event) {
   remakeVideoUrl.value = URL.createObjectURL(file)
 }
 
-function onPickRemakeProducts(e: Event) {
-  const input = e.target as HTMLInputElement
-  const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith('image/'))
-  input.value = ''
+async function pickRemakeProducts() {
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'image', multiple: true })
+  } catch (err: any) {
+    toast.error(err?.message || '读取产品图失败')
+    return
+  }
+  const images = files.filter((f) => f.type.startsWith('image/'))
   const room = MAX_REMAKE_PRODUCTS - remakeProducts.value.length
-  const take = files.slice(0, Math.max(0, room))
+  const take = images.slice(0, Math.max(0, room))
   if (!take.length) return
   remakeProducts.value = [...remakeProducts.value, ...take]
   remakeProductUrls.value = [...remakeProductUrls.value, ...take.map((f) => URL.createObjectURL(f))]
@@ -333,10 +346,17 @@ async function loadLibraryThumbs() {
   libUrls.value = next
 }
 
-async function uploadLibraryImages(e: Event) {
-  const input = e.target as HTMLInputElement
-  const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith('image/'))
-  input.value = ''
+async function uploadLibraryImages() {
+  if (libUploading.value) return
+  let files: File[]
+  try {
+    files = (await pickLocalFiles({ kind: 'image', multiple: true })).filter((f) =>
+      f.type.startsWith('image/')
+    )
+  } catch (err: any) {
+    toast.error(err?.message || '读取图片失败')
+    return
+  }
   if (!files.length) return
   libUploading.value = true
   try {
@@ -510,10 +530,9 @@ async function moveSelectedLibrary() {
             placeholder="🔍 搜索项目..."
           />
         </div>
-        <label v-else class="lib-upload">
+        <button v-else type="button" class="lib-upload" :disabled="libUploading" @click="uploadLibraryImages">
           {{ libUploading ? '上传中…' : `＋ 上传到${currentFolderLabel}` }}
-          <input type="file" accept="image/*" multiple hidden :disabled="libUploading" @change="uploadLibraryImages" />
-        </label>
+        </button>
       </div>
 
       <div v-if="homeTab === 'projects'">
@@ -778,15 +797,13 @@ async function moveSelectedLibrary() {
                 <div v-if="remakeVideo" class="video-preview">
                   <video :src="remakeVideoUrl" controls muted playsinline />
                   <div class="file-name">{{ remakeVideo.name }}</div>
-                  <label class="replace-video">
+                  <button type="button" class="replace-video" @click="pickRemakeVideo">
                     更换视频
-                    <input class="file-hidden" type="file" accept="video/*" @change="onPickRemakeVideo" />
-                  </label>
+                  </button>
                 </div>
-                <label v-else class="video-add">
+                <button v-else type="button" class="video-add" @click="pickRemakeVideo">
                   ＋ 上传参考视频
-                  <input class="file-hidden" type="file" accept="video/*" @change="onPickRemakeVideo" />
-                </label>
+                </button>
                 <p class="upload-hint">支持 mp4 / mov 等常见视频，会抽帧理解镜头语言。</p>
               </div>
 
@@ -802,19 +819,14 @@ async function moveSelectedLibrary() {
                     <img :src="url" alt="产品图" />
                     <button class="product-del" type="button" @click="removeRemakeProduct(i)">×</button>
                   </div>
-                  <label
+                  <button
                     v-if="remakeProducts.length < MAX_REMAKE_PRODUCTS"
+                    type="button"
                     class="product-add"
+                    @click="pickRemakeProducts"
                   >
                     ＋ 上传产品图
-                    <input
-                      class="file-hidden"
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      @change="onPickRemakeProducts"
-                    />
-                  </label>
+                  </button>
                 </div>
               </div>
             </template>
@@ -1397,6 +1409,12 @@ async function moveSelectedLibrary() {
   color: #fff;
   font-size: 12px;
   line-height: 18px;
+}
+.video-add,
+.replace-video,
+.product-add,
+.lib-upload {
+  font-family: inherit;
 }
 .product-add {
   width: 72px;

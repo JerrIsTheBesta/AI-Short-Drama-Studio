@@ -2,6 +2,7 @@ node_modules
 dist
 dist-electron
 release
+release-pack
 dist-ssr
 *.local
 .DS_Store

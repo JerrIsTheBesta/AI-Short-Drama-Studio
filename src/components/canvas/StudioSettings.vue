@@ -267,7 +267,7 @@ function createVideo(providerId: string) {
         <label>工作流 ID</label>
         <input
           :value="settings.config.video.workflowId"
-          placeholder="MiniMax-Hailuo-2.3"
+          placeholder="minimax_h3_lightx2v_v5_15s"
           @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
         />
         <label>令牌</label>

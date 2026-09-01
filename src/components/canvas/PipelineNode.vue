@@ -17,12 +17,26 @@ import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
+import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
 import { friendlyAiError } from '@/services/ai/abort'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
-import { normalizeH3GenMode, normalizeVideoGenModel, type CanvasNodeType, type H3VideoGenMode, type ID, type VideoGenModel } from '@/types'
+import {
+  normalizeH3GenMode,
+  normalizeVideoGenModel,
+  normalizeVideoResolution,
+  videoAllows1080p,
+  videoDurationOptions,
+  videoMaxSeconds,
+  videoMinSeconds,
+  type CanvasNodeType,
+  type H3VideoGenMode,
+  type ID,
+  type VideoGenModel,
+  type VideoResolution
+} from '@/types'
 
 const props = defineProps<{
   id: string
@@ -156,8 +170,22 @@ const isImageNode = computed(
 const videoModel = computed({
   get: () => normalizeVideoGenModel(nodeMeta.value?.data.videoModel),
   set: (v: VideoGenModel) => {
-    project.patchCanvasNode(props.id, { videoModel: v })
+    const min = videoMinSeconds(v)
+    const max = videoMaxSeconds(v)
+    project.patchCanvasNode(props.id, {
+      videoModel: v,
+      videoResolution: normalizeVideoResolution(nodeMeta.value?.data.videoResolution, v)
+    })
+    if (shot.value) {
+      project.updateShot(shot.value.id, {
+        duration: Math.min(max, Math.max(min, Math.round(shot.value.duration || min)))
+      })
+    }
   }
+})
+const videoResolution = computed({
+  get: () => normalizeVideoResolution(nodeMeta.value?.data.videoResolution, videoModel.value),
+  set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
 })
 const h3GenMode = computed({
   get: () => normalizeH3GenMode(shot.value?.h3GenMode),
@@ -324,11 +352,13 @@ watch(
   { immediate: true }
 )
 
-const durationOptions = [5, 6, 7, 8, 9, 10] as const
+const durationOptions = computed(() => videoDurationOptions(videoModel.value))
 
 function setShotDuration(raw: number) {
   if (!shot.value) return
-  const d = Math.min(10, Math.max(5, Math.round(Number(raw) || shot.value.duration || 5)))
+  const min = videoMinSeconds(videoModel.value)
+  const max = videoMaxSeconds(videoModel.value)
+  const d = Math.min(max, Math.max(min, Math.round(Number(raw) || shot.value.duration || min)))
   project.updateShot(shot.value.id, { duration: d })
 }
 
@@ -915,9 +945,14 @@ const cropStyle = computed(() => ({
           v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo'"
           compact
         />
+        <VideoResolutionSeg
+          v-if="type === 'shotVideo' && videoAllows1080p(videoModel) && !isH3Fl2va"
+          v-model="videoResolution"
+          compact
+        />
         <label v-if="type === 'shotVideo' && shot" class="dur-edit">
           <select
-            :value="Math.min(10, Math.max(5, Math.round(Number(shot.duration) || 5)))"
+            :value="Math.min(videoMaxSeconds(videoModel), Math.max(videoMinSeconds(videoModel), Math.round(Number(shot.duration) || 5)))"
             @change="setShotDuration(Number(($event.target as HTMLSelectElement).value))"
           >
             <option v-for="n in durationOptions" :key="n" :value="n">{{ n }} 秒</option>

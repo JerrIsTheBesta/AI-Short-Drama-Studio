@@ -16,6 +16,7 @@ import fs from 'node:fs/promises'
 import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { closeAppDb, getDbPath, kvGet, kvSet, openAppDb } from './sqlite'
 
@@ -126,6 +127,44 @@ async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true })
 }
 
+function isLockError(err: unknown) {
+  const code = (err as { code?: string } | undefined)?.code
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES' || code === 'EAGAIN'
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function copyWithRetry(src: string, dest: string) {
+  let last: unknown
+  for (let i = 0; i < 5; i++) {
+    try {
+      await fs.copyFile(src, dest)
+      return
+    } catch (err) {
+      last = err
+      if (!isLockError(err)) throw err
+      await sleep(180 * (i + 1))
+    }
+  }
+  throw last
+}
+
+async function readWithRetry(filePath: string) {
+  let last: unknown
+  for (let i = 0; i < 5; i++) {
+    try {
+      return await fs.readFile(filePath)
+    } catch (err) {
+      last = err
+      if (!isLockError(err)) throw err
+      await sleep(180 * (i + 1))
+    }
+  }
+  throw last
+}
+
 function slugName(name: string, id: string) {
   const s = (name || 'project')
     .replace(/[<>:"/\\|?*]/g, '_')
@@ -135,7 +174,7 @@ function slugName(name: string, id: string) {
 }
 
 function resolveAppIcon() {
-  const names = ['logo.png', 'icon.png']
+  const names = ['logo.ico', 'logo.png', 'icon.png']
   const dirs = [
     process.resourcesPath,
     path.join(mainDir, '..'),
@@ -284,6 +323,115 @@ app.whenReady().then(async () => {
       filters: filters ?? [{ name: 'Media', extensions: ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'webm', 'mp3', 'wav'] }]
     })
     return res.canceled ? [] : res.filePaths
+  })
+
+  ipcMain.handle(
+    'desktop:importLocalFiles',
+    async (
+      _e,
+      opts?: { kind?: 'image' | 'audio' | 'video' | 'media'; multiple?: boolean }
+    ) => {
+      const kind = opts?.kind || 'image'
+      const filters =
+        kind === 'image'
+          ? [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }]
+          : kind === 'audio'
+            ? [{ name: '音频', extensions: ['mp3', 'wav', 'm4a', 'aac'] }]
+            : kind === 'video'
+              ? [{ name: '视频', extensions: ['mp4', 'mov', 'webm', 'mkv'] }]
+              : [
+                  {
+                    name: '媒体',
+                    extensions: [
+                      'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp',
+                      'mp4', 'mov', 'webm', 'mkv',
+                      'mp3', 'wav', 'm4a', 'aac'
+                    ]
+                  }
+                ]
+      const win = BrowserWindow.getFocusedWindow()
+      const res = await dialog.showOpenDialog(win ?? undefined, {
+        properties: opts?.multiple === false ? ['openFile'] : ['openFile', 'multiSelections'],
+        filters
+      })
+      if (res.canceled || !res.filePaths.length) return []
+
+      const inbox = path.join(defaultRoot(), 'inbox')
+      await ensureDir(inbox)
+      const out: Array<{ name: string; mime: string; data: ArrayBuffer }> = []
+      for (const src of res.filePaths) {
+        const safe = path.basename(src).replace(/[<>:"/\\|?*]/g, '_')
+        const dest = path.join(inbox, `${Date.now()}_${Math.random().toString(36).slice(2, 6)}_${safe}`)
+        try {
+          await copyWithRetry(src, dest)
+          const buf = await readWithRetry(dest)
+          out.push({
+            name: path.basename(src),
+            mime: mimeOf(src),
+            data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+          })
+        } catch {
+          throw new Error(
+            `无法读取「${path.basename(src)}」，多半被杀毒软件拦截。请到设置 → 系统里点「授权访问本机文件」。`
+          )
+        } finally {
+          await fs.unlink(dest).catch(() => {})
+        }
+      }
+      return out
+    }
+  )
+
+  ipcMain.handle('desktop:openWindowsSecurity', async () => {
+    try {
+      await shell.openExternal('ms-settings:windowsdefender')
+    } catch {
+      await shell.openExternal('windowsdefender:')
+    }
+  })
+
+  ipcMain.handle('desktop:requestFileAccess', async () => {
+    if (process.platform !== 'win32') {
+      throw new Error('这项授权只在 Windows 上需要')
+    }
+    const root = defaultRoot()
+    const exe = process.execPath
+    const exeDir = path.dirname(exe)
+    const exeName = path.basename(exe)
+    const scriptPath = path.join(os.tmpdir(), `aicuts-allow-${Date.now()}.ps1`)
+    const q = (s: string) => `'${s.replace(/'/g, "''")}'`
+    await fs.writeFile(
+      scriptPath,
+      [
+        `Add-MpPreference -ExclusionPath ${q(root)}`,
+        `Add-MpPreference -ExclusionPath ${q(exeDir)}`,
+        `Add-MpPreference -ExclusionProcess ${q(exeName)}`
+      ].join('\r\n'),
+      'utf8'
+    )
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-WindowStyle',
+            'Hidden',
+            '-Command',
+            `Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${q(scriptPath)}`
+          ],
+          { windowsHide: true }
+        )
+        child.on('error', reject)
+        child.on('exit', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error('已取消授权，或本机没有 Windows 安全中心'))
+        })
+      })
+    } finally {
+      await fs.unlink(scriptPath).catch(() => {})
+    }
+    return true
   })
 
   ipcMain.handle('desktop:saveTextFile', async (_e, opts?: {

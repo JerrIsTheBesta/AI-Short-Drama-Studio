@@ -20,6 +20,7 @@ import AssetPicker from '@/components/common/AssetPicker.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import { lookFromScript } from '@/utils/visualStyle'
 import { openLightbox } from '@/composables/useLightbox'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import type { Shot, ID, Subject, Scene } from '@/types'
 
 const router = useRouter()
@@ -355,49 +356,38 @@ async function regenerate(shot: Shot) {
   await generateOne(shot)
 }
 
-function triggerRefUpload(shotId: string) {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.style.display = 'none'
-  input.addEventListener('change', async () => {
-    const files = input.files
-    if (!files || files.length === 0) {
-      document.body.removeChild(input)
-      return
-    }
-    const shot = shots.value.find((s) => s.id === shotId)
-    if (!shot) {
-      document.body.removeChild(input)
-      return
-    }
-    let count = 0
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith('image/')) continue
-      try {
-        const asset = await assets.add(file, 'image', 'uploaded', {
-          filename: file.name,
-          projectId: project.current?.id,
-          shotId: shot.id
-        })
-        const ids = [...(shot.referenceAssetIds ?? []), asset.id]
-        project.updateShot(shot.id, { referenceAssetIds: ids })
-        const url = await assets.getUrl(asset.id)
-        if (url) {
-          const list = refUrls.value[shot.id] ?? []
-          refUrls.value[shot.id] = [...list, url]
-        }
-        count++
-      } catch (e) {
-        console.error('upload ref failed', e)
+async function triggerRefUpload(shotId: string) {
+  const shot = shots.value.find((s) => s.id === shotId)
+  if (!shot) return
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'image', multiple: true })
+  } catch (e: any) {
+    toast.error(e?.message || '读取参考图失败')
+    return
+  }
+  let count = 0
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    try {
+      const asset = await assets.add(file, 'image', 'uploaded', {
+        filename: file.name,
+        projectId: project.current?.id,
+        shotId: shot.id
+      })
+      const ids = [...(shot.referenceAssetIds ?? []), asset.id]
+      project.updateShot(shot.id, { referenceAssetIds: ids })
+      const url = await assets.getUrl(asset.id)
+      if (url) {
+        const list = refUrls.value[shot.id] ?? []
+        refUrls.value[shot.id] = [...list, url]
       }
+      count++
+    } catch (e) {
+      console.error('upload ref failed', e)
     }
-    if (count > 0) toast.success(`已添加 ${count} 张参考图到资源库`)
-    document.body.removeChild(input)
-  })
-  document.body.appendChild(input)
-  input.click()
+  }
+  if (count > 0) toast.success(`已添加 ${count} 张参考图到资源库`)
 }
 
 async function removeRef(shot: Shot, assetId: string) {
@@ -411,48 +401,40 @@ async function removeRef(shot: Shot, assetId: string) {
   refUrls.value[shot.id] = urls
 }
 
-function triggerProjectRefUpload() {
+async function triggerProjectRefUpload() {
   if (!project.current?.script) {
     toast.warn('没有打开的项目')
     return
   }
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.style.display = 'none'
-  input.addEventListener('change', async () => {
-    const files = input.files
-    if (!files || files.length === 0) {
-      document.body.removeChild(input)
-      return
-    }
-    const script = project.current!.script!
-    const ids = [...(script.referenceAssetIds ?? [])]
-    let count = 0
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith('image/')) continue
-      try {
-        const asset = await assets.add(file, 'image', 'uploaded', {
-          filename: file.name,
-          projectId: project.current?.id
-        })
-        ids.push(asset.id)
-        const url = await assets.getUrl(asset.id)
-        if (url && !projectRefUrls.value.includes(url)) {
-          projectRefUrls.value.push(url)
-        }
-        count++
-      } catch (e) {
-        console.error('upload ref failed', e)
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'image', multiple: true })
+  } catch (e: any) {
+    toast.error(e?.message || '读取参考图失败')
+    return
+  }
+  const script = project.current.script
+  const ids = [...(script.referenceAssetIds ?? [])]
+  let count = 0
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    try {
+      const asset = await assets.add(file, 'image', 'uploaded', {
+        filename: file.name,
+        projectId: project.current?.id
+      })
+      ids.push(asset.id)
+      const url = await assets.getUrl(asset.id)
+      if (url && !projectRefUrls.value.includes(url)) {
+        projectRefUrls.value.push(url)
       }
+      count++
+    } catch (e) {
+      console.error('upload ref failed', e)
     }
-    project.setScript({ ...script, referenceAssetIds: ids })
-    if (count > 0) toast.success(`已添加 ${count} 张项目级参考图`)
-    document.body.removeChild(input)
-  })
-  document.body.appendChild(input)
-  input.click()
+  }
+  project.setScript({ ...script, referenceAssetIds: ids })
+  if (count > 0) toast.success(`已添加 ${count} 张项目级参考图`)
 }
 
 async function removeProjectRef(assetId: string) {

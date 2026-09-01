@@ -65,13 +65,20 @@ import {
   shotDirectorBrief
 } from '@/utils/nodePrompt'
 import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
-import { mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
+import { isNodeRunning, mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
 import { toDigitalHumanWav } from '@/services/ffmpeg'
-import type { CanvasNode, ID, Scene, Shot, Subject, VideoGenModel } from '@/types'
-import { normalizeH3GenMode, normalizeVideoGenModel } from '@/types'
+import type { CanvasNode, ID, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
+import {
+  isH3VideoFamily,
+  normalizeH3GenMode,
+  normalizeVideoGenModel,
+  normalizeVideoResolution,
+  videoMaxSeconds,
+  videoMinSeconds
+} from '@/types'
 import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 
 export type RunProgress = (nodeId: string, msg: string) => void
@@ -696,11 +703,24 @@ async function loadRefImageBlob(id: ID, label: string): Promise<Blob> {
   return blob
 }
 
-function canvasVideoModelForShot(shot: Shot): VideoGenModel {
-  const node = useProjectStore().current?.canvas?.nodes.find(
+function canvasVideoNodeForShot(shot: Shot) {
+  return useProjectStore().current?.canvas?.nodes.find(
     (n) => n.type === 'shotVideo' && n.data.shotId === shot.id
   )
-  return normalizeVideoGenModel(node?.data.videoModel)
+}
+
+function canvasVideoModelForShot(shot: Shot): VideoGenModel {
+  return normalizeVideoGenModel(canvasVideoNodeForShot(shot)?.data.videoModel)
+}
+
+function canvasVideoResolutionForShot(shot: Shot, videoModel: VideoGenModel): VideoResolution {
+  return normalizeVideoResolution(canvasVideoNodeForShot(shot)?.data.videoResolution, videoModel)
+}
+
+function clampVideoDuration(raw: number | undefined, videoModel: VideoGenModel, fallback = 5) {
+  const min = videoMinSeconds(videoModel)
+  const max = videoMaxSeconds(videoModel)
+  return Math.min(max, Math.max(min, Math.round(raw || fallback)))
 }
 
 function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
@@ -755,13 +775,14 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
         sceneName: place.name,
         sceneLighting: place.lighting,
         shotTitle: shot.title,
-        duration: shot.duration,
+        duration: clampVideoDuration(shot.duration, videoModel),
         width: project.current.settings.width,
         height: project.current.settings.height,
         aspectRatio: project.current.settings.aspectRatio,
         cameraMovement: shot.cameraMovement,
         promptStyle,
         videoModel: 'h3',
+        videoResolution: canvasVideoResolutionForShot(shot, videoModel),
         h3GenMode: 'fl2va',
         mode: 'I2VA',
         signal,
@@ -870,13 +891,14 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       shotTitle: shot.title,
       imageAssignments,
       imageSlots,
-      duration: shot.duration,
+      duration: clampVideoDuration(shot.duration, videoModel),
       width: project.current.settings.width,
       height: project.current.settings.height,
       aspectRatio: project.current.settings.aspectRatio,
       cameraMovement: shot.cameraMovement,
       promptStyle,
       videoModel,
+      videoResolution: canvasVideoResolutionForShot(shot, videoModel),
       h3GenMode: 'reference',
       mode: h3Mode,
       signal,
@@ -1363,6 +1385,58 @@ export async function runExtractStoryboard(
   return run
 }
 
+const GROUP_GEN_TYPES = new Set(['subject', 'scene', 'shotBoard', 'shotImage', 'sceneProps'])
+const IMAGE_GEN_CONCURRENCY = 3
+
+export function groupGenerateJobId(groupId: string) {
+  return `${groupId}:gen`
+}
+
+function groupChildNodeIds(groupId: string): string[] {
+  const nodes = useProjectStore().current?.canvas?.nodes ?? []
+  return nodes.filter((n) => n.parentGroupId === groupId && GROUP_GEN_TYPES.has(n.type)).map((n) => n.id)
+}
+
+/** 分组标题栏「一键生成」：并行跑这一组下面的全部出图节点。 */
+export async function runGenerateGroup(
+  groupId: string,
+  onProgress?: RunProgress,
+  signal?: AbortSignal
+) {
+  if (
+    groupId !== 'group-subjects' &&
+    groupId !== 'group-scenes' &&
+    groupId !== 'group-shots'
+  ) {
+    throw new Error('这个分组不能一键生成')
+  }
+  const project = useProjectStore()
+  const p = project.current
+  if (!p?.canvas) throw new Error('画布为空')
+  if (!isPlayApproved(p)) throw new Error(PLAY_GATE_MSG)
+  const ids = groupChildNodeIds(groupId)
+  if (!ids.length) throw new Error('这一组还没有可生成的节点')
+  const pending = ids.filter((id) => !isNodeRunning(id))
+  if (!pending.length) throw new Error('这一组已在生成中')
+  return withNodeJob(groupGenerateJobId(groupId), async () => {
+    ensureNotCancelled(signal)
+    const source = onProgress ? 'agent' : 'canvas'
+    const noun =
+      groupId === 'group-subjects' ? '人物四视图' : groupId === 'group-scenes' ? '场景锚点图' : '分镜关键帧'
+    const activity = trackActivity(groupId, `一键生成${noun}`, source, (msg) => onProgress?.(groupId, msg))
+    try {
+      activity.progress(`同时生成 ${pending.length} 个节点…`)
+      await mapPool(pending, IMAGE_GEN_CONCURRENCY, (id) =>
+        runCanvasNode(id, (nid, msg) => onProgress?.(nid, msg), signal)
+      )
+      activity.done(`${noun}已全部提交`)
+    } catch (e: any) {
+      activity.fail(e)
+      throw e
+    }
+  })
+}
+
 /** 分组标题栏「重新提取」：只重提这一组，不清空其它组。 */
 export async function runExtractGroup(
   groupId: string,
@@ -1620,8 +1694,8 @@ export async function generateFreeformVideo(
   const prompt = node.data.prompt?.trim()
   if (!prompt) throw new Error('请先写提示词')
   const ids = resolvedCanvasReferenceAssetIds(p, node)
-  const videoModel = node.data.videoModel === 'wan-prime' ? 'wan-prime' : 'h3'
-  const useFl2va = videoModel === 'h3' && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
+  const videoModel = normalizeVideoGenModel(node.data.videoModel)
+  const useFl2va = isH3VideoFamily(videoModel) && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
   const firstId = node.data.firstFrameAssetId || ids[0]
   const lastId = node.data.lastFrameAssetId || ids[1]
   if (useFl2va) {
@@ -1647,10 +1721,7 @@ export async function generateFreeformVideo(
     }
   }
   if (p.folderPath) setActiveProjectDir(p.folderPath)
-  const duration =
-    videoModel === 'wan-prime'
-      ? Math.min(30, Math.max(2, Math.round(node.data.duration || 8)))
-      : Math.min(15, Math.max(1, Math.round(node.data.duration || 8)))
+  const duration = clampVideoDuration(node.data.duration, videoModel, 8)
   const imageSlots = blobs.map((_, i) => {
     const index = i + 1
     return {
@@ -1690,6 +1761,7 @@ export async function generateFreeformVideo(
       voiceMode: 'none',
       promptStyle: 'scene-narrative',
       videoModel,
+      videoResolution: node.data.videoResolution,
       h3GenMode: useFl2va ? 'fl2va' : 'reference',
       mode: 'I2VA',
       signal,

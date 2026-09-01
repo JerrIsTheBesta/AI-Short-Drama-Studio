@@ -11,6 +11,12 @@ export type DesktopAPI = {
   remove: (filePath: string) => Promise<void>
   join: (...parts: string[]) => Promise<string>
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
+  importLocalFiles: (opts?: {
+    kind?: 'image' | 'audio' | 'video' | 'media'
+    multiple?: boolean
+  }) => Promise<Array<{ name: string; mime: string; data: ArrayBuffer }>>
+  requestFileAccess: () => Promise<boolean>
+  openWindowsSecurity: () => Promise<void>
   saveTextFile: (opts: {
     defaultName: string
     text: string

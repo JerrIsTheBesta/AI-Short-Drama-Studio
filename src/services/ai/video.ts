@@ -6,7 +6,7 @@
  *
  * 参考图：prompt、duration、resolution、ref_image_0..8
  * 数字人音画同步：只传 audio_duration、ref_audio_0、ref_image_0、resolution
- * 工作流：minimax_h3_image_audio_to_video_v2_15s / minimax_h3_image_audio_to_video / minimax_h3_b99_002
+ * 工作流：minimax_h3_lightx2v_v5_15s / minimax_h3_lightx2v_v5 / minimax_h3_image_audio_to_video / minimax_h3_b99_002
  */
 
 import { getAIMode } from './client'
@@ -18,10 +18,12 @@ import {
   VIDEO_DEFAULT_WORKFLOW_ID,
   VIDEO_DIGITAL_HUMAN_WORKFLOW_ID,
   VIDEO_FL2VA_WORKFLOW_ID,
+  VIDEO_H3_V5_10S_WORKFLOW_ID,
   migrateVideoBaseUrl,
   migrateVideoWorkflowId
 } from './env'
-import type { AspectRatio, H3VideoGenMode, Shot, VideoGenModel } from '@/types'
+import type { AspectRatio, H3VideoGenMode, Shot, VideoGenModel, VideoResolution } from '@/types'
+import { normalizeVideoResolution, videoMaxSeconds } from '@/types'
 import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
@@ -77,8 +79,10 @@ export interface VideoGenInput {
   strength?: number
   signal?: AbortSignal
   promptStyle?: VideoPromptStyle
-  /** 图生视频节点模型。默认 H3 */
+  /** 图生视频节点模型。默认 H3 15s；h3-v5 为 10 秒 1080p */
   videoModel?: VideoGenModel
+  /** h3-v5 可选 1080p */
+  videoResolution?: VideoResolution
   /** H3：参考图生成或首尾帧。默认参考图。 */
   h3GenMode?: H3VideoGenMode
   /** 首尾帧模式的尾帧图 */
@@ -423,11 +427,17 @@ async function dashscopeRequest(
 }
 
 function autodlResolution(input: VideoGenInput): string {
+  const quality =
+    input.videoModel === 'h3-v5' &&
+    input.h3GenMode !== 'fl2va' &&
+    normalizeVideoResolution(input.videoResolution, 'h3-v5') === '1080p'
+      ? '1080p'
+      : '768p'
   const ratio = String(input.aspectRatio || '')
-  if (ratio === '9:16') return '768p竖'
-  if (isLandscapeAspect(ratio) || ratio === '1:1') return '768p横'
+  if (ratio === '9:16') return `${quality}竖`
+  if (isLandscapeAspect(ratio) || ratio === '1:1') return `${quality}横`
   const landscape = (input.width || 0) >= (input.height || 0)
-  return landscape ? '768p横' : '768p竖'
+  return landscape ? `${quality}横` : `${quality}竖`
 }
 
 function unwrapTaskPayload(json: any): any {
@@ -584,7 +594,9 @@ async function realWorkflowVideo(
     ? VIDEO_FL2VA_WORKFLOW_ID
     : isAudioSync
       ? VIDEO_DIGITAL_HUMAN_WORKFLOW_ID
-      : migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
+      : input.videoModel === 'h3-v5'
+        ? VIDEO_H3_V5_10S_WORKFLOW_ID
+        : migrateVideoWorkflowId(cfg.workflowId || VIDEO_DEFAULT_WORKFLOW_ID)
   const root = workflowApiRoot(baseUrl)
   throwIfAborted(input.signal)
 
@@ -617,7 +629,7 @@ async function realWorkflowVideo(
   onProgress?.(`参考图已准备：${dataUrls.length} 张 / 约 ${referencePayloadMb.toFixed(1)} MB`)
 
   const MIN_DUR = 1
-  const MAX_DUR = 15
+  const MAX_DUR = isAudioSync ? 15 : videoMaxSeconds(input.videoModel || 'h3')
   const targetDuration = Math.max(MIN_DUR, Math.min(MAX_DUR, Math.round(input.duration) || 5))
   if (targetDuration !== input.duration) {
     onProgress?.(`视频时长 clamp 到 ${targetDuration} 秒（接口限制 ${MIN_DUR}-${MAX_DUR}s）`)

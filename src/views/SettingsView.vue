@@ -19,6 +19,7 @@ const toast = useToastStore()
 const storage = ref<{ usage: number; quota: number }>({ usage: 0, quota: 0 })
 const ffmpegReady = ref(isFFmpegReady())
 const ffmpegLoading = ref(false)
+const grantingAccess = ref(false)
 
 const diag = ref({
   crossOriginIsolated: false,
@@ -44,6 +45,28 @@ async function openSettingsFolder() {
     await desktop().openPath(root)
   } catch {
     toast.error('打不开配置目录')
+  }
+}
+
+async function grantFileAccess() {
+  if (!isDesktop()) return
+  grantingAccess.value = true
+  try {
+    await desktop().requestFileAccess()
+    toast.success('已授权。请完全退出后重新打开「剧流 Studio」，再试上传参考图。')
+  } catch (err: any) {
+    toast.error(err?.message || '授权未完成。可用 360 / 火绒把本程序加到信任区。')
+  } finally {
+    grantingAccess.value = false
+  }
+}
+
+async function openWindowsSecurity() {
+  if (!isDesktop()) return
+  try {
+    await desktop().openWindowsSecurity()
+  } catch {
+    toast.error('打不开 Windows 安全中心')
   }
 }
 
@@ -196,7 +219,7 @@ const section = computed<SettingsSection>(() => {
 const currentNav = computed(() => nav.find((n) => n.id === section.value) || nav[0])
 
 function go(id: SettingsSection) {
-  router.push(`/settings/${id}`)
+  router.replace(`/settings/${id}`)
 }
 
 function goBack() {
@@ -220,7 +243,6 @@ function navReady(id: SettingsSection) {
     <header class="top">
       <button type="button" class="back" @click="goBack">返回</button>
       <div class="brand">
-        <img src="/logo.png" alt="" />
         <div>
           <h1>设置</h1>
           <p>{{ currentNav.desc }}。改完立刻写入本机文件，重启电脑也不会丢。</p>
@@ -235,6 +257,7 @@ function navReady(id: SettingsSection) {
           v-for="item in nav.slice(0, 6)"
           :key="item.id"
           :to="`/settings/${item.id}`"
+          replace
           active-class=""
           exact-active-class=""
           :class="{ on: section === item.id }"
@@ -245,6 +268,7 @@ function navReady(id: SettingsSection) {
         <p class="group">应用</p>
         <RouterLink
           to="/settings/system"
+          replace
           active-class=""
           exact-active-class=""
           :class="{ on: section === 'system' }"
@@ -258,6 +282,22 @@ function navReady(id: SettingsSection) {
         <StudioSettings v-if="section !== 'agent' && section !== 'system'" :module="section" />
 
         <div v-else-if="section === 'system'" class="sys">
+          <section v-if="isDesktop()" class="panel">
+            <h2>本机文件权限</h2>
+            <p class="card-desc">
+              上传参考图走系统文件框，由主进程复制进「文档\AI-Cut」，不再经过浏览器沙箱。
+            </p>
+            <p class="muted">
+              若仍被拦截，点「授权访问本机文件」。会弹出 Windows 账户控制，允许后把本程序和素材目录加入安全中心排除项。360 / 火绒请把「剧流 Studio」加到信任区。
+            </p>
+            <div class="proj">
+              <button type="button" class="mini" :disabled="grantingAccess" @click="grantFileAccess">
+                {{ grantingAccess ? '等待系统授权…' : '授权访问本机文件' }}
+              </button>
+              <button type="button" class="mini" @click="openWindowsSecurity">打开 Windows 安全中心</button>
+            </div>
+          </section>
+
           <section class="panel">
             <h2>引擎状态</h2>
             <p class="card-desc">FFmpeg 在浏览器里跑，首次使用时会下载约 30MB 核心</p>
@@ -376,12 +416,6 @@ function navReady(id: SettingsSection) {
   align-items: center;
   gap: 10px;
   min-width: 0;
-}
-.brand img {
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  object-fit: contain;
 }
 .brand h1 {
   margin: 0;

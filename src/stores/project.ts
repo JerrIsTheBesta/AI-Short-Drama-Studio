@@ -615,7 +615,8 @@ export const useProjectStore = defineStore('project', () => {
               videoModel: normalizeVideoGenModel(src.data.videoModel),
               h3GenMode: normalizeH3GenMode(src.data.h3GenMode),
               firstFrameAssetId: src.data.firstFrameAssetId,
-              lastFrameAssetId: src.data.lastFrameAssetId
+              lastFrameAssetId: src.data.lastFrameAssetId,
+              videoResolution: src.data.videoResolution
             }
           : {})
       },

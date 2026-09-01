@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useProjectStore, useToastStore } from '@/stores'
-import { runExtractGroup } from '@/services/canvas/runner'
+import { groupGenerateJobId, runExtractGroup, runGenerateGroup } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
+import { isPlayApproved, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 
 const props = defineProps<{
@@ -22,6 +23,8 @@ const extractable = computed(() =>
   props.data.kind === 'subject' || props.data.kind === 'scene' || props.data.kind === 'shot'
 )
 const running = computed(() => isNodeRunning(props.id))
+const generating = computed(() => isNodeRunning(groupGenerateJobId(props.id)))
+const busy = computed(() => running.value || generating.value)
 const playReady = computed(
   () => isPlayReady(project.current?.script) || Boolean((project.current?.script?.content || '').trim())
 )
@@ -30,16 +33,40 @@ const hasItems = computed(() => {
   if (props.data.kind === 'scene') return Boolean(project.current?.scenes?.length)
   return Boolean(project.current?.shots.length)
 })
+const childCount = computed(
+  () =>
+    project.current?.canvas?.nodes.filter(
+      (n) =>
+        n.parentGroupId === props.id &&
+        (n.type === 'subject' ||
+          n.type === 'scene' ||
+          n.type === 'shotBoard' ||
+          n.type === 'shotImage' ||
+          n.type === 'sceneProps')
+    ).length ?? 0
+)
+const runningChildCount = computed(
+  () =>
+    project.current?.canvas?.nodes.filter(
+      (n) => n.parentGroupId === props.id && isNodeRunning(n.id)
+    ).length ?? 0
+)
 const btnLabel = computed(() => {
   if (running.value) return '提取中'
   if (props.data.kind === 'subject') return hasItems.value ? '重新提取' : '提取人物'
   if (props.data.kind === 'scene') return hasItems.value ? '重新提取' : '提取场景'
   return hasItems.value ? '重新提取' : '提取分镜'
 })
+const genLabel = computed(() => (generating.value ? '生成中' : '一键生成'))
+const overlayLabel = computed(() => {
+  if (running.value) return btnLabel.value
+  if (generating.value && childCount.value) return `生成中 ${runningChildCount.value}/${childCount.value}`
+  return genLabel.value
+})
 
 async function reextract(ev: Event) {
   ev.stopPropagation()
-  if (running.value || !extractable.value) return
+  if (busy.value || !extractable.value) return
   if (!playReady.value) {
     toast.warn('请先写完整剧本，再提取')
     return
@@ -57,26 +84,59 @@ async function reextract(ev: Event) {
     if (shouldToastAiError(e)) toast.error(friendlyAiError(e))
   }
 }
+
+async function generateAll(ev: Event) {
+  ev.stopPropagation()
+  if (busy.value || !extractable.value || !hasItems.value) return
+  if (!isPlayApproved(project.current)) {
+    toast.warn(PLAY_GATE_MSG)
+    return
+  }
+  try {
+    await runGenerateGroup(props.id)
+    toast.success(
+      props.data.kind === 'subject'
+        ? '人物四视图已全部跑完'
+        : props.data.kind === 'scene'
+          ? '场景锚点图已全部跑完'
+          : '分镜关键帧已全部跑完'
+    )
+  } catch (e) {
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e))
+  }
+}
 </script>
 
 <template>
-  <div class="gframe" :class="[data.kind ? `tint-${data.kind}` : '', { busy: running }]">
+  <div class="gframe" :class="[data.kind ? `tint-${data.kind}` : '', { busy }]">
     <div class="gframe-h">
       <span>{{ data.label || '分组' }}</span>
-      <button
-        v-if="extractable"
-        type="button"
-        class="gframe-btn nodrag nopan"
-        :disabled="running || !playReady"
-        :title="hasItems ? '只重提这一组，其它组和已生成的图/视频会留下' : '从完整剧本提取这一组'"
-        @click="reextract"
-        @mousedown.stop
-        @pointerdown.stop
-      >
-        {{ btnLabel }}
-      </button>
+      <div v-if="extractable" class="gframe-actions nodrag nopan">
+        <button
+          type="button"
+          class="gframe-btn"
+          :disabled="busy || !playReady"
+          :title="hasItems ? '只重提这一组，其它组和已生成的图/视频会留下' : '从完整剧本提取这一组'"
+          @click="reextract"
+          @mousedown.stop
+          @pointerdown.stop
+        >
+          {{ btnLabel }}
+        </button>
+        <button
+          type="button"
+          class="gframe-btn gen"
+          :disabled="busy || !hasItems"
+          title="同时生成这一组下面的全部节点"
+          @click="generateAll"
+          @mousedown.stop
+          @pointerdown.stop
+        >
+          {{ genLabel }}
+        </button>
+      </div>
     </div>
-    <NodeBusyOverlay v-if="running" :label="btnLabel" />
+    <NodeBusyOverlay v-if="busy" :label="overlayLabel" />
   </div>
 </template>
 
@@ -110,6 +170,13 @@ async function reextract(ev: Event) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.gframe-actions {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .gframe-btn {
   pointer-events: auto;
   flex-shrink: 0;
@@ -121,6 +188,9 @@ async function reextract(ev: Event) {
   color: var(--color-text-1);
   border: 1px solid rgba(255, 255, 255, 0.12);
   cursor: pointer;
+}
+.gframe-btn.gen {
+  border-color: rgba(255, 255, 255, 0.22);
 }
 .gframe-btn:hover:not(:disabled) {
   background: var(--color-accent);

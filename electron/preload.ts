@@ -13,6 +13,12 @@ export type DesktopAPI = {
   remove: (filePath: string) => Promise<void>
   join: (...parts: string[]) => Promise<string>
   pickFiles: (filters?: { name: string; extensions: string[] }[]) => Promise<string[]>
+  importLocalFiles: (opts?: {
+    kind?: 'image' | 'audio' | 'video' | 'media'
+    multiple?: boolean
+  }) => Promise<Array<{ name: string; mime: string; data: ArrayBuffer }>>
+  requestFileAccess: () => Promise<boolean>
+  openWindowsSecurity: () => Promise<void>
   saveTextFile: (opts: {
     defaultName: string
     text: string
@@ -65,6 +71,9 @@ const api: DesktopAPI = {
   remove: (filePath) => ipcRenderer.invoke('desktop:remove', filePath),
   join: (...parts) => ipcRenderer.invoke('desktop:join', parts),
   pickFiles: (filters) => ipcRenderer.invoke('desktop:pickFiles', filters),
+  importLocalFiles: (opts) => ipcRenderer.invoke('desktop:importLocalFiles', opts),
+  requestFileAccess: () => ipcRenderer.invoke('desktop:requestFileAccess'),
+  openWindowsSecurity: () => ipcRenderer.invoke('desktop:openWindowsSecurity'),
   saveTextFile: (opts) => ipcRenderer.invoke('desktop:saveTextFile', opts),
   pickDirectory: () => ipcRenderer.invoke('desktop:pickDirectory'),
   openPath: (filePath) => ipcRenderer.invoke('desktop:openPath', filePath),

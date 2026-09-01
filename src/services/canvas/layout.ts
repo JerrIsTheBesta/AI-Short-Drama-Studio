@@ -344,7 +344,12 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       id: vidId,
       type: 'shotVideo',
       position: cell(i, 0, shotH),
-      data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
+      data: {
+        shotId: shot.id,
+        label: `${i + 1}. ${shot.title}`,
+        videoModel: prev.get(vidId)?.data.videoModel,
+        videoResolution: prev.get(vidId)?.data.videoResolution
+      },
       status: persistStatus(prev.get(vidId)?.status, Boolean(shot.videoAssetId)),
       parentGroupId: 'group-videos'
     })

@@ -6,6 +6,7 @@ import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { desktop, isDesktop } from '@/services/desktop'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import {
   buildScriptMarkdown,
   inferMarkdownTitle,
@@ -387,34 +388,35 @@ async function generateAndNext() {
   await saveAndNext()
 }
 
-function pickProductImages() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.onchange = async () => {
-    const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith('image/'))
-    if (files.length === 0) return
-    const room = MAX_PRODUCT_IMAGES - productIds.value.length
-    if (room <= 0) {
-      toast.warn(`最多 ${MAX_PRODUCT_IMAGES} 张产品图`)
-      return
-    }
-    let added = 0
-    for (const file of files.slice(0, room)) {
-      const asset = await assets.add(file, 'image', 'uploaded', {
-        filename: file.name,
-        projectId: project.current?.id
-      })
-      productIds.value = [...productIds.value, asset.id]
-      const url = await assets.getUrl(asset.id)
-      if (url) productUrls.value[asset.id] = url
-      added++
-    }
-    await persistProductIds()
-    toast.success(`已添加 ${added} 张产品图`)
+async function pickProductImages() {
+  const room = MAX_PRODUCT_IMAGES - productIds.value.length
+  if (room <= 0) {
+    toast.warn(`最多 ${MAX_PRODUCT_IMAGES} 张产品图`)
+    return
   }
-  input.click()
+  let files: File[]
+  try {
+    files = (await pickLocalFiles({ kind: 'image', multiple: true })).filter((f) =>
+      f.type.startsWith('image/')
+    )
+  } catch (err: any) {
+    toast.error(err?.message || '读取产品图失败')
+    return
+  }
+  if (!files.length) return
+  let added = 0
+  for (const file of files.slice(0, room)) {
+    const asset = await assets.add(file, 'image', 'uploaded', {
+      filename: file.name,
+      projectId: project.current?.id
+    })
+    productIds.value = [...productIds.value, asset.id]
+    const url = await assets.getUrl(asset.id)
+    if (url) productUrls.value[asset.id] = url
+    added++
+  }
+  await persistProductIds()
+  toast.success(`已添加 ${added} 张产品图`)
 }
 
 async function persistProductIds() {

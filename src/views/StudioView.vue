@@ -185,7 +185,6 @@ const flowNodes = computed<Node[]>(() => {
     }
     if (n.parentGroupId) {
       mapped.parentNode = n.parentGroupId
-      mapped.parentId = n.parentGroupId
       mapped.expandParent = false
     }
     return mapped

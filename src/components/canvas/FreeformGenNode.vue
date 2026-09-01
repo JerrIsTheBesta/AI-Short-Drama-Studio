@@ -14,13 +14,23 @@ import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
+import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import {
   canvasNodeOutputAssetId,
   resolvedCanvasReferenceAssetIds
 } from '@/services/canvas/references'
-import type { CanvasNodeType, H3VideoGenMode, ID, VideoGenModel } from '@/types'
-import { normalizeH3GenMode, normalizeVideoGenModel } from '@/types'
+import type { CanvasNodeType, H3VideoGenMode, ID, VideoGenModel, VideoResolution } from '@/types'
+import {
+  normalizeH3GenMode,
+  normalizeVideoGenModel,
+  normalizeVideoResolution,
+  videoAllows1080p,
+  videoDurationOptions,
+  videoMaxSeconds,
+  videoMinSeconds
+} from '@/types'
 
 const props = defineProps<{
   id: string
@@ -101,27 +111,22 @@ const lastFrameId = computed({
 const videoModel = computed({
   get: () => normalizeVideoGenModel(node.value?.data.videoModel),
   set: (v: VideoGenModel) => {
-    if (v === 'wan-prime') {
-      project.patchCanvasNode(props.id, {
-        videoModel: v,
-        duration: Math.min(30, Math.max(2, duration.value))
-      })
-      return
-    }
+    const min = videoMinSeconds(v)
+    const max = videoMaxSeconds(v)
     project.patchCanvasNode(props.id, {
       videoModel: v,
-      duration: Math.min(15, Math.max(1, duration.value))
+      duration: Math.min(max, Math.max(min, duration.value)),
+      videoResolution: normalizeVideoResolution(node.value?.data.videoResolution, v)
     })
   }
 })
+const videoResolution = computed({
+  get: () => normalizeVideoResolution(node.value?.data.videoResolution, videoModel.value),
+  set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
+})
 const isH3Video = computed(() => isVideo.value && videoModel.value !== 'wan-prime')
 const isH3Fl2va = computed(() => isH3Video.value && h3GenMode.value === 'fl2va')
-const durationOptions = computed(() => {
-  if (videoModel.value === 'wan-prime') {
-    return Array.from({ length: 29 }, (_, i) => i + 2)
-  }
-  return Array.from({ length: 15 }, (_, i) => i + 1)
-})
+const durationOptions = computed(() => videoDurationOptions(videoModel.value))
 const duration = computed({
   get() {
     const raw = Math.round(Number(node.value?.data.duration) || 8)
@@ -315,38 +320,27 @@ function onEmptyClick() {
 }
 
 function uploadRefs() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.style.cssText =
-    'position:fixed;left:-10000px;top:0;width:0;height:0;opacity:0;border:0;padding:0;margin:0;overflow:hidden;'
-  let closed = false
-  const finish = async () => {
-    if (closed) return
-    closed = true
-    window.removeEventListener('focus', onFocus)
-    const files = Array.from(input.files ?? [])
-    input.remove()
-    const added: ID[] = []
-    for (const file of files) {
-      if (!file.type.startsWith('image/')) continue
-      const asset = await assets.add(file, 'image', 'uploaded', {
-        filename: file.name,
-        projectId: project.current?.id
-      })
-      added.push(asset.id)
-    }
-    if (added.length) setRefs([...refs.value, ...added])
+  void pickAndAddRefs()
+}
+
+async function pickAndAddRefs() {
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'image', multiple: true })
+  } catch (err: any) {
+    toast.error(err?.message || '读取参考图失败')
+    return
   }
-  const onFocus = () => {
-    window.setTimeout(() => finish(), 300)
+  const added: ID[] = []
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    const asset = await assets.add(file, 'image', 'uploaded', {
+      filename: file.name,
+      projectId: project.current?.id
+    })
+    added.push(asset.id)
   }
-  input.addEventListener('change', () => finish())
-  input.addEventListener('cancel', () => finish())
-  document.body.appendChild(input)
-  input.click()
-  window.addEventListener('focus', onFocus)
+  if (added.length) setRefs([...refs.value, ...added])
 }
 
 function togglePlay() {
@@ -557,7 +551,15 @@ function removeSelf() {
     </div>
 
     <div class="name">
-      <span class="kind">{{ isVideo ? (videoModel === 'wan-prime' ? '图生视频 · 万相' : '图生视频 · H3') : '图片生成' }}</span>
+      <span class="kind">{{
+        isVideo
+          ? videoModel === 'wan-prime'
+            ? '图生视频 · 万相'
+            : videoModel === 'h3-v5'
+              ? '图生视频 · H3 10s 1080p'
+              : '图生视频 · H3 15s'
+          : '图片生成'
+      }}</span>
       <span class="title">{{ title }}</span>
     </div>
 
@@ -604,6 +606,11 @@ function removeSelf() {
           "
         />
         <AspectRatioSeg compact />
+        <VideoResolutionSeg
+          v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
+          v-model="videoResolution"
+          compact
+        />
         <div class="prompt-foot">
           <ImageModelSelect v-if="!isVideo" />
           <VideoModelSelect v-else v-model="videoModel" />

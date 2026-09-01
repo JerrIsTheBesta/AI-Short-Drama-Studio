@@ -30,8 +30,22 @@ import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
+import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
+import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
-import { normalizeH3GenMode, type H3VideoGenMode, type Shot, type ID } from '@/types'
+import {
+  normalizeH3GenMode,
+  normalizeVideoGenModel,
+  normalizeVideoResolution,
+  videoAllows1080p,
+  videoMaxSeconds,
+  videoMinSeconds,
+  type H3VideoGenMode,
+  type Shot,
+  type ID,
+  type VideoGenModel,
+  type VideoResolution
+} from '@/types'
 import { openLightbox } from '@/composables/useLightbox'
 
 const router = useRouter()
@@ -86,6 +100,46 @@ function shotH3Mode(shot: Shot): H3VideoGenMode {
 
 function setShotH3Mode(shot: Shot, mode: H3VideoGenMode) {
   project.updateShot(shot.id, { h3GenMode: mode })
+}
+
+function shotVideoNodeId(shot: Shot) {
+  return project.current?.canvas?.nodes.find((n) => n.type === 'shotVideo' && n.data.shotId === shot.id)?.id
+}
+
+function shotVideoModel(shot: Shot): VideoGenModel {
+  const node = project.current?.canvas?.nodes.find((n) => n.type === 'shotVideo' && n.data.shotId === shot.id)
+  return normalizeVideoGenModel(node?.data.videoModel)
+}
+
+function shotVideoResolution(shot: Shot): VideoResolution {
+  const node = project.current?.canvas?.nodes.find((n) => n.type === 'shotVideo' && n.data.shotId === shot.id)
+  return normalizeVideoResolution(node?.data.videoResolution, shotVideoModel(shot))
+}
+
+function setShotVideoModel(shot: Shot, model: VideoGenModel) {
+  const id = shotVideoNodeId(shot)
+  if (!id) return
+  const min = videoMinSeconds(model)
+  const max = videoMaxSeconds(model)
+  project.patchCanvasNode(id, {
+    videoModel: model,
+    videoResolution: normalizeVideoResolution(shotVideoResolution(shot), model)
+  })
+  project.updateShot(shot.id, {
+    duration: Math.min(max, Math.max(min, Math.round(shot.duration || min)))
+  })
+}
+
+function setShotVideoResolution(shot: Shot, resolution: VideoResolution) {
+  const id = shotVideoNodeId(shot)
+  if (id) project.patchCanvasNode(id, { videoResolution: resolution })
+}
+
+function clampShotDuration(shot: Shot, raw: number) {
+  const model = shotVideoModel(shot)
+  const min = videoMinSeconds(model)
+  const max = videoMaxSeconds(model)
+  return Math.min(max, Math.max(min, Math.round(Number(raw) || shot.duration || min)))
 }
 const shotsWithoutVideo = computed(() =>
   shots.value.filter((s) => !s.videoAssetId)
@@ -396,16 +450,26 @@ function next() {
           />
         </div>
         <div class="shot-info">
+          <div v-if="!isDigitalHuman" class="info-row">
+            <VideoModelSelect :model-value="shotVideoModel(shot)" @update:model-value="setShotVideoModel(shot, $event)" />
+          </div>
+          <div v-if="!isDigitalHuman && videoAllows1080p(shotVideoModel(shot)) && shotH3Mode(shot) !== 'fl2va'" class="info-row">
+            <span>清晰度</span>
+            <VideoResolutionSeg
+              :model-value="shotVideoResolution(shot)"
+              @update:model-value="setShotVideoResolution(shot, $event)"
+            />
+          </div>
           <label class="info-row">
             <span>时长</span>
             <input
               class="dur-input"
               type="number"
-              min="5"
-              max="10"
+              :min="videoMinSeconds(shotVideoModel(shot))"
+              :max="videoMaxSeconds(shotVideoModel(shot))"
               step="1"
               :value="shot.duration"
-              @change="project.updateShot(shot.id, { duration: Number(($event.target as HTMLInputElement).value) || shot.duration })"
+              @change="project.updateShot(shot.id, { duration: clampShotDuration(shot, Number(($event.target as HTMLInputElement).value)) })"
             />
           </label>
           <label class="info-row">

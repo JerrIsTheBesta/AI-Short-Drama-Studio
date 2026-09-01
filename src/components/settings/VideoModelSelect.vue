@@ -15,14 +15,15 @@ const emit = defineEmits<{ 'update:modelValue': [value: VideoGenModel] }>()
 const settings = useSettingsStore()
 
 const value = computed(() => {
-  if (normalizeVideoGenModel(props.modelValue) === 'wan-prime') return 'wan-prime'
+  const m = normalizeVideoGenModel(props.modelValue)
+  if (m === 'wan-prime' || m === 'h3-v5') return m
   return settings.config.activeVideoId || 'h3'
 })
 
 function onChange(event: Event) {
   const v = (event.target as HTMLSelectElement).value
-  if (v === 'wan-prime') {
-    emit('update:modelValue', 'wan-prime')
+  if (v === 'wan-prime' || v === 'h3-v5' || v === 'h3') {
+    emit('update:modelValue', v)
     return
   }
   settings.selectVideo(v)
@@ -40,6 +41,8 @@ function onChange(event: Event) {
         </option>
       </optgroup>
       <optgroup label="内置">
+        <option value="h3">H3 v5 · 15秒</option>
+        <option value="h3-v5">H3 v5 · 10秒 1080p</option>
         <option value="wan-prime">万相 3.0 Prime</option>
       </optgroup>
     </select>

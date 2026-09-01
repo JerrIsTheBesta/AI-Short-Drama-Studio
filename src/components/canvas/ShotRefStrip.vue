@@ -4,6 +4,7 @@ import { useAssetsStore, useLibraryStore, useProjectStore, useToastStore } from 
 import { imageRefSlots, videoRefSlots, boardRefSlots, boundSubjectIds } from '@/utils/consistency'
 import { openLightbox } from '@/composables/useLightbox'
 import AssetPicker from '@/components/common/AssetPicker.vue'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import type { ID, Shot } from '@/types'
 
 const props = defineProps<{
@@ -109,45 +110,32 @@ async function onPickerConfirm(ids: ID[]) {
 }
 
 function triggerUpload() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.hidden = true
-  input.style.display = 'none'
-  const cleanup = () => {
-    input.remove()
+  void pickAndAddRefs()
+}
+
+async function pickAndAddRefs() {
+  let files: File[]
+  try {
+    files = await pickLocalFiles({ kind: 'image', multiple: true })
+  } catch (err: any) {
+    toast.error(err?.message || '读取参考图失败')
+    return
   }
-  input.addEventListener('change', async () => {
-    const files = input.files
-    cleanup()
-    if (!files?.length) return
-    let count = 0
-    const added: string[] = []
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith('image/')) continue
-      const asset = await assets.add(file, 'image', 'uploaded', {
-        filename: file.name,
-        projectId: project.current?.id,
-        shotId: props.shot?.id
-      })
-      added.push(asset.id)
-      count++
-    }
-    if (added.length) addExtraIds(added)
-    if (count) toast.success(`已添加 ${count} 张参考图`)
-  })
-  document.body.appendChild(input)
-  input.click()
-  window.addEventListener(
-    'focus',
-    () => {
-      window.setTimeout(() => {
-        if (document.body.contains(input) && !input.files?.length) cleanup()
-      }, 300)
-    },
-    { once: true }
-  )
+  if (!files.length) return
+  let count = 0
+  const added: string[] = []
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    const asset = await assets.add(file, 'image', 'uploaded', {
+      filename: file.name,
+      projectId: project.current?.id,
+      shotId: props.shot?.id
+    })
+    added.push(asset.id)
+    count++
+  }
+  if (added.length) addExtraIds(added)
+  if (count) toast.success(`已添加 ${count} 张参考图`)
 }
 
 onBeforeUnmount(() => {

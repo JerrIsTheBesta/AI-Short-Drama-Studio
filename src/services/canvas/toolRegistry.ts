@@ -125,6 +125,9 @@ function counts() {
   const p = useProjectStore().current
   return {
     sheets: (p?.subjects ?? []).filter((s) => !s.designSheetAssetId).length,
+    props:
+      (p?.subjects ?? []).filter((s) => !s.propSheetAssetId).length
+      + (p?.scenes ?? []).filter((s) => !s.propSheetAssetId).length,
     scenes: (p?.scenes ?? []).filter((s) => !s.plateAssetId).length,
     boards: videoRequiresStoryboard(p)
       ? (p?.shots ?? []).filter((s) => !s.boardAssetId).length

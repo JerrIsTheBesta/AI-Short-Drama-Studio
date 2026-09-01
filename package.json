@@ -1,7 +1,7 @@
 {
   "name": "ai-cut",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.4",
   "type": "module",
   "main": "dist-electron/main.js",
   "description": "剧流 Studio：无限画布 + 智能体，从剧本到成片",
@@ -9,7 +9,7 @@
     "dev": "vite",
     "web": "vite --mode web",
     "build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs",
-    "electron:build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/clean-unpacked.mjs && electron-builder",
+    "electron:build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/pack-electron.mjs",
     "preview": "vite preview --host",
     "type-check": "vue-tsc --noEmit"
   },
@@ -20,6 +20,7 @@
     "directories": {
       "output": "release"
     },
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -28,6 +29,10 @@
       "!**/*.local"
     ],
     "extraResources": [
+      {
+        "from": "logo.ico",
+        "to": "logo.ico"
+      },
       {
         "from": "logo.png",
         "to": "logo.png"

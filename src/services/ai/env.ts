@@ -7,14 +7,16 @@ function envStr(key: string, fallback = ''): string {
 }
 
 export const VIDEO_AUTODL_ROOT = 'https://autodl.art'
-export const VIDEO_DEFAULT_WORKFLOW_ID = 'minimax_h3_image_audio_to_video_v2_15s'
+export const VIDEO_DEFAULT_WORKFLOW_ID = 'minimax_h3_lightx2v_v5_15s'
+/** H3 v5 10 秒工作流，可选 1080p */
+export const VIDEO_H3_V5_10S_WORKFLOW_ID = 'minimax_h3_lightx2v_v5'
 /** H3 首尾帧工作流 */
 export const VIDEO_FL2VA_WORKFLOW_ID = 'minimax_h3_b99_002'
 /** 数字人口播：图+音频同步 */
 export const VIDEO_DIGITAL_HUMAN_WORKFLOW_ID = 'minimax_h3_image_audio_to_video'
 
 export function isLegacyVideoConfig(value: string): boolean {
-  return /seetacloud|:8443|\/api\/workflow|U09-API|U06-API|9图版|light2v-1|lightx2v_no_pic|lightx2v_v5/i.test(value)
+  return /seetacloud|:8443|\/api\/workflow|U09-API|U06-API|9图版|light2v-1|lightx2v_no_pic/i.test(value)
 }
 
 export function migrateVideoBaseUrl(url: string): string {
@@ -24,8 +26,15 @@ export function migrateVideoBaseUrl(url: string): string {
 }
 
 export function migrateVideoWorkflowId(id: string): string {
-  if (isLegacyVideoConfig(id)) return VIDEO_DEFAULT_WORKFLOW_ID
-  return (id || '').trim()
+  const raw = (id || '').trim()
+  if (!raw || isLegacyVideoConfig(raw)) return VIDEO_DEFAULT_WORKFLOW_ID
+  if (
+    raw === 'minimax_h3_image_audio_to_video_v2_15s' ||
+    raw === 'MiniMax-Hailuo-2.3'
+  ) {
+    return VIDEO_DEFAULT_WORKFLOW_ID
+  }
+  return raw
 }
 
 export function envRealMode(): boolean {

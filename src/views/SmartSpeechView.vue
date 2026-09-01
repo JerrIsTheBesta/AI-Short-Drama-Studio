@@ -35,6 +35,7 @@ import type {
   Shot
 } from '@/types'
 import { isDigitalHumanSpeechProject } from '@/utils/shot'
+import { pickLocalFiles } from '@/utils/pickLocalFiles'
 
 const route = useRoute()
 const router = useRouter()
@@ -216,42 +217,57 @@ function replaceUrl(previous: string, file?: File) {
   return file ? URL.createObjectURL(file) : ''
 }
 
-function pickImage(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file || !file.type.startsWith('image/')) return
-  imageFile.value = file
-  imageUrl.value = replaceUrl(imageUrl.value, file)
-}
-
-function pickAudio(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file || (!file.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac)$/i.test(file.name))) {
-    toast.warn('请选择 MP3、WAV、M4A 或 AAC 音频')
-    return
+async function chooseImage() {
+  try {
+    const file = (await pickLocalFiles({ kind: 'image', multiple: false }))[0]
+    if (!file || !file.type.startsWith('image/')) return
+    imageFile.value = file
+    imageUrl.value = replaceUrl(imageUrl.value, file)
+  } catch (err: any) {
+    toast.error(err?.message || '读取图片失败')
   }
-  audioFile.value = file
-  audioUrl.value = replaceUrl(audioUrl.value, file)
 }
 
-function pickVideos(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files ?? []).filter(
-    (file) => file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(file.name)
-  )
-  input.value = ''
-  videoUrls.value.forEach(revoke)
-  videoFiles.value = files.slice(0, 8)
-  videoUrls.value = videoFiles.value.map((file) => URL.createObjectURL(file))
+async function chooseAudio() {
+  try {
+    const file = (await pickLocalFiles({ kind: 'audio', multiple: false }))[0]
+    if (!file) return
+    if (!file.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac)$/i.test(file.name)) {
+      toast.warn('请选择 MP3、WAV、M4A 或 AAC 音频')
+      return
+    }
+    audioFile.value = file
+    audioUrl.value = replaceUrl(audioUrl.value, file)
+  } catch (err: any) {
+    toast.error(err?.message || '读取音频失败')
+  }
 }
 
-function pickReferences(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files ?? []).filter((file) => file.type.startsWith('image/'))
-  input.value = ''
-  const room = Math.max(0, 8 - referenceFiles.value.length)
-  const next = files.slice(0, room)
-  referenceFiles.value = [...referenceFiles.value, ...next]
-  referenceUrls.value = [...referenceUrls.value, ...next.map((file) => URL.createObjectURL(file))]
+async function chooseVideos() {
+  try {
+    const files = (await pickLocalFiles({ kind: 'video', multiple: true })).filter(
+      (file) => file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(file.name)
+    )
+    videoUrls.value.forEach(revoke)
+    videoFiles.value = files.slice(0, 8)
+    videoUrls.value = videoFiles.value.map((file) => URL.createObjectURL(file))
+  } catch (err: any) {
+    toast.error(err?.message || '读取视频失败')
+  }
+}
+
+async function chooseReferences() {
+  try {
+    const files = (await pickLocalFiles({ kind: 'image', multiple: true })).filter((file) =>
+      file.type.startsWith('image/')
+    )
+    const room = Math.max(0, 8 - referenceFiles.value.length)
+    const next = files.slice(0, room)
+    referenceFiles.value = [...referenceFiles.value, ...next]
+    referenceUrls.value = [...referenceUrls.value, ...next.map((file) => URL.createObjectURL(file))]
+  } catch (err: any) {
+    toast.error(err?.message || '读取参考图失败')
+  }
 }
 
 function removeReference(index: number) {
@@ -562,6 +578,7 @@ async function buildDigitalHumanVideo(
   const imageId = flow.imageAssetId
   const sampleId = flow.voiceSampleAssetId || flow.audioAssetId
   if (!imageId || !sampleId) throw new Error('缺少人物图片或声音样本，请重新创建项目')
+  const personImageId: string = imageId
   const imageBlob = await assets.getBlob(imageId)
   const sampleBlob = await assets.getBlob(sampleId)
   if (!imageBlob || !sampleBlob) throw new Error('人物图片或声音样本读取失败')
@@ -587,21 +604,33 @@ async function buildDigitalHumanVideo(
   const parts = planned.map((item) => item.text)
   const existingVideos = [...(flow.generatedVideoAssetIds || [])]
   const existingSpeech = [...(flow.generatedSpeechAssetIds || [])]
-  const videoIds = Array.from({ length: parts.length }, (_, i) => existingVideos[i] || undefined)
-  const speechIds = Array.from({ length: parts.length }, (_, i) => existingSpeech[i] || undefined)
+  const videoIds: Array<string | undefined> = Array.from(
+    { length: parts.length },
+    (_, i) => existingVideos[i] || undefined
+  )
+  const speechIds: Array<string | undefined> = Array.from(
+    { length: parts.length },
+    (_, i) => existingSpeech[i] || undefined
+  )
+  const slotAssetIds = (ids: Array<string | undefined>): string[] =>
+    ids.map((id) => id || '')
   const speechBlobs = new Map<number, Blob>()
   const speechDurations = new Map<number, number>()
   const speechWindows = new Map<string, SpeechWindow>()
   const trimPauses = flow.options?.removePauses !== false
   const shotIds = parts.map((_, index) => {
-    const videoAsset = videoIds[index] ? assets.getMeta(videoIds[index]) : undefined
-    const speechAsset = speechIds[index] ? assets.getMeta(speechIds[index]) : undefined
+    const videoId = videoIds[index]
+    const speechId = speechIds[index]
+    const videoAsset = videoId ? assets.getMeta(videoId) : undefined
+    const speechAsset = speechId ? assets.getMeta(speechId) : undefined
     return videoAsset?.shotId || speechAsset?.shotId || `speech_${Date.now().toString(36)}_${index}`
   })
 
-  function isComplete(index) {
-    const videoAsset = videoIds[index] ? assets.getMeta(videoIds[index]) : undefined
-    const speechAsset = speechIds[index] ? assets.getMeta(speechIds[index]) : undefined
+  function isComplete(index: number) {
+    const videoId = videoIds[index]
+    const speechId = speechIds[index]
+    const videoAsset = videoId ? assets.getMeta(videoId) : undefined
+    const speechAsset = speechId ? assets.getMeta(speechId) : undefined
     return videoAsset?.kind === 'video' && speechAsset?.kind === 'audio'
   }
 
@@ -623,8 +652,11 @@ async function buildDigitalHumanVideo(
     const spoken = []
     for (let index = 0; index < parts.length; index++) {
       if (!isComplete(index)) continue
-      const videoAsset = assets.getMeta(videoIds[index])
-      const speechAsset = assets.getMeta(speechIds[index])
+      const videoId = videoIds[index]
+      const speechId = speechIds[index]
+      if (!videoId || !speechId) continue
+      const videoAsset = assets.getMeta(videoId)
+      const speechAsset = assets.getMeta(speechId)
       if (!videoAsset || !speechAsset || videoAsset.kind !== 'video' || speechAsset.kind !== 'audio') continue
       const win = speechWindows.get(videoAsset.id)
       const full = Math.max(
@@ -633,9 +665,12 @@ async function buildDigitalHumanVideo(
       )
       const sourceIn = win?.sourceIn ?? 0
       const duration = Math.max(0.1, win?.duration ?? full)
-      shots.push(makeDigitalShot(index, shotIds[index], parts[index], duration, imageId, videoAsset.id, speechAsset.id))
-      timeline.push(makeDigitalClip(index, shotIds[index], cursor, duration, sourceIn))
-      spoken.push(parts[index])
+      const shotId = shotIds[index]
+      const text = parts[index]
+      if (!shotId || !text) continue
+      shots.push(makeDigitalShot(index, shotId, text, duration, personImageId, videoAsset.id, speechAsset.id))
+      timeline.push(makeDigitalClip(index, shotId, cursor, duration, sourceIn))
+      spoken.push(text)
       cursor += duration
     }
     project.setShots(shots)
@@ -663,7 +698,8 @@ async function buildDigitalHumanVideo(
   const restored = parts.filter((_, index) => isComplete(index)).length
   if (restored) {
     for (let index = 0; index < parts.length; index++) {
-      if (isComplete(index) && videoIds[index]) await measureSpeechWindow(videoIds[index])
+      const videoId = videoIds[index]
+      if (isComplete(index) && videoId) await measureSpeechWindow(videoId)
     }
     rebuildTimeline()
     await updateFlowProgress(`已恢复 ${restored}/${parts.length} 段，准备并发提交剩余任务…`)
@@ -671,8 +707,9 @@ async function buildDigitalHumanVideo(
 
   for (let index = 0; index < parts.length; index++) {
     if (signal.aborted) throw new DOMException('生成已取消', 'AbortError')
-    if (isComplete(index) && speechIds[index]) {
-      const blob = await assets.getBlob(speechIds[index])
+    const existingSpeechId = speechIds[index]
+    if (isComplete(index) && existingSpeechId) {
+      const blob = await assets.getBlob(existingSpeechId)
       if (blob) {
         const prepared = await toDigitalHumanWav(blob)
         speechBlobs.set(index, prepared.blob)
@@ -690,8 +727,8 @@ async function buildDigitalHumanVideo(
     if (prepared.duration > 15) {
       throw new Error(`第 ${index + 1} 段音频为 ${prepared.duration.toFixed(1)} 秒，超过 H3 单镜 15 秒限制，请把该句拆短后重试`)
     }
-    const speechAsset = speechIds[index]
-      ? assets.getMeta(speechIds[index])
+    const speechAsset = existingSpeechId
+      ? assets.getMeta(existingSpeechId)
       : await assets.add(prepared.blob, 'audio', 'ai-generated', {
           filename: `口播_${String(index + 1).padStart(2, '0')}.wav`,
           prompt: text,
@@ -704,7 +741,7 @@ async function buildDigitalHumanVideo(
     speechDurations.set(index, prepared.duration)
     await persistFlow(
       {
-        generatedSpeechAssetIds: [...speechIds],
+        generatedSpeechAssetIds: slotAssetIds(speechIds),
         pendingSegmentIndex: undefined,
         pendingSpeechAssetId: undefined
       },
@@ -713,8 +750,9 @@ async function buildDigitalHumanVideo(
   }
 
   for (let index = 0; index < parts.length; index++) {
-    if (!isComplete(index) || !videoIds[index]) continue
-    const blob = await assets.getBlob(videoIds[index]!)
+    const existingVideoId = videoIds[index]
+    if (!isComplete(index) || !existingVideoId) continue
+    const blob = await assets.getBlob(existingVideoId)
     if (!blob || blob.size < 80_000) videoIds[index] = undefined
   }
 
@@ -799,8 +837,8 @@ async function buildDigitalHumanVideo(
         await measureSpeechWindow(videoAsset.id)
         rebuildTimeline()
         await persistFlow((current) => ({
-          generatedVideoAssetIds: [...videoIds],
-          generatedSpeechAssetIds: [...speechIds],
+          generatedVideoAssetIds: slotAssetIds(videoIds),
+          generatedSpeechAssetIds: slotAssetIds(speechIds),
           activeVideoTasks: (current.activeVideoTasks || []).filter((item) => item.index !== index),
           activeVideoTaskId: undefined,
           activeVideoTaskSegmentIndex: undefined,
@@ -819,7 +857,8 @@ async function buildDigitalHumanVideo(
   )
 
   for (let index = 0; index < parts.length; index++) {
-    if (isComplete(index) && videoIds[index]) await measureSpeechWindow(videoIds[index])
+    const videoId = videoIds[index]
+    if (isComplete(index) && videoId) await measureSpeechWindow(videoId)
   }
   rebuildTimeline()
   const completed = videoIds.filter(Boolean).length
@@ -834,8 +873,8 @@ async function buildDigitalHumanVideo(
   p.speechWorkflow = {
     ...p.speechWorkflow,
     stage: 'editing',
-    generatedVideoAssetIds: [...videoIds],
-    generatedSpeechAssetIds: [...speechIds],
+    generatedVideoAssetIds: slotAssetIds(videoIds),
+    generatedSpeechAssetIds: slotAssetIds(speechIds),
     activeVideoTasks: [],
     activeVideoTaskId: undefined,
     activeVideoTaskSegmentIndex: undefined,
@@ -988,15 +1027,14 @@ onBeforeUnmount(() => {
 
             <template v-if="mode === 'digital-human'">
               <div class="upload-grid two">
-                <label class="upload-box" :class="{ filled: imageFile }">
+                <div class="upload-box" :class="{ filled: imageFile }" role="button" @click="chooseImage">
                   <img v-if="imageUrl" :src="imageUrl" alt="人物预览" />
                   <template v-else>
                     <strong>上传人物图片</strong>
                     <span>正脸、清晰、上半身效果最佳</span>
                   </template>
-                  <input type="file" accept="image/*" hidden @change="pickImage" />
-                </label>
-                <label class="upload-box" :class="{ filled: audioFile }">
+                </div>
+                <div class="upload-box" :class="{ filled: audioFile }" role="button" @click="chooseAudio">
                   <template v-if="audioFile">
                     <strong>{{ audioFile.name }}</strong>
                     <audio class="audio-preview" :src="audioUrl" controls @click.stop />
@@ -1005,13 +1043,12 @@ onBeforeUnmount(() => {
                     <strong>上传声音样本</strong>
                     <span>用来克隆音色，推荐 10–20 秒清晰人声</span>
                   </template>
-                  <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac" hidden @change="pickAudio" />
-                </label>
+                </div>
               </div>
             </template>
 
             <template v-else>
-              <label class="upload-box wide" :class="{ filled: videoFiles.length }">
+              <div class="upload-box wide" :class="{ filled: videoFiles.length }" role="button" @click="chooseVideos">
                 <template v-if="videoFiles.length">
                   <strong>已选择 {{ videoFiles.length }} 条口播视频</strong>
                   <span>{{ videoFiles.map((file) => file.name).join('、') }}</span>
@@ -1020,18 +1057,16 @@ onBeforeUnmount(() => {
                   <strong>上传真人口播原片</strong>
                   <span>支持多 take，系统将按文案顺序选择最佳片段</span>
                 </template>
-                <input type="file" accept="video/*,.mp4,.mov,.webm,.mkv" multiple hidden @change="pickVideos" />
-              </label>
+              </div>
               <div v-if="videoUrls.length" class="video-strip">
                 <video v-for="url in videoUrls" :key="url" :src="url" muted controls />
               </div>
 
               <template v-if="mode === 'human-aigc'">
-                <label class="upload-box wide compact">
+                <div class="upload-box wide compact" role="button" @click="chooseReferences">
                   <strong>添加 AIGC 参考图（可选）</strong>
                   <span>产品、人物、活动 KV 或场景参考，最多 8 张</span>
-                  <input type="file" accept="image/*" multiple hidden @change="pickReferences" />
-                </label>
+                </div>
                 <div v-if="referenceUrls.length" class="reference-strip">
                   <button v-for="(url, index) in referenceUrls" :key="url" type="button" @click="removeReference(index)">
                     <img :src="url" alt="参考图" />
