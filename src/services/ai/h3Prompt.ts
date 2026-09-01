@@ -1,4 +1,4 @@
-/** MiniMax H3 提示词：多图走官方 Ref2VA 六段；单张首帧走 I2VA。台词只进 <d>。 */
+/** MiniMax H3 提示词：分镜默认 integrated_multimodal_description + 内部 [Shot N]；台词只进 <d>。 */
 
 import type { AspectRatio, Shot } from '@/types'
 import { englishOrOmit, h3NameMap, h3UniqueName } from '@/utils/h3Names'
@@ -39,8 +39,11 @@ export interface H3PromptInput {
   height?: number
   aspectRatio?: AspectRatio
   cameraMovement?: Shot['cameraMovement']
+  shotSize?: string
   mode?: 'I2VA' | 'T2VA' | 'R2VA'
   promptStyle?: VideoPromptStyle
+  /** 分镜出片：只用 integrated_multimodal_description，内部可切 [Shot 2]/[Shot 3]。 */
+  forceIntegrated?: boolean
   signal?: AbortSignal
 }
 
@@ -77,14 +80,8 @@ export function h3SpokenTag(spoken: string): string {
   return `<d>[Chinese] ${line}</d>`
 }
 
-function forceChineseSpokenTag(text: string, spoken: string): string {
-  const tag = h3SpokenTag(spoken)
-  if (!tag) return text.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '').trim()
-  const next = text.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, tag)
-  return /<d>\s*\[/.test(next) ? next : `${next} ${tag}`.trim()
-}
-
 export function isOfficialH3Prompt(text: string): boolean {
+  if (isMessyH3Prompt(text) || isH3FillTemplate(text)) return false
   const hasSound = /overall_soundscape\s*:/i.test(text)
   const hasI2va = /integrated_multimodal_description\s*:/i.test(text)
   const hasR2va = /subject_definitions\s*:/i.test(text) && /detailed_description\s*:/i.test(text)
@@ -106,8 +103,40 @@ export function isH3FillTemplate(text: string): boolean {
   return (
     /hands, clothing and the air in the place start to move/i.test(t) ||
     /brows, eyes and mouth show a specific emotion, not a blank stare/i.test(t) ||
-    /the core action completes, residual breath and eye motion remain/i.test(t)
+    /the core action completes, residual breath and eye motion remain/i.test(t) ||
+    /Play the following director notes/i.test(t)
   )
+}
+
+/** 把中文场记原样塞进英文模板、或混用 Ref2VA 六段的脏稿。不能发给 H3。 */
+export function isMessyH3Prompt(text: string): boolean {
+  const t = String(text || '').trim()
+  if (!t) return false
+  if (/Play the following director notes/i.test(t)) return true
+  if (/subject_definitions\s*:/i.test(t)) return true
+  if (/the place named in the director notes/i.test(t)) return true
+  const outside = t.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
+  return /[㐀-鿿]/.test(outside)
+}
+
+function cjkOutsideSpokenTags(text: string): boolean {
+  return /[㐀-鿿]/.test(String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, ''))
+}
+
+/** 正文里的汉字一律删掉；只保留 <d> 里的台词。 */
+export function stripCjkOutsideSpokenTags(text: string): string {
+  const held: string[] = []
+  const masked = String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, (block) => {
+    held.push(block)
+    return `__H3D${held.length - 1}__`
+  })
+  const cleaned = masked
+    .replace(/[\u3400-\u9fff]+/g, '')
+    .replace(/This shot is titled\s*\./gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return cleaned.replace(/__H3D(\d+)__/g, (_, i) => held[Number(i)] || '')
 }
 
 function sanitizeDialogue(text: string): string {
@@ -117,6 +146,62 @@ function sanitizeDialogue(text: string): string {
     .replace(/^[“”「」'"]+|[“”「」'"]+$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+/** 按行拆对白，去掉「人物名：」后只留要进 <d> 的原词。 */
+export function spokenCueLines(voiceover: string): string[] {
+  return String(voiceover || '')
+    .split(/\r?\n/)
+    .map((line) => sanitizeDialogue(line))
+    .filter(Boolean)
+}
+
+export function formatH3Timestamp(seconds: number): string {
+  const totalMs = Math.max(0, Math.round(Number(seconds) * 1000))
+  const m = Math.floor(totalMs / 60_000)
+  const rest = totalMs % 60_000
+  const s = Math.floor(rest / 1000)
+  const ms = rest % 1000
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`
+}
+
+/** 一条成片内部的 [Shot 1/2/3] 时间切分，不是画布上的多个分镜节点。 */
+export function h3InternalShotPlan(
+  duration: number,
+  spokenCount = 0
+): Array<{ index: number; at?: string; beat: string }> {
+  const total = Math.max(5, Math.min(10, Number(duration) || 5))
+  const want = spokenCount >= 3 ? 3 : spokenCount === 2 ? 2 : total >= 8 ? 3 : total >= 6 ? 2 : 1
+  const count = Math.min(3, Math.max(1, want))
+  if (count === 1) return [{ index: 1, beat: total.toFixed(2) }]
+  if (count === 2) {
+    const cut = Math.min(3, Math.max(2, Math.round(total / 2)))
+    return [
+      { index: 1, beat: cut.toFixed(2) },
+      { index: 2, at: formatH3Timestamp(cut), beat: (total - cut).toFixed(2) }
+    ]
+  }
+  return [
+    { index: 1, beat: '3.00' },
+    { index: 2, at: formatH3Timestamp(3), beat: '3.00' },
+    { index: 3, at: formatH3Timestamp(6), beat: Math.max(1, total - 6).toFixed(2) }
+  ]
+}
+
+function describeInternalShotPlan(duration: number, spokenCount: number): string {
+  const plan = h3InternalShotPlan(duration, spokenCount)
+  return plan
+    .map((item, i, all) => {
+      const last = i === all.length - 1
+      const finish = last
+        ? ` End this last beat with: The action develops continuously and finishes naturally within ${item.beat} seconds.`
+        : ''
+      if (item.index === 1) {
+        return `[Shot 1] no timestamp; this beat is about ${item.beat}s.${finish}`
+      }
+      return `[Shot ${item.index}] At ${item.at}, ...; this beat is about ${item.beat}s.${finish}`
+    })
+    .join('\n')
 }
 
 function escapeRegExp(value: string): string {
@@ -336,16 +421,23 @@ function closedMouthLock(input: H3PromptInput): string {
   return `${people.join(' and ')} keep the mouth completely closed and only react. They are not speaking.`
 }
 
-function dialogueBlock(input: H3PromptInput, spoken: string): string {
-  if (!spoken || input.voiceMode === 'none') return 'No dialogue. No lips moving.'
-  const tag = h3SpokenTag(spoken)
+function dialogueBlocks(input: H3PromptInput, lines: string[]): string {
+  if (!lines.length || input.voiceMode === 'none') return 'No dialogue. No lips moving.'
   const who = speakerSubjectLabel(input)
   if (input.voiceMode === 'voiceover') {
-    return `${who} (S1) says in an off-screen voiceover: ${tag} while his lips remain completely closed. ${closedMouthLock(input)} The words inside the d tag are being called from off-screen; nobody on screen mouths them.`
+    const spoken = lines
+      .map((line, i) => `${who} (S${i + 1}) says in an off-screen voiceover: ${h3SpokenTag(line)}`)
+      .join(' ')
+    return `${spoken} while lips remain completely closed. ${closedMouthLock(input)} The words inside the d tag are being called from off-screen; nobody on screen mouths them.`
   }
   const hint = englishOrOmit(input.speakerHint?.replace(/^\[|\]$/g, ''))
-  const lead = hint ? `${who} (S1), ${hint},` : `${who} (S1)`
-  return `${lead} says: ${tag} Other visible characters keep their mouths closed and react silently.`
+  return lines
+    .map((line, i) => {
+      const id = `S${i + 1}`
+      const lead = i === 0 && hint ? `${who} (${id}), ${hint},` : i === 0 ? `${who} (${id})` : `(${id})`
+      return `${lead} says: ${h3SpokenTag(line)}`
+    })
+    .join(' ')
 }
 
 function stripDialogueMentions(text: string): string {
@@ -362,16 +454,20 @@ function stripDialogueMentions(text: string): string {
 
 function stripSpokenLeaks(text: string, spoken: string): string {
   let next = text.replace(/<d>\s*\[(?:Chinese|English|Japanese|Korean)\]\s*[\s\S]*?<\/d>/gi, '')
-  if (!spoken) return next.replace(/\s{2,}/g, ' ').trim()
-  const quoted = (chunk: string) => {
-    const inner = chunk.slice(1, -1)
-    return inner.includes(spoken) || spoken.includes(inner) ? '' : chunk
-  }
-  next = next
-    .replace(/[“「][^”」]*[”」]/g, quoted)
-    .replace(/"(?:[^"\\]|\\.)*"/g, (chunk) => (/[㐀-鿿]/.test(chunk) ? quoted(chunk) : chunk))
-  if (spoken.length >= 4) {
-    next = next.replace(new RegExp(escapeRegExp(spoken), 'g'), '')
+  const lines = spokenCueLines(spoken)
+  const all = lines.length ? lines : spoken ? [sanitizeDialogue(spoken)].filter(Boolean) : []
+  if (!all.length) return next.replace(/\s{2,}/g, ' ').trim()
+  for (const line of all) {
+    const quoted = (chunk: string) => {
+      const inner = chunk.slice(1, -1)
+      return inner.includes(line) || line.includes(inner) ? '' : chunk
+    }
+    next = next
+      .replace(/[“「][^”」]*[”」]/g, quoted)
+      .replace(/"(?:[^"\\]|\\.)*"/g, (chunk) => (/[㐀-鿿]/.test(chunk) ? quoted(chunk) : chunk))
+    if (line.length >= 4) {
+      next = next.replace(new RegExp(escapeRegExp(line), 'g'), '')
+    }
   }
   return next
     .replace(/(?:台词|对白|旁白|口播)\s*[：:]\s*[^：:\n]{0,16}\s*[：:]\s*(?=\n|$|Location facts)/gi, '')
@@ -379,6 +475,15 @@ function stripSpokenLeaks(text: string, spoken: string): string {
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function stripSpokenLeaksOutsideTags(text: string, voiceover: string): string {
+  const held: string[] = []
+  const masked = text.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, (block) => {
+    held.push(block)
+    return `__H3D${held.length - 1}__`
+  })
+  return stripSpokenLeaks(masked, voiceover).replace(/__H3D(\d+)__/g, (_, i) => held[Number(i)] || '')
 }
 
 function stripUnofficialBeatHeadings(text: string): string {
@@ -456,27 +561,7 @@ function retentionAnalysis(input: H3PromptInput): string {
 }
 
 function assembleOfficial(desc: string, sound: string, music = 'N/A', input?: H3PromptInput): string {
-  const body = desc.trim()
-  const defs = input ? subjectDefinitions(input) : ''
-  if (input && isRef2VA(input) && defs) {
-    return `subject_definitions:
-${defs}
-
-summary:
-${summaryBlock(input)}
-
-retention_analysis:
-${retentionAnalysis(input)}
-
-detailed_description:
-${body}
-
-overall_soundscape:
-${sound.trim()}
-
-non_diegetic_music:
-${music.trim() || 'N/A'}`
-  }
+  const body = stripCjkOutsideSpokenTags(desc.trim())
   const extraJobs = input
     ? slotsOf(input)
         .filter((slot) => slot.kind === 'extra' && slot.index > 1)
@@ -484,17 +569,21 @@ ${music.trim() || 'N/A'}`
         .join('\n')
     : ''
   const alignment =
-    input && input.mode !== 'T2VA' && slotsOf(input).length
+    input &&
+    input.mode === 'I2VA' &&
+    !input.forceIntegrated &&
+    slotsOf(input).length &&
+    !/\[Shot\s*[2-9]\]/i.test(body)
       ? `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.${extraJobs ? `\n${extraJobs}` : ''}\n\n`
       : ''
-  return `${alignment}integrated_multimodal_description:
+  return stripCjkOutsideSpokenTags(`${alignment}integrated_multimodal_description:
 ${body}
 
 overall_soundscape:
-${sound.trim()}
+${stripCjkOutsideSpokenTags(sound.trim())}
 
 non_diegetic_music:
-${music.trim() || 'N/A'}`
+${(music.trim() || 'N/A')}`)
 }
 
 function finishLine(input: H3PromptInput): string {
@@ -504,42 +593,126 @@ function finishLine(input: H3PromptInput): string {
 function ensureOfficialBody(desc: string, input: H3PromptInput): string {
   const cleaned = stripUnofficialBeatHeadings(desc)
   const match = cleaned.match(/^([\s\S]*?)(\[Shot\s*1\][\s\S]*)$/i)
-  let style = (match?.[1] || '').trim()
-  let shot = (match?.[2] || cleaned).trim()
+  const style = (match?.[1] || '').trim()
+  const shot = (match?.[2] || cleaned).trim()
   let body = shot.replace(/^\[Shot\s*1\]\s*/i, '').trim()
-  if (isRef2VA(input)) {
-    if (!style) style = `The target video is in a ${styleLead(input.aesthetic)} style.`
-    return `${style}\n[Shot 1] ${body}`
-  }
   const lead = styleLead(input.aesthetic)
-  if (!new RegExp(escapeRegExp(lead), 'i').test(body)) {
+  if (!/\b(cinematic|live-action|2d-animated|3d cg|watercolor)/i.test(`${style}\n${body}`)) {
     body = `${lead}, ${body}`
   }
   return `[Shot 1] ${body}`
 }
 
-function applyDialogue(desc: string, input: H3PromptInput, spoken: string): string {
+function ensureSpokenTags(text: string, lines: string[]): string {
+  if (!lines.length) return text.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '').trim()
+  const tags = lines.map((line) => h3SpokenTag(line))
+  const existing = [...text.matchAll(/<d>\s*\[(?:Chinese|English|Japanese|Korean)\]\s*([\s\S]*?)<\/d>/gi)]
+  const taggedText = existing.map((m) => sanitizeDialogue(m[1] || ''))
+  const allPresent = lines.every((line) => taggedText.some((t) => t === line))
+  if (allPresent) {
+    return text.replace(/<d>\s*\[(?:English|Japanese|Korean)\]/gi, '<d>[Chinese]')
+  }
+  if (existing.length === tags.length) {
+    let i = 0
+    return text.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, () => tags[i++])
+  }
+  const missing = lines
+    .filter((line) => !taggedText.some((t) => t === line || t.includes(line) || line.includes(t)))
+    .map((line) => h3SpokenTag(line))
+  if (!missing.length) {
+    return text.replace(/<d>\s*\[(?:English|Japanese|Korean)\]/gi, '<d>[Chinese]')
+  }
+  const extra = missing.join(' ')
+  if (/\[Shot\s*2\]/i.test(text)) {
+    return text.replace(/\[Shot\s*2\]/i, `${extra}\n\n[Shot 2]`)
+  }
+  return `${text} ${extra}`.trim()
+}
+
+function extractQuotedSpeech(text: string): string[] {
+  const out: string[] = []
+  for (const match of String(text || '').matchAll(/[“「"'‘]([^”」"'’\n]{1,40})[”」"'’]/g)) {
+    const line = sanitizeDialogue(match[1] || '')
+    if (line && /[㐀-鿿]/.test(line) && !out.includes(line)) out.push(line)
+  }
+  return out
+}
+
+/** 从节点原文里抠台词：已有 d 标签、引号、台词/口播行、喊出「…」。 */
+export function extractSpokenFromNotes(text: string): string[] {
+  const raw = String(text || '')
+  if (!raw.trim()) return []
+  const fromTags = [...raw.matchAll(/<d>\s*\[[^\]]*\]\s*([\s\S]*?)<\/d>/gi)]
+    .map((m) => sanitizeDialogue(m[1] || ''))
+    .filter(Boolean)
+  if (fromTags.length) return [...new Set(fromTags)]
+  const out = extractQuotedSpeech(raw)
+  for (const match of raw.matchAll(/(?:^|\n)\s*(?:台词|对白|口播|旁白)\s*[：:]\s*(.+)$/gm)) {
+    const line = sanitizeDialogue(match[1] || '')
+    if (line && /[㐀-鿿]/.test(line) && !out.includes(line)) out.push(line)
+  }
+  for (const match of raw.matchAll(/(?:喊出|喊道|叫道|叫着|轻声说|小声说|小声喊)\s*[“「"'‘]?([\u3400-\u9fff，。！？!?、]{1,20})/g)) {
+    const line = sanitizeDialogue(match[1] || '')
+    if (line && !out.includes(line)) out.push(line)
+  }
+  return out
+}
+
+export function nodeTextHasSpeech(text: string): boolean {
+  const t = String(text || '')
+  if (extractSpokenFromNotes(t).length) return true
+  if (/<d\s*>/i.test(t)) return true
+  return /台词|对白|口播|旁白|喊出|喊道|叫道|开口唤|开口喊|小声喊|轻声说/.test(t)
+}
+
+export function nodeTextForbidsSpeech(text: string): boolean {
+  const t = String(text || '')
+  if (extractSpokenFromNotes(t).length) return false
+  return /没有台词|无对白|不说话|无口播|No dialogue/i.test(t)
+}
+
+function spokenLinesForPrompt(input: H3PromptInput): string[] {
+  const fromVo = input.voiceMode === 'none' ? [] : spokenCueLines(input.voiceover || '')
+  const fromNotes = extractSpokenFromNotes(`${input.prompt || ''}\n${input.audioDescription || ''}`)
+  const merged: string[] = []
+  for (const line of [...fromVo, ...fromNotes]) {
+    if (line && !merged.includes(line)) merged.push(line)
+  }
+  if (merged.length) return merged
+  if (input.voiceMode === 'none') return []
+  return []
+}
+
+function applyDialogue(desc: string, input: H3PromptInput): string {
+  const llmLines = extractSpokenFromNotes(desc)
+  const lines = spokenLinesForPrompt(input)
+  const wanted = lines.length ? lines : llmLines
   const shaped = ensureOfficialBody(desc, input)
   const match = shaped.match(/^([\s\S]*?)(\[Shot\s*1\][\s\S]*)$/i)
-  const style = (match?.[1] || '').trim()
   let body = (match?.[2] || shaped).replace(/^\[Shot\s*1\]\s*/i, '').trim()
-  if (spoken && input.voiceMode !== 'none') {
-    const cleaned = stripDialogueMentions(stripSpokenLeaks(body, spoken))
-    const next = /no dialogue/i.test(cleaned)
-      ? cleaned.replace(/no dialogue\.?\s*(no lips moving\.?)?/i, dialogueBlock(input, spoken))
-      : `${cleaned} ${dialogueBlock(input, spoken)}`.trim()
-    body = forceChineseSpokenTag(next, spoken)
-  } else {
+  if (wanted.length) {
+    const hasTags = /<d>\s*\[/.test(body)
+    if (!hasTags) {
+      const cleaned = stripDialogueMentions(stripSpokenLeaks(body, wanted.join('\n')))
+      const next = /no dialogue/i.test(cleaned)
+        ? cleaned.replace(/no dialogue\.?\s*(no lips moving\.?)?/i, dialogueBlocks(input, wanted))
+        : `${cleaned} ${dialogueBlocks(input, wanted)}`.trim()
+      body = next
+    } else {
+      body = stripSpokenLeaksOutsideTags(body, wanted.join('\n'))
+    }
+    body = ensureSpokenTags(body, wanted)
+    body = body.replace(/No dialogue\.?\s*(No lips moving\.?)?/gi, '').trim()
+  } else if (!/<d>\s*\[/.test(body)) {
     const cleaned = stripSpokenLeaks(body, '')
       .replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
       .trim()
     body = /no dialogue/i.test(cleaned) ? cleaned : `${cleaned} No dialogue. No lips moving.`.trim()
   }
-  if (!new RegExp(escapeRegExp(finishLine(input).slice(0, 28)), 'i').test(body)) {
+  if (!/finishes naturally within/i.test(body)) {
     body = `${body} ${finishLine(input)}`
   }
-  const shot = `[Shot 1] ${body}`
-  return isRef2VA(input) && style ? `${style}\n${shot}` : shot
+  return `[Shot 1] ${body}`
 }
 
 function defaultSoundscape(input: H3PromptInput, spoken: string): string {
@@ -560,6 +733,28 @@ function subjectPhrase(slot: LabeledSlot): string {
   return slot.subject ? `<Subject ${slot.subject}>` : slot.name
 }
 
+function shotSizeEn(raw?: string): string {
+  const t = String(raw || '')
+  if (/特写/.test(t)) return 'close-up'
+  if (/中近/.test(t)) return 'medium close-up'
+  if (/近景/.test(t)) return 'close-up'
+  if (/中全|全景/.test(t)) return 'medium-wide shot'
+  if (/中景/.test(t)) return 'medium shot'
+  if (/大远/.test(t)) return 'extreme wide shot'
+  if (/远景/.test(t)) return 'wide shot'
+  if (/medium close-up|close-up|wide shot|medium shot|medium-wide/i.test(t)) {
+    return t.replace(/[㐀-鿿].*$/, '').trim() || 'medium shot'
+  }
+  return 'medium shot'
+}
+
+function angleEn(raw?: string): string {
+  const t = String(raw || '')
+  if (/过肩/.test(t)) return 'over-the-shoulder'
+  if (/45|侧/.test(t)) return 'framed from a slight side angle'
+  return ''
+}
+
 function shotFrame(input: H3PromptInput) {
   const ratio = input.aspectRatio || '16:9'
   const lighting = englishOrOmit(input.sceneLighting) || 'available light'
@@ -567,49 +762,39 @@ function shotFrame(input: H3PromptInput) {
   const labeled = labeledSlots(input)
   const people = labeled.filter((slot) => slot.kind === 'character')
   const place = labeled.find((slot) => slot.kind === 'scene')
-  const board = labeled.find((slot) => slot.kind === 'board')
-  const who = people.length ? people.map(subjectPhrase).join(' and ') : 'the on-screen people'
+  const who = people.length
+    ? people.map((slot, i) => `${slot.name} (S${i + 1})`).join(' and ')
+    : 'the on-screen people'
   const where = place
-    ? subjectPhrase(place)
-    : input.sceneName?.trim() || 'the place named in the director notes'
-  const boardHint = board
-    ? ` Use <Picture ${board.picture}> only as blocking and order; never show the panel grid.`
-    : ''
+    ? place.name
+    : englishOrOmit(input.sceneName) || 'the location'
   const extras = labeled.filter((slot) => slot.kind === 'extra')
   const extraHint = extras.length
     ? ` Extra refs ${extras.map((slot) => `<Picture ${slot.picture}>`).join(' and ')} lock identity or setting only.`
     : ''
-  const title = input.shotTitle?.trim() ? ` This shot is titled ${input.shotTitle.trim()}.` : ''
-  return { ratio, lighting, movement, who, where, boardHint, extraHint, title }
+  const size = shotSizeEn(input.shotSize)
+  const angle = angleEn(input.shotSize)
+  return { ratio, lighting, movement, who, where, extraHint, size, angle }
 }
 
-function descriptionFromNotes(input: H3PromptInput, notes: string): string {
-  const { ratio, lighting, movement, who, where, boardHint, extraHint, title } = shotFrame(input)
-  const shot = `A continuous full-frame ${ratio} take of ${who} in ${where}.${title} ${CAMERA_EN[movement]}. Play the following director notes as the actual on-screen action, blocking, eyelines, props and emotion. Do not replace them with idle standing, blank faces, or generic hand-and-cloth motion.
-
-${notes.trim()}
-
-Finish this exact beat within ${durationText(input)} seconds.${boardHint}${extraHint} Never show a grid, four-view sheet, storyboard, collage, caption, or label. Lighting stays ${lighting}.`
-  if (isRef2VA(input)) {
-    return `The target video is in a ${styleLead(input.aesthetic)} style with ${lighting}.\n[Shot 1] ${shot}`
-  }
-  return `[Shot 1] ${styleLead(input.aesthetic)}, ${shot}`
+function descriptionFromNotes(input: H3PromptInput): string {
+  const { lighting, movement, who, where, extraHint, size, angle } = shotFrame(input)
+  const angleBit = angle ? `, ${angle}` : ''
+  const body = `${styleLead(input.aesthetic)}, ${size}${angleBit}. ${who} in ${where}. ${CAMERA_EN[movement]}. Gaze stays on the scene, never into the lens. Do not copy a character-sheet pose, a four-view grid, a storyboard, collage, caption, or label. Lighting stays ${lighting}.${extraHint}`
+  return `[Shot 1] ${body}`
 }
 
 function fallbackDescription(input: H3PromptInput, _spoken: string): string {
-  return descriptionFromNotes(
-    input,
-    input.shotTitle?.trim()
-      ? `这一镜的戏是「${input.shotTitle.trim()}」。按场记把动作、站位和视线演完，不要只摆姿势。`
-      : '按本镜场记把具体动作演完，不要只让人站着换表情。'
-  )
+  return descriptionFromNotes(input)
 }
 
 function isGenericActionDump(desc: string): boolean {
   return (
     /action, blocking and chronology come from the storyboard/i.test(desc) ||
     /people match the character design sheets/i.test(desc) ||
-    isH3FillTemplate(desc)
+    /Play the following director notes/i.test(desc) ||
+    isH3FillTemplate(desc) ||
+    cjkOutsideSpokenTags(desc)
   )
 }
 
@@ -628,20 +813,22 @@ export function validateH3Prompt(prompt: string, expectedDialogue?: string): H3P
     if (!/retention_analysis\s*:/i.test(prompt)) issues.push('Ref2VA 缺少 retention_analysis')
     if (!/\[reference generation\]/i.test(prompt)) issues.push('summary 必须以 [reference generation] 开头')
   }
-  if (hasI2va && /<Picture\s*1>/i.test(prompt) && !/at 0\.00 seconds into the target video/i.test(prompt)) {
+  if (
+    hasI2va &&
+    /<Picture\s*1>/i.test(prompt) &&
+    !/\[Shot\s*[2-9]\]/i.test(prompt) &&
+    !/at 0\.00 seconds into the target video/i.test(prompt)
+  ) {
     issues.push('I2VA 缺少首帧对齐句：For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.')
   }
   if (!/overall_soundscape\s*:/i.test(prompt)) issues.push('缺少 overall_soundscape')
   if (!/non_diegetic_music\s*:/i.test(prompt)) issues.push('缺少 non_diegetic_music')
   if (!/\[Shot\s*1\]/i.test(prompt)) issues.push('正文必须以 [Shot 1] 开镜，且第一镜不加时间戳')
   if (/\[Shot\s*1\][^\n]*At\s+\d{2}:\d{2}/i.test(prompt)) {
-    issues.push('[Shot 1] 不得加时间戳；后续镜才写 [Shot 2] At 00:03.500')
+    issues.push('[Shot 1] 不得加时间戳；后续镜才写 [Shot 2] At 00:03.000')
   }
   if (/from\s+\d+(?:\.\d+)?s?\s+to\s+\d+(?:\.\d+)?s/i.test(prompt)) {
     issues.push('H3 正文不要写 From 0.00s to …；用连续叙事写开幅、动作起幅、发展和收住')
-  }
-  if ((prompt.match(/says in an off-screen voiceover:/gi) || []).length > 1) {
-    issues.push('画外音台词被写了两次')
   }
   if (/【环境光影】|【画面演进】|【角色声音签名】/.test(prompt)) {
     issues.push('混入了中文分区，H3 不认这套格式')
@@ -652,25 +839,26 @@ export function validateH3Prompt(prompt: string, expectedDialogue?: string): H3P
     issues.push('正文残留空台词标签；台词只能出现在 d 标签内')
   }
 
-  const sourceSpeakers = [...(expectedDialogue || '').matchAll(/(?:^|[\n。！？!?])\s*([^：:\n。！？!?]{1,12})[：:]\s*/g)]
-    .map((match) => match[1].trim())
-    .filter((label, index, all) => label && all.indexOf(label) === index)
-  if (sourceSpeakers.length > 1) {
-    issues.push(`同一 H3 镜头含多个说话者（${sourceSpeakers.join('、')}），请按说话轮次拆镜`)
-  }
-
-  const expected = sanitizeDialogue(expectedDialogue || '')
+  const expectedLines = spokenCueLines(expectedDialogue || '')
+  const expectedJoined = expectedLines.join(' ') || sanitizeDialogue(expectedDialogue || '')
   const tagged = [...prompt.matchAll(/<d>\s*\[(?:Chinese|English|Japanese|Korean)\]\s*([\s\S]*?)<\/d>/gi)].map((m) =>
     m[1].replace(/\s+/g, ' ').trim()
   )
-  if (expected) {
-    if (!/<d>\s*\[Chinese\]/i.test(prompt) && /[㐀-鿿]/.test(expected)) {
+  if (expectedJoined) {
+    if (!/<d>\s*\[Chinese\]/i.test(prompt) && /[㐀-鿿]/.test(expectedJoined)) {
       issues.push('中文台词/旁白必须写成 <d>[Chinese] 原词</d>')
     }
-    if (!tagged.includes(expected)) issues.push('台词必须写在 <d>[Chinese] 原词</d> 里，且与口播原文一致')
-    if (tagged.some((line) => line !== expected)) issues.push('d 标签里出现了不该朗读的内容')
+    const wanted = expectedLines.length ? expectedLines : [expectedJoined]
+    if (wanted.some((line) => !tagged.some((t) => t === line))) {
+      issues.push('台词必须写在 <d>[Chinese] 原词</d> 里，且与口播原文一致')
+    }
+    if (tagged.some((line) => !wanted.some((e) => e === line))) {
+      issues.push('d 标签里出现了不该朗读的内容')
+    }
     const outsideTags = prompt.replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
-    if (expected.length >= 4 && outsideTags.includes(expected)) issues.push('台词原文在 d 标签外重复出现')
+    if (wanted.some((line) => line.length >= 4 && outsideTags.includes(line))) {
+      issues.push('台词原文在 d 标签外重复出现')
+    }
   } else if (tagged.length) {
     issues.push('无对白镜头不得出现 <d> 台词标签')
   }
@@ -683,37 +871,25 @@ function resolvePromptInput(input: H3PromptInput, source: string): H3PromptInput
   return input
 }
 
-/** 按官方 Ref2VA / I2VA 生成最终提示词。用户已写官方格式时原样规范化。 */
+/** 按官方 I2VA 三段生成最终提示词。中文场记不得进正文。 */
 export function composeH3VideoPrompt(input: H3PromptInput): string {
-  const spoken = input.voiceMode === 'none' ? '' : sanitizeDialogue(input.voiceover || '')
   const source = stripFrameLead(input.prompt || '')
   const resolved = resolvePromptInput(input, source)
+  const spoken = spokenLinesForPrompt(resolved).join(' ')
 
-  if (isOfficialH3Prompt(source) && !isH3FillTemplate(source)) {
+  if (isOfficialH3Prompt(source) && !isH3FillTemplate(source) && !isMessyH3Prompt(source)) {
     const desc = applyDialogue(
       extractField(source, 'detailed_description') ||
         extractField(source, 'integrated_multimodal_description') ||
         source,
-      resolved,
-      spoken
+      resolved
     )
     const sound = extractField(source, 'overall_soundscape') || defaultSoundscape(resolved, spoken)
     const music = extractField(source, 'non_diegetic_music') || 'N/A'
     return assembleOfficial(desc, sound, music, resolved)
   }
 
-  const notes = source
-    .replace(/<d>[\s\S]*?<\/d>/gi, '')
-    .replace(/subject_definitions:[\s\S]*?(?=detailed_description:|\[Shot\s*1\])/i, '')
-    .replace(/summary:[\s\S]*?(?=detailed_description:|\[Shot\s*1\])/i, '')
-    .replace(/retention_analysis:[\s\S]*?(?=detailed_description:|\[Shot\s*1\])/i, '')
-    .trim()
-  const usableNotes = notes.length >= 12 && !isH3FillTemplate(notes) && !isGenericActionDump(notes)
-  const desc = applyDialogue(
-    usableNotes ? descriptionFromNotes(resolved, notes) : fallbackDescription(resolved, spoken),
-    resolved,
-    spoken
-  )
+  const desc = applyDialogue(descriptionFromNotes(resolved), resolved)
   return assembleOfficial(desc, defaultSoundscape(resolved, spoken), 'N/A', resolved)
 }
 
@@ -721,83 +897,113 @@ function stripJsonFence(text: string): string {
   return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
 }
 
-/** 把中文场记编译成官方英文 Ref2VA / I2VA；失败则回退确定性模板。 */
+/** 把中文场记编译成 H3 官方英文：integrated_multimodal_description + 内部切镜；失败则回退模板。 */
 export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<string> {
-  const source = stripFrameLead(input.prompt || '')
-  if (isOfficialH3Prompt(source) || getAIMode() === 'mock') {
-    return composeH3VideoPrompt(input)
+  const resolved: H3PromptInput = { ...input, forceIntegrated: input.forceIntegrated !== false }
+  const source = stripFrameLead(resolved.prompt || '')
+  if (getAIMode() === 'mock') {
+    return composeH3VideoPrompt(resolved)
+  }
+  if (isOfficialH3Prompt(source) && !input.forceIntegrated) {
+    return composeH3VideoPrompt(resolved)
   }
 
-  const spoken = input.voiceMode === 'none' ? '' : sanitizeDialogue(input.voiceover || '')
-  const refMode = isRef2VA(input)
-  const camera = CAMERA_EN[normalizeCameraMovement(input.cameraMovement)]
+  const cueLines = spokenLinesForPrompt(resolved)
+  const camera = CAMERA_EN[normalizeCameraMovement(resolved.cameraMovement)]
+  const plan = describeInternalShotPlan(resolved.duration, cueLines.length)
+  const lastBeat = h3InternalShotPlan(resolved.duration, cueLines.length).at(-1)?.beat || durationText(resolved)
   try {
     const resp = await callLLM({
       messages: [
         {
           role: 'system',
-          content: `You write MiniMax H3 ${refMode ? 'Ref2VA (full-reference)' : 'I2VA'} prompts from the official English writing guides. Output JSON only:
-{"detailed_description":"...","overall_soundscape":"..."}
-Rules from MiniMax-H3 VIDEO_PROMPT_WRITING_GUIDE:
-- English only except the exact spoken words inside <d>.
-- ${refMode ? 'detailed_description starts with 1-2 English style sentences, THEN [Shot 1] with NO timestamp. Example: "The target video is in a cinematic, live-action style with soft lighting.\\n[Shot 1] A medium-wide shot frames..."' : 'detailed_description is [Shot 1] Live-action, cinematic, a medium-wide shot frames... Style sits AFTER [Shot 1].'}
-- Do NOT add a timestamp to [Shot 1]. Do NOT write "From 0.00s to 1.50s". Do NOT invent [Shot 2] cuts. This task is ONE continuous shot; if only distance or a slight angle changes, use camera motion, not a cut.
-- Develop along the timeline in continuous prose: opening composition → action onset → continuous development → result or reaction, finishing within ${durationText(input)} seconds.
-- For this generation task write 350-500 English words. Every phase must include: composition; subject appearance and position using <Subject N>; environment and lighting; face (brows, eyes, mouth, a specific emotion that CHANGES); hands and body; camera motion; where referenced labels apply.
-- Camera is written as a natural English action inside the shot, with type + amplitude + speed. Use this family only: ${camera}. Start the move, continue it, ease to a stop. Do not switch camera type. Do not whip-pan or slam-zoom.
-- Insert <Subject N> at first appearance. Character sheets lock identity only and are NOT the first frame. Do NOT copy the frontal portrait pose from character sheets. The scene plate locks place only. A storyboard <Picture N> is planning only and must never appear as a grid, animatic, or slideshow.
-- For EVERY on-screen person, state: foreground vs behind; body facing (profile or three-quarter, never square to camera); eyeline target (named person or object). If the speaker is behind, people in front turn their heads or look over the shoulder at the speaker or at what he points to. Never a group photo looking into the lens.
-- People from different Pictures are different people. Never swap faces.
-- Translate the director notes into that continuous [Shot 1] prose. Director notes may list seconds in Chinese; convert them into opening / then / toward the end language, not "From Xs to Ys" headings.
-- Do NOT write "action comes from the storyboard" or "people match the character design sheets".
-- Never describe grids, four-view sheets, storyboards on screen, panels, collage, captions, or labels.
-- Do not write Chinese names, Chinese voice notes, or Chinese place names. Use the <Subject N> labels from the picture roster.
-- Dialogue: <Subject N> (S1) says: <d>[Chinese] EXACT_WORDS</d>
-- Voiceover: <Subject N> (S1) says in an off-screen voiceover: <d>[Chinese] EXACT_WORDS</d> while his lips remain completely closed.
-- If there is no spoken text: No dialogue. No lips moving. Do not output a d tag.
-- Do not put shot directions, blocking, or camera notes inside <d> or quotation marks.
-- End with: The action develops continuously and finishes naturally within ${durationText(input)} seconds.
-- overall_soundscape: 1-4 English sentences of ambience and physical sound only. No lyrics, no quoted speech, no mood-only words if music is N/A.
-- non_diegetic_music is N/A. No Chinese section headings.`
+          content: `You write MiniMax H3 shot-video prompts. Output JSON only:
+{"integrated_multimodal_description":"...","overall_soundscape":"..."}
+
+This is ONE generated clip. Inside it you MAY cut with [Shot 1] / [Shot 2] / [Shot 3]. Those are internal beats, not separate canvas shots.
+
+Layout of integrated_multimodal_description (follow this specimen exactly):
+[Shot 1] Cinematic, medium close-up, handheld with subtle natural sway, framed from a slight side angle so the man stands on the left of the frame and the boy on the right, with a soft shallow depth of field. Daylight in a narrow alley, low-key natural light. The man (S1), a lean, hard-faced young adult with a cold, controlled, low voice, stands in front of the boy (S2), a slight teenager with a soft, breathy, frightened voice. The man speaks first, his lips moving with a hard, flat delivery, and at the same time his open hand snaps across the boy's face in a sharp, fast slap: <d>[Chinese] 你知道我们为什么找你吗？</d>
+The boy's head whips to the side from the impact, his body flinching back half a step. He slowly turns his head back to face the man, his eyes wide, his jaw trembling.
+
+[Shot 2] At 00:03.000, the camera holds the same framing. The boy (S2) shakes his head slowly, his voice thin and breaking, the words barely louder than a whisper: <d>[Chinese] 我不知道啊。</d>
+A short beat. The man (S1) does not let him finish; he steps in and delivers another sharp, fast slap across the boy's cheek, his lips moving again with the same hard, flat delivery: <d>[Chinese] 你很喜欢为朋友出头是吗？</d>
+The boy stumbles back, both hands rising partway, but he does not raise them to fight back — only to brace himself against the wall behind him.
+
+[Shot 3] At 00:06.000, the camera cuts to a slightly wider mid-shot from the same side angle. ... The action develops continuously and finishes naturally within 3.00 seconds.
+
+Rules:
+- Rewrite the user's node prompt. Do not replace their beat with a generic idle shot.
+- English ONLY except the exact spoken words inside <d>[Chinese] ...</d>.
+- Chinese is allowed ONLY inside <d> tags. No Chinese names, places, or stage directions outside <d>. Refer to people as "the man (S1)", "the boy (S2)" using English appearance + stable (S1)/(S2). Keep the same ID across internal shots.
+- Dialogue follows the NODE TEXT, not an empty voiceover field. If the user described calling, shouting, speaking, 台词, 对白, or quoted Chinese, you MUST put those exact words in <d>[Chinese] 原词</d>. One tag per line. Do not drop speech they wrote. Do not write No dialogue in that case.
+- If they clearly wrote no speech (没有台词 / 不说话 / No dialogue) and there are no spoken words, write No dialogue. No lips moving. Do not output a d tag.
+- [Shot 1] has NO timestamp. Later shots MUST start with "At 00:03.000," (strictly increasing, inside the clip duration).
+- Put cinematic style, shot size, camera, framing, light, and character appearance at the start of [Shot 1].
+- Multiple speakers in one clip are allowed. Place each line at the moment that person speaks.
+- If voice mode is voiceover: lips stay closed; write "says in an off-screen voiceover".
+- Do not write subject_definitions, summary, retention_analysis, Picture 1 first-frame alignment, or "From 0.00s to 1.50s".
+- Do not show grids, four-view sheets, storyboards, collage, captions, or labels on screen.
+- Last internal shot MUST end with: The action develops continuously and finishes naturally within ${lastBeat} seconds.
+- overall_soundscape: English ambience and physical action sounds only. If someone speaks, the voice is part of the picture; do not write "No voices". No quoted Chinese, no lyrics.
+- non_diegetic_music is always N/A.
+
+Suggested internal shots for this ${durationText(resolved)}s clip:
+${plan}`
         },
         {
           role: 'user',
-          content: `Style: ${input.aesthetic || 'Cinematic'}
-Duration: ${durationText(input)}s
-Aspect: ${input.aspectRatio || '16:9'} (${String(input.aspectRatio || '16:9') === '9:16' ? 'vertical portrait, taller than wide' : String(input.aspectRatio || '16:9') === '1:1' ? 'square' : 'horizontal landscape, wider than tall'})
-Camera family (one only, official phrasing): ${camera}
-Mode: ${refMode ? 'Ref2VA full-reference; pictures are identity / location / storyboard, NOT I2VA first frames' : 'I2VA; Picture 1 is the actual first frame at 0.00s'}
-Scene: ${[englishOrOmit(input.sceneLighting), englishOrOmit(input.sceneAnchor), englishOrOmit(input.sceneDescription)].filter(Boolean).join(' / ') || 'from the location plate'}
-On-screen people: ${onScreenEnglish(input).join(', ') || 'from character sheets'}
-Picture roster (use these labels verbatim):
-${pictureRoster(input) || 'no extra pictures'}
-Speaker label: ${speakerSubjectLabel(input)}
-Voice mode: ${spoken ? input.voiceMode || 'dialogue' : 'none'}
-Exact spoken words (verbatim or empty): ${spoken || '(none)'}
-Sound notes: ${englishOrOmit(input.audioDescription) || '(from picture action)'}
-Director notes in Chinese or mixed language (translate into official [Shot 1] continuous prose, never speak these):
-${source || '(perform a continuous action in the location; lock faces from character sheets)'}`
+          content: `Style: ${resolved.aesthetic || 'Cinematic'}
+Duration: ${durationText(resolved)}s
+Aspect: ${resolved.aspectRatio || '16:9'} (${String(resolved.aspectRatio || '16:9') === '9:16' ? 'vertical portrait, taller than wide' : String(resolved.aspectRatio || '16:9') === '1:1' ? 'square' : 'horizontal landscape, wider than tall'})
+Camera family (written as a natural English action): ${camera}
+Scene / light: ${[englishOrOmit(resolved.sceneLighting), englishOrOmit(resolved.sceneAnchor), englishOrOmit(resolved.sceneDescription)].filter(Boolean).join(' / ') || 'from director notes'}
+On-screen people in S-order (Chinese names only to match dialogue speakers; in the prompt body use English appearance + (S1)/(S2)):
+${(resolved.onScreenNames || []).map((name, i) => `S${i + 1} = ${name}`).join('\n') || onScreenEnglish(resolved).join(', ') || '(from director notes)'}
+Picture roster (identity lock only, not first frames; do not copy into the prompt as Picture 1 alignment):
+${pictureRoster(resolved) || 'no extra pictures'}
+Voice mode: ${cueLines.length || nodeTextHasSpeech(source) ? resolved.voiceMode || 'dialogue' : 'none — only if the node text has nobody speaking'}
+Spoken lines already extracted (may be incomplete; node text wins):
+${cueLines.length ? cueLines.map((line, i) => `${i + 1}. ${line}`).join('\n') : '(none extracted yet)'}
+Sound notes: ${englishOrOmit(resolved.audioDescription) || '(from the node text)'}
+NODE PROMPT TO REWRITE (source of truth — action AND any dialogue the user wrote):
+${source || '(perform the beat in this location)'}`
         }
       ],
       jsonMode: true,
       temperature: 0.3,
-      maxTokens: 2800,
-      signal: input.signal
+      maxTokens: 3600,
+      signal: resolved.signal
     })
     const parsed = JSON.parse(stripJsonFence(resp.content)) as {
       detailed_description?: string
       integrated_multimodal_description?: string
       overall_soundscape?: string
     }
-    const desc = String(parsed.detailed_description || parsed.integrated_multimodal_description || '').trim()
+    let desc = String(parsed.integrated_multimodal_description || parsed.detailed_description || '').trim()
+    if (/overall_soundscape\s*:/i.test(desc)) {
+      desc =
+        extractField(desc, 'integrated_multimodal_description') ||
+        extractField(desc, 'detailed_description') ||
+        desc
+    }
     const sound = String(parsed.overall_soundscape || '').trim()
-    if (!desc || !sound || isGenericActionDump(desc)) return composeH3VideoPrompt(input)
-    return composeH3VideoPrompt({
-      ...input,
-      prompt: assembleOfficial(desc, sound, 'N/A', input),
-      audioDescription: sound
-    })
+    if (!desc || isH3FillTemplate(desc) || /Play the following director notes/i.test(desc)) {
+      return composeH3VideoPrompt(resolved)
+    }
+    const resolvedWithSpeech: H3PromptInput = {
+      ...resolved,
+      voiceMode:
+        extractSpokenFromNotes(desc).length || cueLines.length || nodeTextHasSpeech(source)
+          ? resolved.voiceMode === 'none'
+            ? 'dialogue'
+            : resolved.voiceMode
+          : resolved.voiceMode
+    }
+    const shaped = applyDialogue(desc, resolvedWithSpeech)
+    const spoken = spokenLinesForPrompt(resolvedWithSpeech).join(' ') || extractSpokenFromNotes(shaped).join(' ')
+    return assembleOfficial(shaped, sound || defaultSoundscape(resolvedWithSpeech, spoken), 'N/A', resolvedWithSpeech)
   } catch {
-    return composeH3VideoPrompt(input)
+    return composeH3VideoPrompt(resolved)
   }
 }

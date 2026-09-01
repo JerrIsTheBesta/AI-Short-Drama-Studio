@@ -19,7 +19,7 @@ import {
 import { collectShotVideoEntries, packVideoRefEntries, sceneForShot, subjectsForShot } from '@/utils/consistency'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { resolveShotPlace } from '@/utils/shotPlace'
-import { generateShotVideo, rewriteShotPerformance } from '@/services/canvas/runner'
+import { generateShotVideo, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import { effectiveShotAudioMode, editableVideoPrompt, resolveH3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
@@ -40,6 +40,7 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 
 const generating = ref<Set<string>>(new Set())
+const optimizing = ref<Set<string>>(new Set())
 const progress = ref<Record<string, string>>({})
 const videoUrls = ref<Record<string, string>>({})
 const imageUrls = ref<Record<string, string>>({})
@@ -135,6 +136,22 @@ async function resetVideoPrompt(shot: Shot) {
   }
 }
 
+async function optimizeVideoPrompt(shot: Shot) {
+  if (optimizing.value.has(shot.id)) return
+  optimizing.value = new Set(optimizing.value).add(shot.id)
+  try {
+    await optimizeShotVideoPrompt(shot)
+    expanded.value = new Set(expanded.value).add(shot.id)
+    toast.success('已按 H3 格式优化提示词')
+  } catch (e: any) {
+    toast.error(e?.message || '优化失败')
+  } finally {
+    const next = new Set(optimizing.value)
+    next.delete(shot.id)
+    optimizing.value = next
+  }
+}
+
 function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
   if (effectiveShotAudioMode(shot) === mode) return
   const hadVideo = Boolean(shot.videoAssetId)
@@ -143,6 +160,7 @@ function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
 }
 
 function composedPrompt(shot: Shot) {
+  if (shot.compiledVideoPrompt?.trim()) return shot.compiledVideoPrompt
   if (isDigitalHuman.value) {
     const spoken = spokenTextOnly(shot.voiceover || '')
     return composeVideoPrompt({
@@ -428,6 +446,9 @@ function next() {
           <div class="prompt-bar">
             <div class="prompt-label">视频内容表现</div>
             <div class="prompt-tools">
+              <button class="reset-btn" :disabled="optimizing.has(shot.id)" @click="optimizeVideoPrompt(shot)">
+                {{ optimizing.has(shot.id) ? '优化中…' : '优化提示词' }}
+              </button>
               <button class="reset-btn" @click="resetVideoPrompt(shot)">按分镜动作重写</button>
               <button class="reset-btn" @click="toggleExpanded(shot.id)">
                 {{ expanded.has(shot.id) ? '收起 H3 提交格式' : '看 H3 提交格式' }}
@@ -713,6 +734,10 @@ function next() {
   color: var(--color-accent-2);
   padding: 2px 6px;
   border-radius: var(--radius-sm);
+}
+.reset-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .reset-btn:hover {
   background: var(--grad-primary-soft);

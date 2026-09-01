@@ -1,4 +1,4 @@
-import type { Project, Scene, Shot, Subject } from '@/types'
+import type { Project, Scene, Script, Shot, Subject } from '@/types'
 
 const CAM: Record<Shot['cameraMovement'], string> = {
   push: '推',
@@ -386,6 +386,32 @@ export function normalizeImportedMarkdown(text: string): string {
   return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim()
 }
 
+/** 把外部 .md 收成可写入 script 的字段。 */
+export function importedPlayFields(markdown: string, filename = '') {
+  const content = normalizeImportedMarkdown(markdown)
+  if (!content) throw new Error('剧本文件是空的')
+  return {
+    content,
+    topic: inferMarkdownTitle(content, filename),
+    playReady: true as const
+  }
+}
+
+export function scriptFromImportedPlay(p: Project, markdown: string, filename = ''): Script {
+  const fields = importedPlayFields(markdown, filename)
+  const prev = p.script
+  return {
+    id: prev?.id ?? `s_${Date.now().toString(36)}`,
+    keywords: prev?.keywords ?? [],
+    style: prev?.style ?? 'cinematic',
+    aspectRatio: prev?.aspectRatio ?? p.settings?.aspectRatio ?? '16:9',
+    shotDuration: prev?.shotDuration ?? p.settings?.defaultShotDuration ?? 5,
+    createdAt: prev?.createdAt ?? Date.now(),
+    ...(prev ?? {}),
+    ...fields
+  }
+}
+
 /** 优先从一级标题推断剧本名，否则使用导入文件名。 */
 export function inferMarkdownTitle(markdown: string, filename = ''): string {
   const normalized = normalizeImportedMarkdown(markdown)
@@ -545,18 +571,26 @@ export function extractSubjectsFromPlay(markdown: string): Array<{
     const name = raw.replace(/（[^）]+）|\([^)]+\)/g, '').replace(/旁白$/, '').trim()
     if (!name || name.length > 16 || SKIP_SUBJECT.test(name)) return
     const key = name.replace(/\s+/g, '').toLowerCase()
+    const ident = description.match(/身份[：:]\s*([^\n]+)/)
+    const state = description.match(/跨场状态[变化]*[：:]\s*([^\n]+)/)
+    const roleText = (ident?.[1] || role).trim()
+    const stateText = (state?.[1] || '').trim()
     if (seen.has(key)) {
       const row = out.find((item) => item.name.replace(/\s+/g, '').toLowerCase() === key)
-      if (row && description && description.length > row.description.length) row.description = description.slice(0, 400)
+      if (row && description && description.length > row.description.length) {
+        row.description = description.slice(0, 1200)
+        if (roleText) row.role = roleText.slice(0, 200)
+        if (stateText) row.stateVariants = stateText.slice(0, 240)
+      }
       return
     }
     seen.add(key)
     out.push({
       name,
       kind: 'person',
-      description: (description || `${name}，外貌与服装按剧本补全`).slice(0, 400),
-      role,
-      stateVariants: '单一状态',
+      description: (description || `${name}，外貌与服装按剧本补全`).slice(0, 1200),
+      role: roleText.slice(0, 200),
+      stateVariants: stateText || '单一状态',
       fromReference: false
     })
   }

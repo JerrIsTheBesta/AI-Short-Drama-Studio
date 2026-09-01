@@ -11,6 +11,11 @@ import {
   composeVideoPrompt,
   buildH3ImageSlots,
   spokenTextOnly,
+  compileH3OfficialPrompt,
+  extractSpokenFromNotes,
+  spokenCueLines,
+  nodeTextForbidsSpeech,
+  nodeTextHasSpeech,
   enrichVideoPerformance,
   reviewImageQuality,
   reviewVideoQuality,
@@ -51,13 +56,13 @@ import { friendlyAiError } from '@/services/ai/abort'
 import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
 import {
   boardSendPrompt,
-  defaultVideoSendPrompt,
   scenePropSendPrompt,
   sceneSendPrompt,
   shotImageSendPrompt,
   defaultShotImagePrompt,
   subjectSendPrompt,
-  videoSendPrompt
+  videoSendPrompt,
+  shotDirectorBrief
 } from '@/utils/nodePrompt'
 import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
 import { mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
@@ -160,8 +165,11 @@ function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof us
   }
 }
 
-function scriptActivityLabel(kind: 'play' | 'extract' | 'continue') {
-  if (kind === 'extract') return extractStageLabel(useProjectStore().current)
+function scriptActivityLabel(kind: 'play' | 'extract' | 'continue', stage?: ExtractStage) {
+  if (kind === 'extract') {
+    if (stage) return `提炼${extractStageNoun(stage)}`
+    return extractStageLabel(useProjectStore().current)
+  }
   if (kind === 'continue') return '续写剧本'
   return '写完整剧本'
 }
@@ -701,6 +709,7 @@ function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
 
 export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
+  shot = refreshShot(shot.id)
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
@@ -727,10 +736,8 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
     const onScreenNames = cast.map((subject) => subject.name)
     const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
-    let officialPrompt = videoSendPrompt(shot, project.current)
-    if (shot.compiledVideoPrompt == null) {
-      project.updateShot(shot.id, { compiledVideoPrompt: officialPrompt })
-    }
+    shot = refreshShot(shot.id)
+    const officialPrompt = videoSendPrompt(shot, project.current)
     onProgress?.('使用节点上的完整提示词出视频（首尾帧）…')
     const result = await generateVideo(
       {
@@ -830,10 +837,8 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   )
   const hasKeyframeFrame = packed.some((entry) => entry.kind === 'keyframe')
   const h3Mode = hasKeyframeFrame || hasIdentityRefs || packed.length > 1 ? 'R2VA' : 'I2VA'
-  let officialPrompt = videoSendPrompt(shot, project.current)
-  if (shot.compiledVideoPrompt == null) {
-    project.updateShot(shot.id, { compiledVideoPrompt: officialPrompt })
-  }
+  shot = refreshShot(shot.id)
+  const officialPrompt = videoSendPrompt(shot, project.current)
   onProgress?.('使用节点上的完整提示词出视频…')
   const slotNames = packed.map((entry, index) =>
     entry.kind === 'character'
@@ -938,11 +943,78 @@ export async function rewriteShotPerformance(shot: Shot, signal?: AbortSignal): 
     sceneExcerpt: extractSceneSlice(play, scene?.name),
     signal
   })
-  const compiled = defaultVideoSendPrompt(
-    { ...shot, videoPrompt: performance },
-    project.current
+  project.updateShot(shot.id, { videoPrompt: performance })
+  return optimizeShotVideoPrompt({ ...shot, videoPrompt: performance }, signal)
+}
+
+/** 把节点上现有的提示词编成 H3 官方格式。以框里的原文为准，不拿空口播栏覆盖台词。 */
+export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal): Promise<string> {
+  const project = useProjectStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  shot = refreshShot(shot.id)
+  const p = project.current
+  const packed = packVideoRefEntries(collectShotVideoEntries(shot, p))
+  const imageSlots = buildH3ImageSlots(packed)
+  const cast = subjectsForShot(shot, p)
+  const scene = sceneForShot(shot, p)
+  const place = resolveShotPlace(shot, scene)
+  const onScreenNames = cast.map((item) => item.name)
+  const nodeText = (shot.compiledVideoPrompt || '').trim()
+  const performance = (shot.videoPrompt || '').trim()
+  const brief = shotDirectorBrief(shot, p)
+  const source = [
+    nodeText ? `【节点当前提示词，改写以此为准】\n${nodeText}` : '',
+    performance && performance !== nodeText ? `【本镜场记】\n${performance}` : '',
+    brief && !nodeText.includes(brief) ? `【分镜字段】\n${brief}` : '',
+    shot.voiceover?.trim() ? `【口播栏】\n${shot.voiceover.trim()}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const spokenPool = [nodeText, performance, shot.voiceover, shot.audioDescription].filter(Boolean).join('\n')
+  const cueLines = [...extractSpokenFromNotes(spokenPool), ...spokenCueLines(shot.voiceover || '')].filter(
+    (line, i, all) => line && all.indexOf(line) === i
   )
-  project.updateShot(shot.id, { videoPrompt: performance, compiledVideoPrompt: compiled })
+  const hasSpeech = cueLines.length > 0 || nodeTextHasSpeech(spokenPool)
+  const silent = !hasSpeech && nodeTextForbidsSpeech(spokenPool)
+  const resolvedVoice = resolveH3VoiceMode(shot, onScreenNames)
+  const voiceMode = silent ? 'none' : hasSpeech ? (resolvedVoice === 'voiceover' ? 'voiceover' : 'dialogue') : resolvedVoice
+  const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  const castNotes = cast
+    .map((item, i) => {
+      const look = [item.role, item.description].filter(Boolean).join('。')
+      return `S${i + 1} ${item.name}${look ? `：${look}` : ''}`
+    })
+    .join('\n')
+  const compiled = await compileH3OfficialPrompt({
+    prompt: [source, castNotes ? `人物（S 序号按出场顺序；写英文外貌+(S1)，中文名只用来对上对白说话人）：\n${castNotes}` : '']
+      .filter(Boolean)
+      .join('\n\n'),
+    aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
+    audioDescription: shot.audioDescription,
+    voiceover: cueLines.length ? cueLines.join('\n') : shot.voiceover || '',
+    voiceMode,
+    speakerHint: shot.speakerHint,
+    speakerName: visibleSpeaker,
+    onScreenNames,
+    sceneName: place.name,
+    sceneDescription: scene?.description,
+    sceneLighting: place.lighting,
+    sceneAnchor: scene?.mainAnchor,
+    shotTitle: shot.title,
+    imageAssignments: imageSlots.map((slot) => slot.job),
+    imageSlots,
+    duration: shot.duration,
+    width: p.settings.width,
+    height: p.settings.height,
+    aspectRatio: p.settings.aspectRatio,
+    cameraMovement: shot.cameraMovement,
+    shotSize: shot.shotSize,
+    promptStyle: getVideoPromptStyle(),
+    mode: 'R2VA',
+    forceIntegrated: true,
+    signal
+  })
+  project.updateShot(shot.id, { compiledVideoPrompt: compiled })
   await project.save()
   return compiled
 }
@@ -1072,13 +1144,13 @@ export async function runGeneratePlay(
   if (!continueMode) {
     project.setCanvas(rebuildCanvasGraph(project.current, false))
   }
-  project.setPlayApproved(false)
+  if (project.current.pipelineMode !== 'img2video') project.setPlayApproved(false)
   await project.save()
   if (continueMode) {
     const added = countAddedPlayScenes(previousPlay, run.result.playMarkdown)
     onProgress?.(
       added > 0
-        ? `已续写 ${added} 场。已有人物和场景未动，要同步新场请在「分镜」分组点重新提取。`
+        ? `已续写 ${added} 场。已有人物和场景未动，要同步新场请在「分镜关键帧」分组点重新提取。`
         : '剧本已更新。已有节点未动，要同步请在对应分组点重新提取。'
     )
   }
@@ -1326,18 +1398,19 @@ export async function runScriptNode(
   onProgress?: RunProgress,
   signal?: AbortSignal,
   model?: string,
-  continueHint?: string
+  continueHint?: string,
+  extractStage?: ExtractStage
 ) {
   return withNodeJob('script', async () => {
     ensureNotCancelled(signal)
     const project = useProjectStore()
     const source = onProgress ? 'agent' : 'canvas'
-    const label = scriptActivityLabel(kind)
+    const label = scriptActivityLabel(kind, extractStage)
     const activity = trackActivity('script', label, source, (msg) => onProgress?.('script', msg))
     patchNode(project, 'script', 'running')
     try {
       if (kind === 'extract') {
-        await runExtractStoryboard(activity.progress, signal, model)
+        await runExtractStoryboard(activity.progress, signal, model, extractStage)
       } else if (kind === 'continue') {
         await runGeneratePlay(activity.progress, signal, model, { mode: 'continue', hint: continueHint })
       } else {
@@ -1605,7 +1678,7 @@ export async function generateFreeformVideo(
   const result = await generateVideo(
     {
       prompt,
-      promptAsIs: useFl2va,
+      promptAsIs: true,
       imageBlob: blobs[0],
       lastFrameBlob: useFl2va ? blobs[1] : undefined,
       referenceImages: useFl2va ? [] : blobs.slice(1, videoModel === 'wan-prime' ? 10 : 9),
@@ -1695,7 +1768,7 @@ export async function runCanvasNode(
         if (!shot) throw new Error('找不到分镜')
         await generateShotImage(shot, report, signal)
       } else if (node.type === 'shotVideo' && node.data.shotId) {
-        const shot = p.shots.find((s) => s.id === node.data.shotId)
+        const shot = project.current?.shots.find((s) => s.id === node.data.shotId)
         if (!shot) throw new Error('找不到分镜')
         await generateShotVideo(shot, report, signal)
       } else if (node.type === 'audio' && node.data.shotId) {

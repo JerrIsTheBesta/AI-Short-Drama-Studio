@@ -1,7 +1,6 @@
 import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
-import { sceneHasKeyProps } from '@/utils/consistency'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export interface PipelineStep {
@@ -78,15 +77,6 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-subjects'
     }
   }
-  const missingProps = (p.scenes ?? []).some((s) => sceneHasKeyProps(s) && !s.propSheetAssetId)
-  if (missingProps) {
-    return {
-      id: 'cast',
-      label: '场景关键道具图',
-      tools: [{ tool: 'generate_all_prop_sheets' }],
-      focusNodeId: 'group-scenes'
-    }
-  }
   const missingPlates = (p.scenes ?? []).some((s) => !s.plateAssetId)
   if (missingPlates) {
     return {
@@ -117,7 +107,7 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       id: 'videos',
       label: '分镜视频',
       tools: [{ tool: 'generate_all_videos' }],
-      focusNodeId: 'group-shots'
+      focusNodeId: 'group-videos'
     }
   }
   if (videoRequiresStoryboard(p) && p.shots.some((s) => !s.imageAssetId)) {

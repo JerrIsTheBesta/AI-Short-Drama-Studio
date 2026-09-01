@@ -299,7 +299,7 @@ const QUALITY_REPAIR_ROUNDS = 3
 
 const NARRATIVE_CONTINUITY_RULES = `
 【叙事连续性硬规则】
-1. 先从用户要求中锁定“本次视频/本集”的起点、终点、时长和明确要展示的事件。只写这个边界内的内容，禁止为了显得完整而续写下一集、提前揭晓后果、补讲世界观或替用户推进剧情。
+1. 先从用户要求中锁定“本次视频/本集”的起点、终点、时长和明确要展示的事件。边界指用户指定的集或段，不是把完整故事砍成高潮切片。用户要完整短片或完整改编时，必须写全对抗引擎与关键人物；只有用户明确只要某一段时才允许切片。禁止为了显得完整而续写下一集、提前揭晓用户要求停住的后果、补讲无关世界观或替用户推进到下一集。
 2. 允许在用户指定的任何节点结束，包括异变刚启动、穿越途中、刚落地、看到陌生人或其他悬念点。开放式结尾和悬念不是断层；结尾只需把当前状态落稳，不得擅自接着解释。
 3. 在本次边界内，每个镜头/场次必须由上一段的可见结果触发，并给下一段留下明确的可见状态；禁止只靠观众脑补人物怎么到场、怎么认识、为什么突然开始解释。
 4. 地点、时代、身份、关系、目标或身体状态发生重大变化时，只展开到本次视频终点为止的因果链。可用的拍点包括：触发征兆 → 变化过程 → 冲击结果 → 即时反应 → 观察确认 → 首次接触。根据用户要求与时长选取必要拍点，可以停在链条中间，但不能在实际展示的两个拍点之间无过渡跳跃。
@@ -313,7 +313,7 @@ const SPEAKER_STAGING_RULES = `
 1. 开口的人嘴要可读，但不等于他必须正面朝向镜头、站在画面正中。说话者可以在后面、侧面、跪着。
 2. 画面里每一个人都要写进 blocking / eyeline / videoPrompt：在近处还是后面、身体朝哪、眼睛看谁或看什么。没写占位的人会被生成模型摆成合影看镜头。
 3. 前面的人如果不是说话者，必须侧对或背对镜头，回头/侧头看说话者或他指的东西，禁止正面看镜头。
-4. 一个 H3 分镜只允许一个说话者。两人轮流说话必须按说话轮次拆镜；同一说话者连续 2–4 个短句可以保留在同一镜。
+4. 同一空间的对白往来可以留在一镜；发给 H3 时用内部 [Shot 1]/[Shot 2] 切开说话拍。同一说话者连续 2–4 个短句也可以保留在同一镜。
 5. voiceover 保留“人物名：台词”。videoPrompt 禁止只写说话者动作、再用一句「不要看镜头」带过其他人。`
 
 async function auditStoryboardNarrative(
@@ -431,7 +431,7 @@ async function repairStoryboardOnce(
 ): Promise<StoryboardResult> {
   const extractHint =
     input.mode === 'extract'
-      ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。遗漏人物必须补进 subjects——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。每个已建档人物必须出现在至少一镜：subjectIds 挂上，visualPrompt / videoPrompt 写名字。禁止只做人物卡、分镜里却换成路人或「一个男人」。'
+      ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。人物章每一个 ### 都必须建档——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。已故角色用遗物、画像或闪回入镜即可；活人对手必须有对峙或可见压力镜。每个已建档人物必须出现在至少一镜（本人、遗物、画像或可见压力）：subjectIds 挂上，visualPrompt / videoPrompt 写名字。禁止因为「这集没站在镜头正中」就把父亲、哥哥、对手从人物表删掉。禁止只做人物卡、分镜里却换成路人或「一个男人」。'
       : '每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。'
   const repair = await callLLM({
     messages: [
@@ -687,9 +687,10 @@ async function extractShotOutline(
       : '先把剧本交给模型出分镜场记（只要画面、时长、声音）…'
   )
   const shortSystem = `你是分镜导演。只写一份能拍的场记，像聊天里列镜头那样短、快。
-按剧本顺序拆镜。一个说话者一镜；轮流对话按轮次拆；同一人连续短句可留在一镜。
+按剧本顺序拆镜。同一空间的对白往来可以留在一镜；同一人连续短句可留在一镜。
 每镜写：标题（括号里写景别或运镜）、画面（2–4 句看见的动作）、内容（这一镜演什么）、时长、声音。
-有对白时再加一行「口播：人物名：原词」。没有对白不要写口播。
+有对白时必须加一行「口播：人物名：原词」，剧本里的对白原词一条都不能丢。没有对白的纯空镜/赶路镜才不写口播。
+禁止把故事背景改写成「成年某某」旁白。
 禁止 JSON、禁止思考过程、禁止 continuity / blocking / 美学设定。
 严格按下述格式，镜头之间空一行：
 
@@ -704,8 +705,8 @@ async function extractShotOutline(
 拆镜原则：
 - 一场戏里按戏剧拍点拆：进入、看见、犹豫、开口、反应、离开。不要把整场压成一镜，也不要一句对白拆成三镜空表情。
 - 蒙太奇：把同一意图的 3–6 个连续画面收进一镜 8–10 秒（例如光从门缝移到右侧、苹果核发黑、雨水滴成水洼），写成看得见的连续动作，禁止写「时间流逝」「几天过去」。
-- 对白：一个说话者一镜；轮流对话按轮次拆；同一人连续短句可留在一镜。
-- 成年旁白 / 画外音写成「口播：成年阿峰：原词」，画面里的人闭嘴。
+- 对白：同一空间的对白往来可以留在一镜；同一人连续短句可留在一镜。剧本里的 **人物名：**「台词」必须原词进入对应镜头口播，禁止漏句，禁止改成「成年某某」旁白复述前情。
+- 成年旁白 / 画外音仅当剧本标明画外音时才写成「口播：旁白：原词」，画面里的人闭嘴；出镜人物说话用本人名。
 - 剧本写了不拍什么（伤口特写、神像、宗教仪式、把流浪汉拍成怪物），每镜加一行「不拍：…」。
 - 人物看向场景里的人或物，禁止全员看镜头。善意是普通人做的小事，不要写成救世主登场。
 - 年代、天气、衣服干湿、步态跟剧本走。
@@ -719,7 +720,7 @@ async function extractShotOutline(
 不拍：伤口特写、神像
 时长：8 秒
 声音：屋外雨、远处车、他的呼吸
-口播：成年阿峰：吃完苹果以后，我在那间破屋里躺了好几天。`
+口播：阿峰：先吃完。核留下来。`
 
   const response = await callLLM({
     messages: [
@@ -779,7 +780,7 @@ async function expandOneShot(
         {
           role: 'system',
           content: `你是分镜节点填写员。只把下面这一条场记扩成画布字段，不改故事、不改时长、不改画面原意。
-口播必须用场记里的原词；场记没写口播就空字符串。一个镜头一个说话者。成年旁白用 audioMode=h3-voiceover。
+口播必须用场记里的原词；场记写了对白而你输出空字符串视为不合格。同一空间的对白往来可以留在一镜。只有场记标明画外音/旁白时才用 audioMode=h3-voiceover。
 必须写 videoPrompt：先写每个出场人物站在近处还是后面、身体朝哪、眼睛看谁；再写动作。说话者可以在后面，前面的人侧对或回头看他。禁止合影看镜头，禁止只在结尾加「不要看镜头」。
 ${film ? '本镜必须能在剧本原文里找到对应拍点。蒙太奇要写成看得见的连续动作。剧本写了不拍的，写进 videoPrompt 末尾一句。善意是普通人做的小事。' : ''}
 只输出一个 JSON 对象：{"title":"3-8字","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别","blocking":"每个人：近处或后面、身体朝向、相对谁站","eyeline":"每个人看谁或看什么，禁止看镜头","continuity":"上一镜末态 → 本镜变化 → 下一镜初态","propFocus":"道具或无","visualPrompt":"中文静帧画面","videoPrompt":"导演说戏，含每人占位和视线，80-320字","audioDescription":"现场声音","voiceover":"人物名：台词，无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"声线与情绪","duration":6,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["短名"],"sceneName":"地点原名"}`
@@ -973,15 +974,15 @@ async function realStoryboard(
       }
     }
 
-    const subjectSystem = `你是人物设定提炼子智能体。只从完整剧本提炼会实际出现在画面中的人物、动物、产品或关键主体，不写场景，不拆分镜，不提炼资产图或道具清单。忠实保留剧本称呼；有名字又有身份称呼时，name 用最常在对白和场记里出现的短名，role 写全身份和别称，便于另一智能体用名字或身份绑定。人物外貌必须具体到年龄、脸型、发型、体型、服装、鞋、配饰和稳定辨识点，不允许只写“主角”。description 只锁身份外貌，不要写他所在的地点或天气：后续角色设计图一律画在无缝纯白背景的四视图上。stateVariants 写清本章内会变的东西：衣服干湿、污渍、饥饿、跛行、手里的食物；没有变化就写单一状态。${productNote}\n只输出 JSON：{"subjects":[{"name":"短名","kind":"person|animal|other","description":"具体外貌锁定，不含场景","role":"身份、剧情作用和别称","stateVariants":"本集内状态变化，没有写单一状态","fromReference":false}]}。输出前自行检查：每个有台词、有动作或被镜头看见的人都单独建档。流浪汉、志愿者、修车铺夫妇、游戏厅老板等有台词的人都要单独建档，不要并成路人。`
+    const subjectSystem = `你是人物设定提炼子智能体。只从完整剧本「## 人物」提炼每一个独立小节，以及会实际入镜、入遗物/画像、或形成可见压力的人物、动物、产品或关键主体，不写场景，不拆分镜，不提炼资产图或道具清单。已故父亲、未到场的对手只要人物章有 ### 就必须建档，不要因为本集没站在镜头正中而删掉。忠实保留剧本称呼；有名字又有身份称呼时，name 用最常在对白和场记里出现的短名，role 写全身份和别称，便于另一智能体用名字或身份绑定。人物外貌必须具体到年龄、脸型、发型、体型、服装、鞋、配饰和稳定辨识点，不允许只写“主角”。description 只锁身份外貌，不要写他所在的地点或天气：后续角色设计图一律画在无缝纯白背景的四视图上。stateVariants 写清本章内会变的东西：衣服干湿、污渍、饥饿、跛行、手里的食物；没有变化就写单一状态。${productNote}\n只输出 JSON：{"subjects":[{"name":"短名","kind":"person|animal|other","description":"具体外貌锁定，不含场景","role":"身份、剧情作用和别称","stateVariants":"本集内状态变化，没有写单一状态","fromReference":false}]}。输出前自行检查：人物章每一个 ### 都单独建档；有台词、有动作或被镜头看见的人不能并成路人。`
 
     const sceneSystem = `你是场景与视觉设定提炼子智能体。只提炼本集会拍到的**地点**，不写人物，不拆分镜。
 地点来源优先：剧本「## 环境与场景」下的地点；其次场记行「内景｜地点｜天气」或「外景｜地点｜」。同一地点只建一条，不要按「场景一、场景二」每场复制一条。
 scene.name 用地点短名（如旧仓房、公益饭堂院子），不要用「场景一」。
-每个地点写无人时的空间：地面、建筑、天气、光、年代物件。关键道具 1—4 件，没有写无。
+每个地点写无人时的空间：地面、建筑、天气、光、年代物件。
 ${productNote}
 ${stylePriority}
-只输出 JSON：{"aesthetic":"全片中文氛围","h3Aesthetic":"English production aesthetic with concrete lighting, material, color and camera qualities","styleBrief":"本集冲突和视觉抓点","colorPalette":"可见颜色","lightingNote":"时辰与光源","scenes":[{"name":"地点短名","description":"无人时的空间、地面、建筑、天气、动态和光线，至少80字","mainAnchor":"主视觉实物","anchors":"全景；主锚；地面站位区；光源或次锚","lighting":"时辰和光源","props":"最多4件关键道具，用分号分隔；没有写无"}]}
+只输出 JSON：{"aesthetic":"全片中文氛围","h3Aesthetic":"English production aesthetic with concrete lighting, material, color and camera qualities","styleBrief":"本集冲突和视觉抓点","colorPalette":"可见颜色","lightingNote":"时辰与光源","scenes":[{"name":"地点短名","description":"无人时的空间、地面、建筑、天气、动态和光线，至少80字","mainAnchor":"主视觉实物","anchors":"全景；主锚；地面站位区；光源或次锚","lighting":"时辰和光源"}]}
 顶层必须是对象，scenes 必须是非空数组。不要套 data/result，不要把 scenes 写成对象。`
 
 
@@ -1161,7 +1162,7 @@ ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
 ${stylePriority}
 ${productNote}
 
-要求：人物/场景/分场与剧本一一对应；口播原文保留；同一人物同一意图的连续 2-4 个短句尽量合在一镜，不要机械拆成“一镜一句”；visualPrompt 按剧本「画面」写成静帧可画描述；videoPrompt 用导演口吻连续写这一镜发生了什么（谁从什么状态开始、看见什么、做什么、情绪怎么变），不要按秒切段，不要套「禁止呆脸空眼」这种话。说话时是否收近服从画面感、动作、空间关系与情绪节奏：需要强调表情时可用近景/特写，需要保留关系或环境时继续用中景、双人或多人同框；不要把每个说话镜头机械切成特写。禁止抄 visualPrompt。直接输出 JSON。`
+要求：人物/场景/分场与剧本一一对应；剧本对白原词必须进入对应镜头 voiceover（写成「人物名：台词」），禁止改成成年旁白，禁止清空成默片；同一人物同一意图的连续 2-4 个短句尽量合在一镜，不要机械拆成“一镜一句”；visualPrompt 按剧本「画面」写成静帧可画描述；videoPrompt 用导演口吻连续写这一镜发生了什么（谁从什么状态开始、看见什么、做什么、怎么说、情绪怎么变），不要按秒切段，不要套「禁止呆脸空眼」这种话。说话时是否收近服从画面感、动作、空间关系与情绪节奏：需要强调表情时可用近景/特写，需要保留关系或环境时继续用中景、双人或多人同框；不要把每个说话镜头机械切成特写。禁止抄 visualPrompt。直接输出 JSON。`
     : `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
 
 事实保真：不得新增原文没有的价格、参数、功效、人物关系、品牌承诺或剧情结论。原文含数字、专有名词时必须原样保留。信息不够就用画面承接，不要编事实填空。
@@ -1267,7 +1268,7 @@ ${videoPerformanceSpec(getVideoPromptStyle())}
 visualPrompt 若只有站位没有环境实物、或开头结尾是画风套话，视为不合格。
 videoPrompt 若没写清这一镜发生了什么、或写成 0–x秒 填空套话，视为不合格。
 ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉风格。' : `${styleGuide.avoid}。`}
-默认每镜使用 H3 出镜对白：把原文按语义段落分配到 voiceover，并设置 audioMode=h3-dialogue。不要机械地一镜一句；同一人物、同一表达意图的连续 2-4 个短句优先合成一个 7-10 秒镜头，短促反应或转场才只说一句，口播总量约每秒 4 个字。voiceover 写“人物名：台词”，speakerHint 同时写说话人和声线。说话镜头的景别服从画面感、动作、空间关系和情绪节奏：表情是重点且不需交代环境时可以收近；需要看清递物、争执、问答、人物距离、环境压力或集体反应时，保留中景、双人或多人同框。禁止按“只要说话就特写”的模板拆镜，但要写清当前谁说话、其余人如何反应，避免所有人同时张嘴。只有原文明说是旁白/画外音时才用 h3-voiceover，明确要求后期配音时才用 tts，明确无口播的空镜才用 none。每个出场人物都必须在 subjects 中单独建档；每镜 title 必须是不同的 3-8 字内容标题，禁止统一写“镜头”。逐对核对 continuity，后一镜开头必须接住前一镜结尾；重大状态变化按上面的叙事连续性硬规则展开，禁止从结果直接跳到讲解。
+默认每镜使用 H3 出镜对白：把原文按语义段落分配到 voiceover，并设置 audioMode=h3-dialogue。不要机械地一镜一句；同一人物、同一表达意图的连续 2-4 个短句优先合成一个 7-10 秒镜头，短促反应或转场才只说一句，口播总量约每秒 4 个字。voiceover 写“人物名：台词”，speakerHint 同时写说话人和声线。说话镜头的景别服从画面感、动作、空间关系和情绪节奏：表情是重点且不需交代环境时可以收近；需要看清递物、争执、问答、人物距离、环境压力或集体反应时，保留中景、双人或多人同框。禁止按“只要说话就特写”的模板拆镜，但要写清当前谁说话、其余人如何反应，避免所有人同时张嘴。只有原文明说是旁白/画外音时才用 h3-voiceover，明确要求后期配音时才用 tts，明确无口播的空镜才用 none。人物章每一个 ### 都必须在 subjects 中单独建档；已故角色至少一镜出现遗物、画像或闪回，活人对手至少一镜出现对峙或可见压力。每镜 title 必须是不同的 3-8 字内容标题，禁止统一写“镜头”。逐对核对 continuity，后一镜开头必须接住前一镜结尾；重大状态变化按上面的叙事连续性硬规则展开，禁止从结果直接跳到讲解。
 只输出合法 JSON。`
     },
     {
@@ -1387,6 +1388,21 @@ export function storyboardQualityIssues(
   }
   const people = (result.subjects ?? []).filter((s) => s.kind !== 'other')
   const voicedShots = result.shots.filter((shot) => (shot.voiceover || '').trim())
+  const looksLikeAd = /带货|产品演示|口播文案/.test(`${input.topic || ''}\n${input.content || ''}`)
+  if (
+    !looksLikeAd &&
+    people.length >= 2 &&
+    result.shots.length >= 4 &&
+    voicedShots.length < Math.max(3, Math.ceil(result.shots.length * 0.35))
+  ) {
+    issues.push('对白过少：有人物同场的镜头几乎不说话，短剧/短电影不能写成默片。唤名、问答、相认、对峙、劝阻必须落到 voiceover。禁止把全部前情塞进第一镜成年旁白')
+  }
+  if (
+    voicedShots.some((shot) => /成年/.test(shot.voiceover)) &&
+    voicedShots.filter((shot) => !/成年/.test(shot.voiceover)).length < 2
+  ) {
+    issues.push('出镜对白被改成了「成年某某」旁白；本场人物必须自己开口，故事背景不要用旁白复述')
+  }
   if (
     totalDuration >= 25 &&
     voicedShots.length >= 3 &&
@@ -1401,9 +1417,6 @@ export function storyboardQualityIssues(
       issues.push(`${label} 口播 ${spokenChars} 字，${shot.duration} 秒念不完`)
     }
     const speakers = voiceoverSpeakerLabels(shot.voiceover || '')
-    if (shot.audioMode === 'h3-dialogue' && speakers.length > 1) {
-      issues.push(`严重：${label} 同一 H3 镜头包含多个说话者（${speakers.join('、')}），必须按说话轮次拆镜`)
-    }
     const speaker = speakers[0]
     if (shot.audioMode === 'h3-dialogue' && speaker) {
       const staging = [shot.shotSize, shot.blocking, shot.visualPrompt, shot.videoPrompt]
@@ -1644,8 +1657,7 @@ export function normalizeStoryboard(
     description: String(s?.description || '').trim(),
     mainAnchor: optStr(s?.mainAnchor),
     anchors: optStr(s?.anchors),
-    lighting: optStr(s?.lighting),
-    props: optStr(s?.props ?? s?.keyProps ?? s?.importantProps ?? s?.['关键道具'])
+    lighting: optStr(s?.lighting)
   }))
 
   if (subjects.length === 0) {
@@ -2004,13 +2016,45 @@ export interface PlayRunResult {
 function playBibleGaps(md: string): string[] {
   const t = md || ''
   const gaps: string[] = []
-  if (!/##\s*(故事背景|本章承接)/.test(t)) gaps.push('故事背景（人物从哪来、本段从哪一帧开始）')
-  if (!/##\s*人物/.test(t)) gaps.push('人物（外貌、衣服、本章状态、关系）')
+  if (!/##\s*(故事背景|本章承接)/.test(t)) gaps.push('故事背景（一句话故事、对抗引擎、完整梗概；禁止高潮切片）')
+  else {
+    if (!/一句话故事/.test(t)) gaps.push('故事背景必须写明「一句话故事」')
+    if (!/对抗引擎/.test(t)) gaps.push('故事背景必须写明「对抗引擎」（对手是谁、要什么、如何抬高代价）')
+    if (/本片从|本段从哪一帧|从.*瞬间开始/.test(t) && !/完整梗概/.test(t)) {
+      gaps.push('故事背景被写成高潮切片，必须补完整梗概：开端、对手、递进阻力、高潮选择、结局')
+    }
+  }
+  if (!/##\s*人物/.test(t)) {
+    gaps.push('人物（主角、对手、关键亲人；每人含欲望/恐惧/弧光/视觉锚点）')
+  } else {
+    if (!/欲望/.test(t) || !/恐惧/.test(t) || !/弧光/.test(t)) {
+      gaps.push('人物小传缺少欲望、恐惧或弧光，按编剧手册补全每人字段')
+    }
+    const people = t.split(/##\s*人物/)[1]?.split(/##\s+/)[0] || ''
+    const charCount = (people.match(/^###\s+/gm) || []).length
+    const looksLikeAd = /口播|带货|产品演示/.test(t)
+    if (!looksLikeAd && charCount > 0 && charCount < 3) {
+      gaps.push('人物表过薄：除路人外必须有主角、对手、关键亲人/导师；已故父亲和活人对手也要建档，不能只留两人高潮对手戏')
+    }
+  }
   if (!/##\s*环境与场景/.test(t) && !/##\s*场景\s*$/m.test(t)) {
     gaps.push('环境与场景（无人时的空间、天气、年代肌理）')
   }
+  const sceneCount = (t.match(/##\s*场景[一二三四五六七八九十百0-9]/g) || []).length
+  if (sceneCount > 0 && !/场次任务/.test(t)) {
+    gaps.push('每场必须有场次任务（目标 / 阻力 / 结果）')
+  }
   const tableHits = t.match(/\*\*口播\*\*/g)?.length || 0
   if (tableHits >= 3) gaps.push('把口播/画面/时长四格改写成连续动作和对白，不要再填表')
+  const looksLikeAd = /口播|带货|产品演示/.test(t)
+  const quotes = t.match(/「[^」]{2,}」/g)?.length || 0
+  const namedLines = t.match(/\*\*[^*：\n]{1,16}：\*\*/g)?.length || 0
+  if (!looksLikeAd && sceneCount >= 3 && quotes + namedLines < Math.max(6, sceneCount)) {
+    gaps.push('对白过少：这是影视剧不是默片。相认、唤名、对峙、劝阻、问答必须写出可念的对白往来，禁止把前情塞进一句成年旁白、其余场次全哑巴')
+  }
+  if (/成年[^「\n]{0,8}：/.test(t) && quotes < 4) {
+    gaps.push('禁止用「成年某某」旁白代替出镜对白；让本场人物自己开口')
+  }
   return gaps
 }
 
@@ -2028,7 +2072,7 @@ async function fillPlayBibleIfThin(
       messages: [
         {
           role: 'system',
-          content: `你是影视编剧。用户已经有一稿，但缺后面拆镜必需的设定。补全下列缺失，尽量保留已有场次和对白原文。${PLAY_MARKDOWN_SPEC}\n只输出 JSON：{"playMarkdown":"..."}。`
+          content: `你是影视编剧。用户已经有一稿，但缺故事引擎、设定或对白。补全下列缺失。允许增补人物小传、对抗引擎、对手/亲人入镜场次，并补出可念的出镜对白（**人物名：**「原词」）；已有好场次尽量保留原文，但高潮切片必须补回被抽掉的对抗与关键人物，默片必须补回相认/对峙/问答的对白往来，不能只在背景里加一句名字，也不能改成成年旁白。${PLAY_MARKDOWN_SPEC}\n只输出 JSON：{"playMarkdown":"..."}。`
         },
         {
           role: 'user',
@@ -2188,21 +2232,30 @@ async function ensurePlayNarrativeContinuity(
 
 const PLAY_MARKDOWN_SPEC = `playMarkdown 必须是能拍、能拆镜的完整剧本，禁止压成「口播 / 画面 / 声音 / 时长」四格表。后面提炼人物、场景、分镜都只读这份正文，背景、人设、环境写不进剧本，拆镜就会空洞、不连贯。
 
-必须用简体中文，结构如下（场次按故事增减；短片 3–8 场，电影章节按场写够）：
+必须用简体中文，结构如下。场次按故事需要写够：短片可以压缩时长，但不能抽掉对手、关键亲人和对抗引擎；传说/IP 改编禁止压成高潮切片。电影章节按场写够。
 
 # 标题
 > 类型：…　时间：年代/季节/昼夜　地点：城市与具体区域　建议时长：…
 
 ## 故事背景
-写清本章/本片从哪接上：人物从哪来、钱和身体现在什么状态、和谁有关系、这一段从哪一帧开始。不要只写一句梗概。
+必须按这三项写，禁止用「本片从某一帧开始」代替完整故事（用户明确只要某一段时除外）：
+- 一句话故事：[主角] 为了 [外在目标]，必须 [高难行动]，否则 [失败代价]
+- 对抗引擎：对手是谁、他要什么、价值逻辑是什么、如何持续抬高代价
+- 完整梗概：用连贯散文写完开端、转折、递进阻力、高潮选择和结局。对手和关键亲人必须在场，不能蒸发成背景一句
 
 ## 人物
-每个会出镜、有台词或推动剧情的人单独一节（### 短名）。必须写到能画人设、能对戏：
-- 年龄、脸、发型、体型、身高印象
-- 这一段里穿什么、鞋、包、磨损和脏污
-- 本章内会变的状态：饥饿、衣服干湿、跛行、手里拿什么
-- 和主角的关系：陌生人、熟客、志愿者，不要写成突然出现的救世主
-路人一笔带过，有台词的人不能并成「一个男人」。
+构成故事引擎的人每人一节（### 短名）：主角、对手（或其人格化代表）、父母、导师、执法者。已故、缺席、后段才出场的人同样建档。路人一笔带过；有台词或推动因果的人不能并成「一个男人」。
+每节必须写到能画人设、能对戏：
+- 身份
+- 年龄与外形识别点：脸、发型、体型、身高印象
+- 性格与语感
+- 欲望
+- 恐惧与弱点
+- 关系
+- 弧光：本章从哪变到哪
+- AI视觉锚点：服装、鞋、配饰、随身物、磨损脏污（能画四视图）
+- 跨场状态变化：饥饿、衣服干湿、伤势、手里拿什么
+- 本片出场：出镜 / 已故画外（遗物或画像入画） / 对手可见压力
 
 ## 环境与场景
 每个会拍的地点单独一节（### 地点短名）。写无人时的空间，供后面场景图使用：
@@ -2216,14 +2269,19 @@ const PLAY_MARKDOWN_SPEC = `playMarkdown 必须是能拍、能拆镜的完整剧
 
 ## 场景一｜场记标题
 **内景或外景｜地点原名｜天气时辰**
+人物：本场在场的人（含遗物/画像所代表的缺席者时注明）
+场次任务：目标 / 阻力 / 结果
 
-动作连续写：谁在哪一层（近处/后面）、身体朝哪、看见什么、做什么。前面的人侧对或回头，不要正面看镜头。
+用现在时写可见、可听、可执行的动作。可用 ■ 条列出动作节拍。谁在哪一层（近处/后面）、身体朝哪、看见什么、做什么。前面的人侧对或回头，不要正面看镜头。
 对白写成：
 
 **人物名：**
 
 「原词」
 
+有人物交流的场必须有对白往来，不能只写动作。唤名、问答、相认、对峙、劝阻、告别至少写出一问一答。禁止把故事背景塞进「成年某某」旁白；开口的人必须是本场出镜的那个人。
+「克制」是不写口号金句，不是整片只剩一两句。纯赶路、纯空镜可以没有台词，人物同场对手戏不行。
+场末用【节拍：触发/抉择/阻力/转向/高潮/回收】收束。
 需要时间压缩时用 ### 蒙太奇，每条都是看得见的画面，禁止写「时间流逝」「几天过去」。
 成年旁白用引用块，并标明画外音。
 场与场之间的衣服、伤势、手里的东西、天气必须接得上。
@@ -2231,19 +2289,25 @@ const PLAY_MARKDOWN_SPEC = `playMarkdown 必须是能拍、能拆镜的完整剧
 （后续场次：场景二、场景三…）
 
 ## 本章情绪线
-一段话写清从麻木/饥饿/警惕到某一拍点的变化，帮助后面拆镜不要演成空脸。
+一段话写清从开场到收束的情绪变化，帮助后面拆镜不要演成空脸。
 
 ## 视觉与声音基调
 色彩、胶片或纪实质感、主环境声。温暖场面靠热水、热气、人声，不要突然金碧辉煌。
 
 原则：
-- 先把人设和环境写明白，再写戏。禁止只有对白没有站位。
+- 先把故事引擎、人设和环境写明白，再写戏。禁止只有对白没有站位。
 - 善意是普通人做的小事。苦难用衣服、步态、呼吸、环境呈现。
 - 带货/口播：主持人和产品也要写进人物；口播原词放进对白，但场面仍要写清在哪、看着什么、手里拿什么。
-- 不要机械一场一句。同一意图的连续对白留在同一场。`
+- 不要机械一场一句。同一意图的连续对白留在同一场；有交流的场必须有对白往来，不能整场哑巴。`
+
+const SCREENWRITER_LANDING = `写故事时必须遵循「AI 短剧与 AI 短电影编剧」手册：先锁定故事引擎，再按节拍写，遵守改编硬约束、AI 制作约束、逐场规则、台词规则和成稿自检。
+交付物落到本产品剧本结构里：一句话故事、对抗引擎、完整梗概写入「故事背景」；人物小传写入「## 人物」（每人含欲望、恐惧、关系、弧光、外形识别点和跨场状态）；场景与道具写入「## 环境与场景」；节拍/分集钩子写入情绪线；完整剧本写入分场（每场含场次任务）；连续性写入人物状态与场间承接。
+分场标题仍用「## 场景N｜标题」和「内景或外景｜地点｜天气时辰」，对白用「**人物名：**」加原词。场次内部按编剧手册写目标/阻力/结果、现在时可见动作和克制镜头，不要改成无法提炼的格式。
+硬性禁止：把传说/IP 压成两人高潮切片；把「控制角色数量」理解成删除对手和关键亲人；用「本片从某一帧开始」代替完整梗概；把短剧/短电影写成默片或把前情塞进成年旁白。`
 
 async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {
   const directorPlaybook = getSkillBody('storyboard-director')
+  const screenwriterPlaybook = getSkillBody('ai-short-film-screenwriter')
   const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
   const styleCn = styleLabel(look.style)
   const mediumPhrase = extractUserMediumPhrase(
@@ -2259,7 +2323,11 @@ async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayD
     ? [
         {
           role: 'system',
-          content: `${directorPlaybook}
+          content: `${screenwriterPlaybook}
+
+${SCREENWRITER_LANDING}
+
+${directorPlaybook}
 
 ${NARRATIVE_CONTINUITY_RULES}
 ${SPEAKER_STAGING_RULES}
@@ -2310,13 +2378,18 @@ ${existingPlay || '（空）'}
     : [
         {
           role: 'system',
-          content: `${directorPlaybook}
+          content: `${screenwriterPlaybook}
+
+${SCREENWRITER_LANDING}
+
+${directorPlaybook}
 
 ${NARRATIVE_CONTINUITY_RULES}
 ${SPEAKER_STAGING_RULES}
 
 你这一步**只写完整剧本**，不要输出 subjects/scenes/shots JSON，也不要写英文 videoPrompt。
 目标：一份能直接给人读的 Markdown 剧本，方便用户改字；下一轮才会从剧本提炼画布节点。
+传说/IP/完整短片必须写全对抗引擎与关键人物，禁止压成两人高潮切片。有人物交流的场必须有出镜对白，禁止默片，禁止用成年旁白复述前情。
 
 【输出 JSON】
 {
@@ -2331,13 +2404,13 @@ ${SPEAKER_STAGING_RULES}
 playMarkdown 必须用简体中文。
 ${PLAY_MARKDOWN_SPEC}
 说话构图：按画面感、动作、空间关系和情绪节奏选择景别。需要强调细微表情时可以中近景、近景或特写；需要保留人物关系、动作路径或环境信息时应继续使用中景、双人或多人同框。不要因为人物开口就机械切特写，但要明确当前谁说话、其他人如何反应，不能所有人一起张嘴。
-事实保真：不新增原文没有的价格、功效、人物关系。口播像微信语音。画风「${mediumPhrase || styleCn}」融进画面描述，不要单独堆技法套话。
+事实保真：带货/口播不新增原文没有的价格、功效。改编传说或完整短片时，母题里构成因果的人物（父母、对手、导师、执法者）必须建档并进入剧情，不算「新增人物关系」。对白像人在场上说话，不要旁白腔，不要默片。画风「${mediumPhrase || styleCn}」融进画面描述，不要单独堆技法套话。
 只输出合法 JSON。`
         },
         {
           role: 'user',
           content: `把下面的主题/草稿写成完整剧本（只要 Markdown 剧本，不要拆画布节点）。
-必须先写故事背景、人物（外貌衣服状态）、环境与场景（无人时的空间），再写分场动作和对白。禁止口播/画面/时长四格表。
+必须先写故事背景（一句话故事、对抗引擎、完整梗概）、人物（主角+对手+关键亲人；每人含欲望/恐惧/弧光/视觉锚点）、环境与场景，再写分场（每场有场次任务和对白）。禁止口播/画面/时长四格表。禁止把传说/IP 压成两人高潮切片。禁止默片：相认、唤名、对峙、问答必须写出可念的对白往来。
 
 主题：
 """

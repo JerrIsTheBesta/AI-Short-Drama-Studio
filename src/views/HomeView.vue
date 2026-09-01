@@ -545,7 +545,7 @@ async function moveSelectedLibrary() {
             </div>
             <div class="proj-meta-top">
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
-              <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">一图生视频</Tag>
+              <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">自由模式</Tag>
               <Tag v-else-if="p.pipelineMode === 'smart-speech'" type="success" size="sm">智能口播</Tag>
               <Tag v-else-if="p.pipelineMode === 'drama'" type="accent" size="sm">AI 短剧 · {{ p.chapters?.length || 0 }} 章</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
@@ -711,7 +711,7 @@ async function moveSelectedLibrary() {
                 : pipelineMode === 'remake'
                   ? '上传参考视频和产品图，AI 会按镜头复刻脚本；配音后期合成，视频里不出口播。'
                   : pipelineMode === 'img2video'
-                    ? '自由画布：添加图片生成节点和图生视频节点，参考图可用来自本页或公共资产库。'
+                    ? '自由画布：右键添加图片、视频和剧本。剧本可以提炼角色、场景和分镜。'
                     : pipelineMode === 'drama'
                       ? '先进入剧本工作台，可以长期创作多个章节；准备好后再选择章节制作分镜和视频。'
                     : '起个好名字，下一步可以填具体文案'
@@ -756,8 +756,8 @@ async function moveSelectedLibrary() {
                   :class="{ active: pipelineMode === 'img2video' }"
                   @click="pipelineMode = 'img2video'"
                 >
-                  <div class="mode-title">一图生视频</div>
-                  <div class="mode-desc">画布上自由加图片节点和视频节点</div>
+                  <div class="mode-title">自由模式</div>
+                  <div class="mode-desc">画布上自由加图片、视频和剧本</div>
                 </button>
               </div>
             </label>

@@ -28,11 +28,10 @@ triggers: 全部做完,一口气,整条流水线,都生成,全做,全部生成,�
 2. 没有分镜节点 → `extract_cast`
 3. `approve_play`（全流程才自动过闸）
 4. 人物四视图缺 → `generate_all_sheets`
-5. 场景关键道具图缺 → `generate_all_prop_sheets`
-6. 场景锚点图缺 → `generate_all_scenes`
-7. 镜头还没故事看板 → `generate_all_boards`
-8. 有看板没视频 → `generate_all_videos`（传角色设计图 + 场景图 + 看板，不要先出配图）
-9. 用户点名配图才 `generate_all_images`
+5. 场景锚点图缺 → `generate_all_scenes`
+6. 镜头还没故事看板 → `generate_all_boards`
+7. 有看板没视频 → `generate_all_videos`（传角色设计图 + 场景图 + 看板，不要先出配图）
+8. 用户点名配图才 `generate_all_images`
 
 ## 自检与恢复
 
@@ -48,7 +47,6 @@ triggers: 全部做完,一口气,整条流水线,都生成,全做,全部生成,�
 - 「续写 / 接着写 / 再写两场」：只 `continue_play`，保留已有场次。
 - 「提炼节点」：只 `extract_cast`，首次只拆人物；用户再次确认后才提炼场景，再下一次才拆分镜。
 - 「出人设 / 四视图」：只角色图，不要配图、不要视频。
-- 「关键道具图」：按场景只画少量明显、被使用或推动剧情的物件。
 - 「出场景」：只场景四宫格锚点图。
 - 「故事看板」：只线稿构图。
 - 「把第三镜画出来」：只那一镜的配图（缺看板会先补）。

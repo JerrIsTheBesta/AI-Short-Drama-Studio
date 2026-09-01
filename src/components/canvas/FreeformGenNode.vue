@@ -387,8 +387,9 @@ async function generate() {
       busyLabel.value = msg
     })
     if (outputId.value) {
+      const n = project.current?.canvas?.nodes.find((item) => item.id === props.id)
       updateNodeData(props.id, {
-        ...props.data,
+        ...(n?.data ?? props.data),
         outputAssetId: outputId.value,
         nodeType: type.value
       })

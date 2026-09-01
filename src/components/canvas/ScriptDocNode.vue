@@ -7,11 +7,13 @@ import { runScriptNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import {
   applyProjectPlayMarkdown,
-  composeProjectPlayMarkdown
+  composeProjectPlayMarkdown,
+  scriptFromImportedPlay
 } from '@/utils/scriptMarkdown'
+import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
-import { extractStageLabel, nextExtractStage } from '@/services/canvas/pipeline'
+import { extractStageLabel, nextExtractStage, type ExtractStage } from '@/services/canvas/pipeline'
 import { isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
@@ -80,6 +82,10 @@ const playReady = computed(() => isPlayReady(project.current?.script))
 const playLabel = computed(() => (playReady.value ? '重新写剧本' : '写剧本'))
 const extractLabel = computed(() => extractStageLabel(project.current))
 const nextStage = computed(() => nextExtractStage(project.current))
+const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
+const canExtractShots = computed(
+  () => Boolean((project.current?.subjects ?? []).length && (project.current?.scenes ?? []).length)
+)
 
 const editing = ref(false)
 const draft = ref('')
@@ -149,6 +155,56 @@ async function approvePlay(ev: Event) {
   }
   project.setPlayApproved(true)
   await project.save()
+}
+
+async function applyImportedMarkdown(text: string, filename: string) {
+  if (!project.current) return
+  const existing = (project.current.script?.content || '').trim()
+  if (existing && !confirm('导入会替换当前剧本正文，确定吗？')) return
+  try {
+    const script = scriptFromImportedPlay(project.current, text, filename)
+    project.setScript(script)
+    project.applyPlayTitle(script.topic)
+    if (project.current.pipelineMode !== 'img2video') project.setPlayApproved(false)
+    await project.save()
+    editing.value = false
+    dirty.value = false
+    toast.success(`已导入「${script.topic}」`)
+  } catch (e: any) {
+    toast.error(e?.message || '导入失败')
+  }
+}
+
+async function importMarkdown(ev?: Event) {
+  ev?.stopPropagation()
+  if (generating.value) return
+  try {
+    const picked = await pickPlayMarkdownFile()
+    if (!picked) return
+    await applyImportedMarkdown(picked.text, picked.filename)
+  } catch (e: any) {
+    toast.error(e?.message || '导入失败')
+  }
+}
+
+function onPlayDragOver(ev: DragEvent) {
+  if (![...ev.dataTransfer?.types ?? []].includes('Files')) return
+  ev.preventDefault()
+  ev.stopPropagation()
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy'
+}
+
+async function onPlayDrop(ev: DragEvent) {
+  ev.preventDefault()
+  ev.stopPropagation()
+  const file = [...(ev.dataTransfer?.files ?? [])].find((item) =>
+    /\.(md|markdown|txt)$/i.test(item.name) || item.type.includes('markdown') || item.type === 'text/plain'
+  )
+  if (!file) {
+    toast.warn('请拖入 .md / .markdown / .txt 剧本文件')
+    return
+  }
+  await applyImportedMarkdown(await file.text(), file.name)
 }
 
 const live = ref<{ w: number; h: number } | null>(null)
@@ -226,7 +282,7 @@ function dismissPanel() {
   if (n) removeSelectedNodes([n])
 }
 
-async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = 'play') {
+async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = 'play', stage?: ExtractStage) {
   ev.stopPropagation()
   if (generating.value) return
   if (editing.value) {
@@ -237,13 +293,17 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
     toast.warn('请先写完整剧本，再提炼节点')
     return
   }
+  if (kind === 'extract' && stage === 'shots' && !canExtractShots.value) {
+    toast.warn('请先提炼角色和场景，再拆分镜')
+    return
+  }
   if (kind === 'continue' && !playReady.value) {
     toast.warn('请先写好完整剧本，再续写')
     return
   }
   dismissPanel()
   try {
-    await runScriptNode(kind, undefined, undefined, llmModel.value, continueHint.value)
+    await runScriptNode(kind, undefined, undefined, llmModel.value, continueHint.value, stage)
   } catch (e) {
     if (shouldToastAiError(e)) toast.error(friendlyAiError(e))
   }
@@ -252,7 +312,11 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 
 <template>
   <div class="sdoc" :class="[`st-${status}`, { editing, on: selected && panelOpen, busy: generating }]">
-    <div class="sdoc-card">
+    <div
+      class="sdoc-card"
+      @dragover="onPlayDragOver"
+      @drop="onPlayDrop"
+    >
     <div class="sdoc-head">
       <div class="sdoc-titles">
         <span class="sdoc-k">完整剧本</span>
@@ -266,6 +330,9 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
           </button>
         </template>
         <template v-else>
+          <button type="button" class="sdoc-btn" :disabled="generating" @click="importMarkdown" @mousedown.stop>
+            导入
+          </button>
           <button
             v-if="playReady"
             type="button"
@@ -291,7 +358,31 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
     />
     <div v-else class="sdoc-md nowheel nodrag" :class="{ 'has-panel': selected && panelOpen }" v-html="html" />
 
-    <div v-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
+    <div v-if="!playReady && !editing" class="sdoc-gate nodrag">
+      <span>导入 .md 剧本，或点「写剧本」。导入后可以提炼角色、场景和分镜。</span>
+      <button type="button" :disabled="generating" @click="importMarkdown" @mousedown.stop>导入 Markdown</button>
+    </div>
+    <div v-else-if="playReady && isImg2Video && !editing" class="sdoc-gate nodrag">
+      <span>从这份剧本提炼到画布。角色、场景、分镜可以分开选。</span>
+      <div class="sdoc-extracts">
+        <button type="button" :disabled="generating" @click="generateThis($event, 'extract', 'subjects')" @mousedown.stop>
+          提炼角色
+        </button>
+        <button type="button" :disabled="generating" @click="generateThis($event, 'extract', 'scenes')" @mousedown.stop>
+          提炼场景
+        </button>
+        <button
+          type="button"
+          :disabled="generating || !canExtractShots"
+          :title="canExtractShots ? '按剧本拆分镜' : '请先提炼角色和场景'"
+          @click="generateThis($event, 'extract', 'shots')"
+          @mousedown.stop
+        >
+          提炼分镜
+        </button>
+      </div>
+    </div>
+    <div v-else-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
       <span>按人物、场景、分镜分三步提炼；每一步完成就立即保存，下一步由你确认后再运行。</span>
       <button type="button" :disabled="generating" @click="generateThis($event, 'extract')" @mousedown.stop>
         {{ extractLabel }}
@@ -331,11 +422,11 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
           <textarea
             rows="3"
             :value="project.current?.script?.content || ''"
-            placeholder="已有大纲、台词或备注，会一起交给模型"
+            placeholder="已有大纲、台词或 .md 正文，会一起交给模型"
             @input="patchDraftBrief(($event.target as HTMLTextAreaElement).value)"
           />
         </template>
-        <p v-else class="prompt-hint">写剧本会先写故事背景、人物、环境和分场，不是口播填空表。续写只往后加。重新写会整篇重来并清空节点。</p>
+        <p v-else class="prompt-hint">写剧本会先写故事背景、人物、环境和分场，不是口播填空表。也可以随时导入 .md。续写只往后加。重新写会整篇重来并清空节点。</p>
         <template v-if="playReady">
           <label>续写方向（可选）</label>
           <textarea
@@ -355,8 +446,38 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
               </optgroup>
             </select>
           </label>
+          <button type="button" class="ghost" :disabled="generating" @click="importMarkdown">
+            导入.md
+          </button>
           <button
-            v-if="nextStage"
+            v-if="isImg2Video"
+            type="button"
+            class="ghost"
+            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
+            @click="generateThis($event, 'extract', 'subjects')"
+          >
+            提炼角色
+          </button>
+          <button
+            v-if="isImg2Video"
+            type="button"
+            class="ghost"
+            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
+            @click="generateThis($event, 'extract', 'scenes')"
+          >
+            提炼场景
+          </button>
+          <button
+            v-if="isImg2Video"
+            type="button"
+            class="ghost"
+            :disabled="generating || !canExtractShots"
+            @click="generateThis($event, 'extract', 'shots')"
+          >
+            提炼分镜
+          </button>
+          <button
+            v-else-if="nextStage"
             type="button"
             class="ghost"
             :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
@@ -586,6 +707,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
   padding: 10px 14px;
   background: rgba(245, 158, 11, 0.12);
   border-top: 1px solid rgba(251, 191, 36, 0.35);
@@ -604,6 +726,16 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   background: #f59e0b;
   color: #111;
   font-weight: 700;
+}
+.sdoc-extracts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sdoc-extracts button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .sdoc-ok {
   padding: 8px 14px;
@@ -697,6 +829,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 .prompt-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
 }

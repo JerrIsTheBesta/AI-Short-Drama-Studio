@@ -135,6 +135,7 @@ async function reextract(ev: Event) {
 .tint-subject,
 .tint-scene,
 .tint-shot,
+.tint-video,
 .tint-audio,
 .tint-export {
   background: var(--color-canvas-group);

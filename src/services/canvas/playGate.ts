@@ -15,6 +15,7 @@ export function isPlayApproved(p: Project | null | undefined): boolean {
 }
 
 export function needsPlayReview(p: Project | null | undefined): boolean {
+  if (p?.pipelineMode === 'img2video') return false
   return Boolean(p?.shots.length) && !isPlayApproved(p)
 }
 

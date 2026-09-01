@@ -444,7 +444,7 @@ export interface Project {
   /**
    * standard：主题/文案创作
    * remake：上传参考视频复刻镜头，产品必须换成用户图
-   * img2video：一图生视频，自由画布（图片节点 + 视频节点）
+   * img2video：自由模式，自由画布（图片节点 + 视频节点 + 剧本）
    */
   pipelineMode?: 'standard' | 'drama' | 'remake' | 'img2video' | 'smart-speech'
   /** 智能口播入口创建的专用流程配置 */

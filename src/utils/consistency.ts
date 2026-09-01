@@ -199,14 +199,14 @@ export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRef
 export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
   return packShotRefs(shot, project, {
     includeBoard: videoRequiresStoryboard(project),
-    includeProps: true,
+    includeProps: false,
     max: 8
   })
 }
 
 /** 普通创作关键帧：只用人设、场景、道具，不带故事看板。 */
 export function collectShotKeyframeRefIds(shot: Shot, project: Project): ShotRefBundle {
-  return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 8 })
+  return packShotRefs(shot, project, { includeBoard: false, includeProps: false, max: 8 })
 }
 
 function packShotRefs(
@@ -429,7 +429,7 @@ export function missingCastAssets(project: Project): {
 } {
   return {
     subjects: (project.subjects ?? []).filter((s) => !s.designSheetAssetId),
-    scenes: (project.scenes ?? []).filter((s) => !s.plateAssetId || (sceneHasKeyProps(s) && !s.propSheetAssetId))
+    scenes: (project.scenes ?? []).filter((s) => !s.plateAssetId)
   }
 }
 
@@ -473,7 +473,7 @@ export function composeShotImagePrompt(
   }
   if (scene) {
     parts.push(
-      `地点必须与场景锚点图「${scene.name}」一致：${scene.description}${scene.mainAnchor ? `；主锚是${scene.mainAnchor}` : ''}${scene.props && scene.props !== '无' ? `；本场关键道具：${scene.props}` : ''}。锚点图是四宫格设定，成片只要同一个地方，不要把四格画进画面。场景里没有人；把上述人物按四视图放进去，禁止另造场景，也禁止再添路人。`
+      `地点必须与场景锚点图「${scene.name}」一致：${scene.description}${scene.mainAnchor ? `；主锚是${scene.mainAnchor}` : ''}。锚点图是四宫格设定，成片只要同一个地方，不要把四格画进画面。场景里没有人；把上述人物按四视图放进去，禁止另造场景，也禁止再添路人。`
     )
   }
   if (project.pipelineMode === 'remake') {

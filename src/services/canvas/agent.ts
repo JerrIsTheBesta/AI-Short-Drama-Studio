@@ -2,7 +2,6 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
-import { sceneHasKeyProps } from '@/utils/consistency'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
@@ -65,7 +64,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 硬性规则：
 1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
-3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本（必须含故事背景、人物外貌与状态、环境与场景、分场动作和对白；禁止口播/画面/时长四格表；不创建人物/场景/分镜节点）；用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
+3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本。写剧本、改编、续写必须按 ai-short-film-screenwriter 的故事引擎、改编硬约束、节拍、AI 制作约束和逐场规则来；成稿前自检。必须含一句话故事、对抗引擎、完整梗概、人物小传（主角/对手/关键亲人，含欲望恐惧弧光）、环境与场景、每场场次任务、分场动作和对白；禁止口播/画面/时长四格表；禁止把传说压成高潮切片；禁止默片，相认/唤名/对峙/问答必须有出镜对白往来；不创建人物/场景/分镜节点。用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
 4. 已有完整剧本时：
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
@@ -85,13 +84,11 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "approve_play" }
 { "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "看板画面与动作，可选", "videoPrompt": "场景叙事：画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
-{ "tool": "generate_prop_sheet", "sceneId": "scn_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
 { "tool": "generate_shot_board", "shotId": "shot_xxx" }
 { "tool": "generate_video", "shotId": "shot_xxx" }
 { "tool": "generate_audio", "shotId": "shot_xxx" }
 { "tool": "generate_all_sheets" }
-{ "tool": "generate_all_prop_sheets" }
 { "tool": "generate_all_scenes" }
 { "tool": "generate_all_boards" }
 { "tool": "generate_all_images" }
@@ -126,7 +123,7 @@ function skillSelectContext(userText: string) {
     workflowMode: p?.script?.workflowMode,
     hasShots: shots.length > 0,
     missingSheets: subjects.some((s) => !s.designSheetAssetId),
-    missingPlates: scenes.some((s) => !s.plateAssetId || (sceneHasKeyProps(s) && !s.propSheetAssetId)),
+    missingPlates: scenes.some((s) => !s.plateAssetId),
     missingImages: videoRequiresStoryboard(p)
       ? shots.some((s) => !s.boardAssetId)
       : shots.some((s) => !s.imageAssetId),
@@ -457,7 +454,7 @@ function wrapUpReply(
     const hasShots = Boolean(p?.shots.length)
     return {
       reply: hasShots
-        ? `已经顺着当前剧后续写，原场次保留。\n新场还没进画布节点。到「分镜」分组点重新提取，或回「重新提取分镜」。${failLine}`
+        ? `已经顺着当前剧后续写，原场次保留。\n新场还没进画布节点。到「分镜关键帧」分组点重新提取，或回「重新提取分镜」。${failLine}`
         : `已经顺着当前剧后续写，原场次保留。\n看完可再改字，回「继续」先拆人物（不会同时拆场景和分镜）。${failLine}`,
       chips: hasShots
         ? [
@@ -577,7 +574,6 @@ function sanitizeActions(actions: any[], userText: string): any[] {
   const t = userText
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本|续写|接着写|再写/.test(t)
   const askedSheet = /人设|角色图|四视图/.test(t)
-  const askedProp = /资产图|道具图|关键道具/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景/.test(t)
   const askedPanel = /故事看板|看板图|线稿分镜/.test(t)
   const askedImage = /配图|出图|关键帧|画面/.test(t)
@@ -591,7 +587,7 @@ function sanitizeActions(actions: any[], userText: string): any[] {
     if (tool === 'focus_node') return true
     if (tool === 'approve_play') return true
     if (tool === 'generate_all_sheets') return askedSheet || all
-    if (tool === 'generate_all_prop_sheets') return askedProp || askedSheet || all
+    if (tool === 'generate_all_prop_sheets' || tool === 'generate_prop_sheet') return false
     if (tool === 'generate_all_scenes') return askedScene || all
     if (tool === 'generate_all_boards') return askedPanel || all
     if (tool === 'generate_all_images') return askedImage || all
@@ -601,7 +597,6 @@ function sanitizeActions(actions: any[], userText: string): any[] {
       return askedBoard || all || isNewStoryBrief(t, useProjectStore().current)
     }
     if (tool === 'generate_sheet') return askedSheet || all
-    if (tool === 'generate_prop_sheet') return askedProp || askedSheet || all
     if (tool === 'generate_scene') return askedScene || all
     if (tool === 'generate_shot_board') return askedPanel || shotHit || all
     if (tool === 'generate_shot_image') return askedImage || shotHit || all
@@ -732,11 +727,6 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   } else if (askedSheet) {
     actions.push({ tool: 'generate_all_sheets' })
   }
-  if (namedScns.length && askedProp && !askedSheet) {
-    for (const s of namedScns) actions.push({ tool: 'generate_prop_sheet', sceneId: s.id })
-  } else if (askedProp && !askedSheet) {
-    actions.push({ tool: 'generate_all_prop_sheets' })
-  }
 
   if (namedScns.length && askedScene) {
     for (const s of namedScns) actions.push({ tool: 'generate_scene', sceneId: s.id })
@@ -775,9 +765,6 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     }
     if (!actions.some((a) => a.tool === 'generate_all_sheets')) {
       actions.push({ tool: 'generate_all_sheets' })
-    }
-    if (!actions.some((a) => a.tool === 'generate_all_prop_sheets')) {
-      actions.push({ tool: 'generate_all_prop_sheets' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_scenes')) {
       actions.push({ tool: 'generate_all_scenes' })

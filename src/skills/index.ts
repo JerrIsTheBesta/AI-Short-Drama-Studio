@@ -10,6 +10,7 @@ import shotImageRaw from './shot-image.md?raw'
 import storyboardPanelRaw from './storyboard-panel.md?raw'
 import shotVideoRaw from './shot-video.md?raw'
 import storyboardRaw from './storyboard-director.md?raw'
+import screenwriterRaw from './ai-short-film-screenwriter.md?raw'
 import h3PromptRaw from './h3-prompt-writing.md?raw'
 import filmChapterRaw from './film-chapter-production.md?raw'
 
@@ -78,6 +79,7 @@ function toSkill(raw: string): Skill {
 
 export const ALL_SKILLS: Skill[] = [
   toSkill(filmChapterRaw),
+  toSkill(screenwriterRaw),
   toSkill(pipelineRaw),
   toSkill(storyboardRaw),
   toSkill(characterRaw),
@@ -121,9 +123,14 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   }
 
   if (filmChapter) add('film-chapter-production')
+  if (filmChapter || ctx.pipelineMode === 'drama') add('ai-short-film-screenwriter')
 
-  if (/拆分镜|拆镜|故事板|出分镜|生成分镜|续写|接着写/.test(text)) {
+  if (/写剧本|改编|续写|AI短剧|短电影|竖屏剧|微短剧|分集|逐场|优化剧本|编剧|故事改编/.test(text)) {
+    add('ai-short-film-screenwriter')
+  }
+  if (/拆分镜|拆镜|故事板|出分镜|生成分镜|续写|接着写|写剧本|剧本/.test(text)) {
     add('storyboard-director')
+    add('ai-short-film-screenwriter')
   }
   if (
     /人设|角色|场景图|底板|出场景/.test(text)
@@ -148,7 +155,10 @@ export function selectSkills(ctx: SkillSelectContext): Skill[] {
   }
   if (/全部做完|全部生成|都生成|全做|一口气|整条流水线|从头到尾|缺的都补|全流程/.test(text)) {
     if (!filmChapter) add('pipeline-batch')
-    if (!ctx.hasShots) add('storyboard-director')
+    if (!ctx.hasShots) {
+      add('storyboard-director')
+      add('ai-short-film-screenwriter')
+    }
     add('character-consistency')
     if (!filmChapter) add('storyboard-panel')
     add('shot-image')

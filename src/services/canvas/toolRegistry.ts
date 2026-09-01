@@ -1,6 +1,5 @@
 import { useProjectStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
-import { sceneHasKeyProps } from '@/utils/consistency'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { topicFromBrief } from '@/utils/storyBrief'
@@ -9,7 +8,6 @@ import { VIDEO_GEN_CONCURRENCY } from './jobs'
 import {
   runCanvasNode,
   generateMissingSheets,
-  generateMissingPropSheets,
   generateMissingPlates,
   generateMissingBoards,
   generateMissingImages,
@@ -127,7 +125,6 @@ function counts() {
   const p = useProjectStore().current
   return {
     sheets: (p?.subjects ?? []).filter((s) => !s.designSheetAssetId).length,
-    props: (p?.scenes ?? []).filter((s) => sceneHasKeyProps(s) && !s.propSheetAssetId).length,
     scenes: (p?.scenes ?? []).filter((s) => !s.plateAssetId).length,
     boards: videoRequiresStoryboard(p)
       ? (p?.shots ?? []).filter((s) => !s.boardAssetId).length
@@ -230,7 +227,6 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
         ...missingFour.map((subject) => ({ tool: 'generate_sheet' as const, subjectId: subject.id }))
       ]
       if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
-      if (scene && sceneHasKeyProps(scene) && !scene.propSheetAssetId) repairs.push({ tool: 'generate_prop_sheet', sceneId: scene.id })
       if (repairs.length) {
         return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少角色或场景参考，先补依赖`, actions: repairs }
       }
@@ -242,10 +238,8 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
       return { state: 'skip', detail: '四视图已经补齐' }
     }
   }
-  if (action.tool === 'generate_all_prop_sheets') {
-    if (!(project.scenes ?? []).some((scene) => sceneHasKeyProps(scene) && !scene.propSheetAssetId)) {
-      return { state: 'skip', detail: '场景关键道具图已经补齐' }
-    }
+  if (action.tool === 'generate_all_prop_sheets' || action.tool === 'generate_prop_sheet') {
+    return { state: 'skip', detail: '已取消关键道具图' }
   }
 
   if (action.tool === 'generate_all_boards') {
@@ -254,7 +248,6 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     } else if (!(project.shots ?? []).some((shot) => !shot.boardAssetId)) return { state: 'skip', detail: '故事看板已经补齐' }
     const repairs: AgentToolAction[] = []
     if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
-    if ((project.scenes ?? []).some((scene) => sceneHasKeyProps(scene) && !scene.propSheetAssetId)) repairs.push({ tool: 'generate_all_prop_sheets' })
     if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
     if (repairs.length) return { state: 'repair', detail: '批量看板缺少角色或场景参考，先补依赖', actions: repairs }
   }
@@ -313,13 +306,12 @@ export function verifyRegisteredTool(raw: unknown): string | null {
       return subject?.designSheetAssetId ? null : '角色四视图没有落库'
     }
     case 'generate_prop_sheet':
-      return (project.scenes ?? []).find((item) => item.id === action.sceneId)?.propSheetAssetId ? null : '场景关键道具图没有落库'
+    case 'generate_all_prop_sheets':
+      return null
     case 'generate_scene':
       return (project.scenes ?? []).find((item) => item.id === action.sceneId)?.plateAssetId ? null : '场景锚点图没有落库'
     case 'generate_all_sheets':
       return (project.subjects ?? []).every((item) => item.designSheetAssetId) ? null : '仍有角色四视图缺失'
-    case 'generate_all_prop_sheets':
-      return (project.scenes ?? []).every((item) => !sceneHasKeyProps(item) || item.propSheetAssetId) ? null : '仍有场景关键道具图缺失'
     case 'generate_all_scenes':
       return (project.scenes ?? []).every((item) => item.plateAssetId) ? null : '仍有场景锚点图缺失'
     case 'generate_shot_board':
@@ -422,7 +414,7 @@ const definitions: ToolDefinition[] = [
         hint: action.text
       })
       revealCanvas('script')
-      return '已按当前剧后续写（保留原场次）。若已提炼过节点，请在「分镜」分组点重新提取以同步新场。'
+      return '已按当前剧后续写（保留原场次）。若已提炼过节点，请在「分镜关键帧」分组点重新提取以同步新场。'
     }
   },
   {
@@ -536,19 +528,12 @@ const definitions: ToolDefinition[] = [
   },
   {
     name: 'generate_all_prop_sheets', phase: 1, timeoutMs: 600_000,
-    estimate: () => ({ calls: counts().props, seconds: counts().props * 90 }),
-    async execute(_action, ctx) { await generateMissingPropSheets(ctx.onLog, ctx.signal); return '场景关键道具图已补齐' }
+    estimate: () => ({ calls: 0, seconds: 0 }),
+    async execute() { return '已取消关键道具图' }
   },
   {
     name: 'generate_prop_sheet', phase: 1, timeoutMs: 240_000, required: ['sceneId'], estimate: oneImage,
-    async execute(action, ctx) {
-      const p = useProjectStore().current!
-      const scene = (p.scenes ?? []).find((s) => s.id === action.sceneId)
-      if (!scene) throw new Error(`找不到场景 ${action.sceneId}`)
-      await runCanvasNode(`sceneProps:${scene.id}`, progress(ctx), ctx.signal)
-      revealCanvas(`sceneProps:${scene.id}`)
-      return `关键道具图 ${scene.name} 完成`
-    }
+    async execute() { return '已取消关键道具图' }
   },
   {
     name: 'generate_scene', phase: 1, timeoutMs: 240_000, required: ['sceneId'], estimate: oneImage,

@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from '@/stores'
 import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
-import { runCanvasNode, runScriptNode, rewriteShotPerformance } from '@/services/canvas/runner'
+import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
+import { scriptFromImportedPlay } from '@/utils/scriptMarkdown'
+import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
@@ -19,9 +21,8 @@ import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import { openLightbox } from '@/composables/useLightbox'
 import { cssAspectRatio } from '@/services/canvas/layout'
-import { nextExtractStage } from '@/services/canvas/pipeline'
+import { nextExtractStage, type ExtractStage } from '@/services/canvas/pipeline'
 import { canBuildExport } from '@/utils/timeline'
-import { sceneHasKeyProps } from '@/utils/consistency'
 import {
   fillEmptyGeneratePrompt,
   rebuildGeneratePrompt
@@ -47,14 +48,23 @@ const bgmUrl = ref('')
 const generatingBgm = ref(false)
 const bgmError = ref('')
 
-function updateSceneKeyProps(value: string) {
-  if (!scene.value) return
-  const hadProps = sceneHasKeyProps(scene.value)
-  project.updateScene(scene.value.id, { props: value })
-  if (hadProps !== sceneHasKeyProps({ props: value })) project.syncCanvasFromProject()
-}
 const continueHint = ref('')
 const pickerOpen = ref(false)
+const optimizingPrompt = ref(false)
+const videoPromptBox = ref<HTMLTextAreaElement | null>(null)
+
+function persistShotVideoPrompt() {
+  if (props.node?.type !== 'shotVideo' || !shot.value) return
+  const v = videoPromptBox.value?.value
+  if (v == null) return
+  if (v !== (shot.value.compiledVideoPrompt ?? '')) {
+    project.updateShot(shot.value.id, { compiledVideoPrompt: v })
+  }
+}
+
+function onVideoPromptPaste() {
+  nextTick(() => persistShotVideoPrompt())
+}
 
 const keepAmbientAudio = computed({
   get: () => project.current?.settings.keepAmbientAudio !== false,
@@ -223,6 +233,10 @@ const extractLabel = computed(() => {
   return ''
 })
 const canExtractNext = computed(() => Boolean(nextExtractStage(project.current)))
+const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
+const canExtractShots = computed(
+  () => Boolean((project.current?.subjects ?? []).length && (project.current?.scenes ?? []).length)
+)
 
 const isImageNode = computed(() => {
   const t = props.node?.type
@@ -353,7 +367,7 @@ const historyIds = computed(() => {
 })
 
 const videoPromptPlaceholder = computed(() =>
-  '这里就是发给出视频接口的全文。改完原样发送。空着再点生成才会按分镜重写。'
+  '粘贴或编辑后原样发送。生成视频不会改回默认模板。空着再点「优化提示词」或「按分镜重铺」才会重写。'
 )
 
 watch(
@@ -377,9 +391,6 @@ watch(
       if (patch) project.updateShot(shot.value.id, patch)
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
-      if (patch) project.updateShot(shot.value.id, patch)
-    } else if (t === 'shotVideo' && shot.value) {
-      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
     }
   },
@@ -513,6 +524,7 @@ function onBgmPromptBlur() {
 
 async function run() {
   if (!props.node) return
+  persistShotVideoPrompt()
   if (gateBlocked.value) {
     toast.warn(PLAY_GATE_MSG)
     return
@@ -541,11 +553,23 @@ async function runContinue() {
   }
 }
 
-async function runExtract() {
+async function runExtract(stage?: ExtractStage) {
   if (!props.node) return
+  if (stage === 'shots' && !canExtractShots.value) {
+    toast.warn('请先提炼角色和场景，再拆分镜')
+    return
+  }
   try {
-    await runScriptNode('extract', undefined, undefined, llmModel.value)
-    toast.success('节点已从剧本提炼出来')
+    await runScriptNode('extract', undefined, undefined, llmModel.value, undefined, stage)
+    toast.success(
+      stage === 'subjects'
+        ? '角色已提炼到画布'
+        : stage === 'scenes'
+          ? '场景已提炼到画布'
+          : stage === 'shots'
+            ? '分镜已提炼到画布'
+            : '节点已从剧本提炼出来'
+    )
   } catch (e: any) {
     if (shouldToastAiError(e)) toast.error(friendlyAiError(e) || '提炼失败')
   }
@@ -597,6 +621,24 @@ function patchScript(field: 'topic' | 'content', value: string) {
   if (field === 'topic') project.applyPlayTitle(value)
 }
 
+async function importPlayMarkdown() {
+  if (!project.current) return
+  const existing = (project.current.script?.content || '').trim()
+  if (existing && !confirm('导入会替换当前剧本正文，确定吗？')) return
+  try {
+    const picked = await pickPlayMarkdownFile()
+    if (!picked) return
+    const script = scriptFromImportedPlay(project.current, picked.text, picked.filename)
+    project.setScript(script)
+    project.applyPlayTitle(script.topic)
+    if (project.current.pipelineMode !== 'img2video') project.setPlayApproved(false)
+    await project.save()
+    toast.success(`已导入「${script.topic}」`)
+  } catch (e: any) {
+    toast.error(e?.message || '导入失败')
+  }
+}
+
 const styleOptions = Object.entries(VISUAL_STYLE_LABEL) as [VisualStyle, string][]
 const projectStyle = computed({
   get: () => project.current?.script?.style ?? 'cinematic',
@@ -638,6 +680,20 @@ async function resetVideoPrompt() {
     toast.error(friendlyAiError(e) || '重写失败')
   }
 }
+
+async function optimizeVideoPrompt() {
+  persistShotVideoPrompt()
+  if (!shot.value || optimizingPrompt.value) return
+  optimizingPrompt.value = true
+  try {
+    await optimizeShotVideoPrompt(shot.value)
+    toast.success('已按 H3 格式优化提示词')
+  } catch (e: any) {
+    toast.error(friendlyAiError(e) || '优化失败')
+  } finally {
+    optimizingPrompt.value = false
+  }
+}
 </script>
 
 <template>
@@ -658,7 +714,11 @@ async function resetVideoPrompt() {
       </p>
 
       <p v-else-if="node.type === 'script'" class="hint">
-        分两步：先写完整剧本（背景、人物、环境、分场都要写清，还不拆节点）。写好后可续写，或提炼人物、场景、分镜。
+        {{
+          isImg2Video
+            ? '可导入 .md 剧本，或先写完整剧本，再点提炼角色、场景或分镜。也可以右键直接加空白节点。'
+            : '可导入 .md 剧本。或先写完整剧本（背景、人物、环境、分场都要写清，还不拆节点），再提炼人物、场景、分镜。'
+        }}
       </p>
       <p v-else-if="node.type === 'export'" class="hint">
         先调下方音频与字幕，再点合成。视频会出现在「视频预览」节点。
@@ -770,6 +830,10 @@ async function resetVideoPrompt() {
           @input="patchScript('topic', ($event.target as HTMLInputElement).value)"
         />
         <label>文案（Markdown，可用 # 大标题 ## 小标题）</label>
+        <div class="lab-row">
+          <p class="hint">可导入 .md / .markdown / .txt。</p>
+          <button class="link" type="button" @click="importPlayMarkdown">导入 Markdown</button>
+        </div>
         <textarea
           rows="12"
           :value="project.current.script?.content"
@@ -857,13 +921,6 @@ async function resetVideoPrompt() {
           placeholder="全景；主锚；地面站位；光源或次锚"
           @input="project.updateScene(scene.id, { anchors: ($event.target as HTMLTextAreaElement).value })"
         />
-        <label>关键道具</label>
-        <textarea
-          rows="3"
-          :value="scene.props || ''"
-          placeholder="没有就留空或写“无”；填写后才会出现道具节点"
-          @input="updateSceneKeyProps(($event.target as HTMLTextAreaElement).value)"
-        />
       </template>
 
       <template v-else-if="node.type === 'shotBoard' && shot">
@@ -897,16 +954,29 @@ async function resetVideoPrompt() {
       <template v-else-if="node.type === 'shotVideo' && shot">
         <div class="lab-row">
           <label>实际出视频提示词</label>
-          <button class="link" type="button" @click="resetVideoPrompt">按分镜重铺</button>
+          <div class="lab-actions">
+            <button
+              class="link"
+              type="button"
+              :disabled="optimizingPrompt || running"
+              @click="optimizeVideoPrompt"
+            >
+              {{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+            </button>
+            <button class="link" type="button" :disabled="optimizingPrompt || running" @click="resetVideoPrompt">按分镜重铺</button>
+          </div>
         </div>
         <p class="hint">
-          下面就是发给出视频接口的全文。改完原样发送，不会再编译或加套话。点「按分镜重铺」才会按剧情重写。
+          优化按这个框里的原文改写成 H3 格式。你写的台词会进 &lt;d&gt;，口播栏为空也不会删掉。
         </p>
         <textarea
+          ref="videoPromptBox"
           rows="16"
           :value="shot.compiledVideoPrompt ?? ''"
           :placeholder="videoPromptPlaceholder"
           @input="project.updateShot(shot.id, { compiledVideoPrompt: ($event.target as HTMLTextAreaElement).value })"
+          @paste="onVideoPromptPaste"
+          @blur="persistShotVideoPrompt"
         />
         <label>时长（秒）</label>
         <input
@@ -1037,13 +1107,42 @@ async function resetVideoPrompt() {
       >
         从资源库选用
       </GradientButton>
+      <template v-if="node.type === 'script' && isImg2Video">
+        <GradientButton
+          block
+          type="secondary"
+          :loading="running"
+          :disabled="running || !((project.current?.script?.content || '').trim())"
+          @click="runExtract('subjects')"
+        >
+          提炼角色
+        </GradientButton>
+        <GradientButton
+          block
+          type="secondary"
+          :loading="running"
+          :disabled="running || !((project.current?.script?.content || '').trim())"
+          @click="runExtract('scenes')"
+        >
+          提炼场景
+        </GradientButton>
+        <GradientButton
+          block
+          type="secondary"
+          :loading="running"
+          :disabled="running || !canExtractShots"
+          @click="runExtract('shots')"
+        >
+          提炼分镜
+        </GradientButton>
+      </template>
       <GradientButton
-        v-if="node.type === 'script' && canExtractNext"
+        v-else-if="node.type === 'script' && canExtractNext"
         block
         type="secondary"
         :loading="running"
         :disabled="running || !((project.current?.script?.content || '').trim())"
-        @click="runExtract"
+        @click="runExtract()"
       >
         {{ extractLabel }}
       </GradientButton>
@@ -1159,11 +1258,21 @@ async function resetVideoPrompt() {
   align-items: center;
   gap: 8px;
 }
+.lab-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .link {
   font-size: 11px;
   color: var(--color-accent);
   padding: 0;
   background: none;
+}
+.link:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 label {
   font-size: 11px;

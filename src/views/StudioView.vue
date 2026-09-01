@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
@@ -8,7 +8,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { rebuildCanvasGraph, NODE_W } from '@/services/canvas/layout'
+import { rebuildCanvasGraph, NODE_W, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
 import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
 import {
   appendCanvasReferenceSource,
@@ -23,7 +23,7 @@ import FreeformGenNode from '@/components/canvas/FreeformGenNode.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
 import PromptCoach from '@/components/canvas/PromptCoach.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
-import type { CanvasNode } from '@/types'
+import type { CanvasNode, Shot } from '@/types'
 
 const project = useProjectStore()
 const assets = useAssetsStore()
@@ -139,6 +139,7 @@ const ctxMenu = ref<{
   y: number
   flow: { x: number; y: number }
   nodeId?: string
+  onNode?: boolean
 } | null>(null)
 
 const flowNodes = computed<Node[]>(() => {
@@ -174,16 +175,20 @@ const flowNodes = computed<Node[]>(() => {
         zIndex: 2
       }
     }
-    return {
+    const mapped: Node = {
       id: n.id,
       type: n.type,
       position: n.position,
       data: { ...n.data, nodeType: n.type },
-      parentNode: n.parentGroupId,
-      expandParent: false,
       draggable: true,
-      zIndex: 1
+      zIndex: n.type === 'imageGen' || n.type === 'videoGen' ? 12 : 1
     }
+    if (n.parentGroupId) {
+      mapped.parentNode = n.parentGroupId
+      mapped.parentId = n.parentGroupId
+      mapped.expandParent = false
+    }
+    return mapped
   })
 })
 
@@ -218,13 +223,19 @@ onMounted(async () => {
   }
   agentOpen.value = true
   loadAgentWidth()
-  if (project.current.pipelineMode === 'img2video') {
+  const hasPipeline =
+    (project.current.subjects?.length || 0) > 0 ||
+    (project.current.scenes?.length || 0) > 0 ||
+    project.current.shots.length > 0 ||
+    Boolean(project.current.canvas?.nodes.some((n) => n.type === 'groupFrame'))
+  if (project.current.pipelineMode === 'img2video' && !hasPipeline) {
     /* 空白画布，右键添加节点 */
   } else if (!project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')) {
     project.setCanvas(rebuildCanvasGraph(project.current, false))
   } else {
     project.setCanvas(rebuildCanvasGraph(project.current, true))
   }
+  pullStrandedFreeformIntoView()
   await assets.refresh()
   document.querySelectorAll('body > input[type="file"]').forEach((el) => el.remove())
   setCanvasReveal((nodeId) => {
@@ -337,10 +348,6 @@ function openSettings() {
 
 async function relayout() {
   if (!project.current) return
-  if (project.current.pipelineMode === 'img2video') {
-    setTimeout(() => fitView({ padding: 0.2 }), 40)
-    return
-  }
   project.setCanvas(rebuildCanvasGraph(project.current, false))
   setTimeout(() => fitView({ padding: 0.2 }), 40)
 }
@@ -366,6 +373,13 @@ function canDuplicate(id: string | null | undefined): boolean {
   return n?.type === 'imageGen' || n?.type === 'videoGen'
 }
 
+function canDeleteNode(id: string | null | undefined): boolean {
+  if (!id) return false
+  const n = project.current?.canvas?.nodes.find((x) => x.id === id)
+  if (!n) return false
+  return n.type !== 'groupFrame' && n.type !== 'export' && n.type !== 'final'
+}
+
 function duplicateNode(id: string | null | undefined) {
   if (!id) {
     toast.warn('请先选中要复制的图片或视频节点')
@@ -379,6 +393,60 @@ function duplicateNode(id: string | null | undefined) {
   }
   selectedId.value = nid
   toast.success('已复制节点')
+  nextTick(() => {
+    fitView({ nodes: [nid], padding: 0.35, duration: 280 })
+  })
+}
+
+function deleteCtxNode(id: string | null | undefined) {
+  if (!id || !project.current) return
+  const n = project.current.canvas?.nodes.find((x) => x.id === id)
+  if (!n || !canDeleteNode(id)) {
+    closeCtxMenu()
+    return
+  }
+  if (!confirm('删除这个节点？')) {
+    closeCtxMenu()
+    return
+  }
+  const p = project.current
+  if (n.type === 'subject' || n.type === 'subjectProps') {
+    const sid = n.data.subjectId
+    if (sid) {
+      project.setSubjects((p.subjects ?? []).filter((s) => s.id !== sid))
+      project.setShots(
+        p.shots.map((shot) => ({
+          ...shot,
+          subjectIds: (shot.subjectIds ?? []).filter((item) => item !== sid)
+        }))
+      )
+      project.setCanvas(rebuildCanvasGraph(project.current, true))
+    } else {
+      project.removeCanvasNode(id)
+    }
+  } else if (n.type === 'scene' || n.type === 'sceneProps') {
+    const scid = n.data.sceneId
+    if (scid) {
+      project.setScenes((p.scenes ?? []).filter((s) => s.id !== scid))
+      project.setShots(p.shots.map((shot) => (shot.sceneId === scid ? { ...shot, sceneId: undefined } : shot)))
+      project.setCanvas(rebuildCanvasGraph(project.current, true))
+    } else {
+      project.removeCanvasNode(id)
+    }
+  } else if (n.type === 'shotImage' || n.type === 'shotBoard' || n.type === 'shotVideo' || n.type === 'audio') {
+    const shotId = n.data.shotId
+    if (shotId) {
+      project.setShots(p.shots.filter((shot) => shot.id !== shotId).map((shot, index) => ({ ...shot, index })))
+      project.setCanvas(rebuildCanvasGraph(project.current, true))
+    } else {
+      project.removeCanvasNode(id)
+    }
+  } else {
+    project.removeCanvasNode(id)
+  }
+  if (selectedId.value === id) selectedId.value = null
+  closeCtxMenu()
+  toast.success('已删除节点')
 }
 
 function onDupKey(e: KeyboardEvent) {
@@ -387,6 +455,10 @@ function onDupKey(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
     e.preventDefault()
     duplicateNode(selectedId.value)
+  }
+  if (e.key === 'Delete' && canDeleteNode(selectedId.value)) {
+    e.preventDefault()
+    deleteCtxNode(selectedId.value)
   }
 }
 
@@ -402,14 +474,16 @@ function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
     'node' in ev && ev.node && ev.node.type !== 'groupFrame' ? String(ev.node.id) : undefined
   if (clickedId) selectedId.value = clickedId
   const nodeId = clickedId || selectedId.value || undefined
-  const extra = canDuplicate(nodeId) ? 36 : 0
-  const w = 188
-  const h = 92 + extra
+  const extra = (canDuplicate(clickedId) ? 36 : 0) + (clickedId && canDeleteNode(clickedId) ? 36 : 0)
+  const extraFree = isImg2Video.value ? 4 * 36 + 10 : 0
+  const w = 216
+  const h = 92 + extra + extraFree
   ctxMenu.value = {
     x: Math.max(8, Math.min(pt.x, window.innerWidth - w - 8)),
     y: Math.max(8, Math.min(pt.y, window.innerHeight - h - 8)),
     flow,
-    nodeId
+    nodeId,
+    onNode: Boolean(clickedId)
   }
 }
 
@@ -417,17 +491,27 @@ function closeCtxMenu() {
   ctxMenu.value = null
 }
 
+function pullStrandedFreeformIntoView() {
+  const canvas = project.current?.canvas
+  if (!canvas) return
+  const rescued = rescueStrandedFreeformNodes(canvas.nodes)
+  if (!rescued) return
+  project.setCanvas({ ...canvas, nodes: rescued })
+}
+
 function addFreeform(type: 'imageGen' | 'videoGen') {
   if (!project.current) return
-  const count = (project.current.canvas?.nodes ?? []).filter((n) => n.type === type).length + 1
-  const id = `${type}_${Date.now().toString(36)}`
-  const sourceId = ctxMenu.value?.nodeId
-  const source = sourceId
-    ? project.current.canvas?.nodes.find((node) => node.id === sourceId)
-    : undefined
+  pullStrandedFreeformIntoView()
+  const all = project.current.canvas?.nodes ?? []
+  const count = all.filter((n) => n.type === type).length + 1
+  const id = `${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+  const sourceId = ctxMenu.value?.onNode ? ctxMenu.value.nodeId : undefined
+  const source = sourceId ? all.find((node) => node.id === sourceId) : undefined
   const inheritsSource = canvasNodeProducesImage(source)
-  const base = ctxMenu.value?.flow ?? { x: 120, y: 120 }
-  const pos = source ? { x: base.x + 140, y: base.y - 50 } : base
+  const pos = nextFreeformPosition(all, {
+    source,
+    click: ctxMenu.value?.flow
+  })
   project.addCanvasNode({
     id,
     type,
@@ -457,6 +541,90 @@ function addFreeform(type: 'imageGen' | 'videoGen') {
   }
   selectedId.value = id
   closeCtxMenu()
+  toast.success(type === 'videoGen' ? '已添加视频节点' : '已添加图片节点')
+  nextTick(() => {
+    fitView({ nodes: [id], padding: 0.35, duration: 280 })
+  })
+}
+
+function addScriptNode() {
+  if (!project.current) return
+  const existing = project.current.canvas?.nodes.find((n) => n.type === 'script')
+  if (existing) {
+    selectedId.value = existing.id
+    closeCtxMenu()
+    toast.warn('已经有剧本节点')
+    return
+  }
+  const pos = ctxMenu.value?.flow ?? { x: 120, y: 120 }
+  project.addCanvasNode({
+    id: 'script',
+    type: 'script',
+    position: pos,
+    data: {
+      label: project.current.script?.topic || project.current.name || '剧本',
+      width: 460,
+      height: 720,
+      kind: 'scriptDoc'
+    },
+    status: 'idle'
+  })
+  selectedId.value = 'script'
+  closeCtxMenu()
+}
+
+function addPipelineEntity(kind: 'subject' | 'scene' | 'shot') {
+  if (!project.current) return
+  const flow = ctxMenu.value?.flow ?? { x: 120, y: 120 }
+  const before = new Set((project.current.canvas?.nodes ?? []).map((n) => n.id))
+  const stamp = Date.now().toString(36)
+  let selectId = ''
+  if (kind === 'subject') {
+    const n = (project.current.subjects ?? []).length + 1
+    const id = `sub_${stamp}`
+    project.setSubjects([
+      ...(project.current.subjects ?? []),
+      { id, name: `角色 ${n}`, kind: 'person', description: '' }
+    ])
+    selectId = `subject:${id}`
+  } else if (kind === 'scene') {
+    const n = (project.current.scenes ?? []).length + 1
+    const id = `scn_${stamp}`
+    project.setScenes([
+      ...(project.current.scenes ?? []),
+      { id, name: `场景 ${n}`, description: '' }
+    ])
+    selectId = `scene:${id}`
+  } else {
+    const shots = project.current.shots
+    const n = shots.length + 1
+    const id = `shot_${stamp}`
+    const shot: Shot = {
+      id,
+      index: shots.length,
+      title: `镜头 ${n}`,
+      visualPrompt: '',
+      audioDescription: '',
+      voiceover: '',
+      duration: project.current.settings.defaultShotDuration || 5,
+      cameraMovement: 'static',
+      status: 'draft'
+    }
+    project.setShots([...shots, shot])
+    selectId = `shotImage:${id}`
+  }
+  project.setCanvas(rebuildCanvasGraph(project.current, true))
+  const groupId = kind === 'subject' ? 'group-subjects' : kind === 'scene' ? 'group-scenes' : 'group-shots'
+  if (project.current.canvas && !before.has(groupId)) {
+    project.setCanvas({
+      ...project.current.canvas,
+      nodes: project.current.canvas.nodes.map((node) =>
+        node.id === groupId ? { ...node, position: flow } : node
+      )
+    })
+  }
+  selectedId.value = selectId
+  closeCtxMenu()
 }
 
 async function openFolder() {
@@ -479,7 +647,7 @@ function goClassic() {
       </button>
       <strong>{{ project.current?.name || '画布' }}</strong>
       <span class="dim">{{
-        isImg2Video ? '一图生视频' : `${project.current?.shots.length || 0} 个分镜`
+        isImg2Video ? '自由模式' : `${project.current?.shots.length || 0} 个分镜`
       }}</span>
       <span v-if="project.current?.folderPath" class="dim path" :title="project.current.folderPath">
         {{ project.current.folderPath }}
@@ -583,7 +751,7 @@ function goClassic() {
           v-if="isImg2Video && !(project.current?.canvas?.nodes.length)"
           class="empty-hint"
         >
-          在空白处右键，添加图片或视频节点
+          在空白处右键，添加图片、视频、剧本，或角色 / 场景 / 分镜
         </div>
       </div>
       <Teleport to="body">
@@ -600,18 +768,81 @@ function goClassic() {
           @mousedown.stop
         >
           <button type="button" @mousedown.prevent.stop="addFreeform('imageGen')">
-            {{ ctxMenu.nodeId ? '追加生图节点' : '添加生图节点' }}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="5.5" width="17" height="13" rx="2" />
+              <path d="M8 13.5 10.2 11l3.3 3.2 2-1.8L20 16" />
+              <circle cx="9" cy="9" r="1.1" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加图片节点' : '添加图片节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addFreeform('videoGen')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="5.5" width="17" height="13" rx="2" />
+              <path d="M10 9.5v5l5-2.5-5-2.5Z" />
+            </svg>
             {{ ctxMenu.nodeId ? '追加视频节点' : '添加视频节点' }}
           </button>
-          <button
-            v-if="canDuplicate(ctxMenu.nodeId)"
-            type="button"
-            @mousedown.prevent.stop="duplicateNode(ctxMenu.nodeId)"
-          >
-            复制节点
-          </button>
+          <template v-if="isImg2Video">
+            <div class="ctx-sep" />
+            <button type="button" @mousedown.prevent.stop="addScriptNode">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 4.5h7l4 4V19.5H7V4.5Z" />
+                <path d="M14 4.5V9h4.5" />
+                <path d="M9.5 12.5h5M9.5 15.5h5" />
+              </svg>
+              {{ ctxMenu.nodeId ? '追加剧本节点' : '添加剧本节点' }}
+            </button>
+            <button type="button" @mousedown.prevent.stop="addPipelineEntity('subject')">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="8" r="2.6" />
+                <path d="M6.5 18.5c.8-3.2 2.8-4.8 5.5-4.8s4.7 1.6 5.5 4.8" />
+              </svg>
+              {{ ctxMenu.nodeId ? '追加角色节点' : '添加角色节点' }}
+            </button>
+            <button type="button" @mousedown.prevent.stop="addPipelineEntity('scene')">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 16.5 9 11l3.2 3.2 2.3-2.2L20 16.8" />
+                <path d="M4.5 6.5h15v12h-15z" />
+                <path d="M4.5 18.5h15" />
+              </svg>
+              {{ ctxMenu.nodeId ? '追加场景节点' : '添加场景节点' }}
+            </button>
+            <button type="button" @mousedown.prevent.stop="addPipelineEntity('shot')">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="4" y="6.5" width="16" height="11" rx="1.5" />
+                <path d="M8 6.5v11M16 6.5v11M4 10.5h16M4 13.5h16" />
+              </svg>
+              {{ ctxMenu.nodeId ? '追加分镜节点' : '添加分镜节点' }}
+            </button>
+          </template>
+          <template v-if="ctxMenu.onNode && (canDuplicate(ctxMenu.nodeId) || canDeleteNode(ctxMenu.nodeId))">
+            <div class="ctx-sep" />
+            <button
+              v-if="canDuplicate(ctxMenu.nodeId)"
+              type="button"
+              @mousedown.prevent.stop="duplicateNode(ctxMenu.nodeId)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="11" height="11" rx="1.5" />
+                <path d="M6 16V5.5A1.5 1.5 0 0 1 7.5 4H16" />
+              </svg>
+              复制此节点
+            </button>
+            <button
+              v-if="canDeleteNode(ctxMenu.nodeId)"
+              type="button"
+              class="danger"
+              @mousedown.prevent.stop="deleteCtxNode(ctxMenu.nodeId)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7.5h14" />
+                <path d="M10 7.5V5.5h4v2" />
+                <path d="M8 7.5V18a1.5 1.5 0 0 0 1.5 1.5h5A1.5 1.5 0 0 0 16 18V7.5" />
+                <path d="M10.5 11v5M13.5 11v5" />
+              </svg>
+              删除此节点
+            </button>
+          </template>
         </div>
       </Teleport>
       <aside v-if="rightOpen" class="dock">
@@ -712,7 +943,7 @@ function goClassic() {
 .ctx-menu {
   position: fixed;
   z-index: 9001;
-  min-width: 168px;
+  min-width: 200px;
   padding: 6px;
   border-radius: 10px;
   border: 1px solid var(--color-border);
@@ -720,10 +951,12 @@ function goClassic() {
   box-shadow: var(--shadow-lg);
 }
 .ctx-menu button {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   margin: 0;
-  padding: 8px 12px;
+  padding: 7px 10px;
   border: none;
   border-radius: 7px;
   background: transparent;
@@ -732,8 +965,36 @@ function goClassic() {
   text-align: left;
   cursor: pointer;
 }
+.ctx-menu button svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--color-text-3);
+}
 .ctx-menu button:hover {
   background: var(--color-fill);
+}
+.ctx-menu button:hover svg {
+  color: var(--color-accent);
+}
+.ctx-menu button.danger {
+  color: var(--color-error, #f87171);
+}
+.ctx-menu button.danger svg {
+  color: var(--color-error, #f87171);
+}
+.ctx-menu button.danger:hover {
+  background: rgba(248, 113, 113, 0.12);
+}
+.ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--color-border);
 }
 .dock {
   width: 300px;

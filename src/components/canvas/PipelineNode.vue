@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
-import { runCanvasNode } from '@/services/canvas/runner'
+import { runCanvasNode, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
@@ -18,9 +18,9 @@ import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import { canBuildExport } from '@/utils/timeline'
-import { sceneHasKeyProps } from '@/utils/consistency'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
+import { friendlyAiError } from '@/services/ai/abort'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
 import { normalizeH3GenMode, normalizeVideoGenModel, type CanvasNodeType, type H3VideoGenMode, type ID, type VideoGenModel } from '@/types'
 
@@ -54,6 +54,7 @@ const moreOpen = ref(false)
 const panelOpen = ref(false)
 const pickerOpen = ref(false)
 const toolBusy = ref('')
+const optimizingPrompt = ref(false)
 const cropOn = ref(false)
 const trimOn = ref(false)
 const crop = ref<NormRect>({ x: 0.08, y: 0.08, w: 0.84, h: 0.84 })
@@ -274,12 +275,27 @@ const genLabel = computed(() => {
 
 const { findNode, removeSelectedNodes } = useVueFlow()
 
+const promptBox = ref<HTMLTextAreaElement | null>(null)
+
+function persistShotVideoPrompt() {
+  if (type.value !== 'shotVideo' || !shot.value) return
+  const v = promptBox.value?.value ?? promptValue.value
+  if (v !== (shot.value.compiledVideoPrompt ?? '')) {
+    project.updateShot(shot.value.id, { compiledVideoPrompt: v })
+  }
+}
+
+function onPromptPaste() {
+  nextTick(() => persistShotVideoPrompt())
+}
+
 watch(assetId, () => loadMedia(), { immediate: true })
 watch(
   () => props.selected,
   (on) => {
     panelOpen.value = Boolean(on)
     if (!on) {
+      persistShotVideoPrompt()
       moreOpen.value = false
       cropOn.value = false
       trimOn.value = false
@@ -303,9 +319,6 @@ watch(
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
-    } else if (t === 'shotVideo' && shot.value) {
-      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
-      if (patch) project.updateShot(shot.value.id, patch)
     }
   },
   { immediate: true }
@@ -320,6 +333,7 @@ function setShotDuration(raw: number) {
 }
 
 function dismissPanel() {
+  persistShotVideoPrompt()
   moreOpen.value = false
   cropOn.value = false
   trimOn.value = false
@@ -363,6 +377,21 @@ async function loadMedia() {
 
 defineExpose({ loadMedia })
 
+async function optimizePrompt(ev?: Event) {
+  ev?.stopPropagation()
+  persistShotVideoPrompt()
+  if (type.value !== 'shotVideo' || !shot.value || optimizingPrompt.value || generating.value) return
+  optimizingPrompt.value = true
+  try {
+    await optimizeShotVideoPrompt(shot.value)
+    toast.success('已按 H3 格式优化提示词')
+  } catch (e: any) {
+    toast.error(friendlyAiError(e) || '优化失败')
+  } finally {
+    optimizingPrompt.value = false
+  }
+}
+
 async function generateThis(ev?: Event, hd = false) {
   ev?.stopPropagation()
   if (generating.value || gateBlocked.value || toolBusy.value) return
@@ -370,6 +399,7 @@ async function generateThis(ev?: Event, hd = false) {
     toast.warn('还没有可导出的视频或图片，请先生成分镜视频')
     return
   }
+  persistShotVideoPrompt()
   moreOpen.value = false
   dismissPanel()
   try {
@@ -842,11 +872,24 @@ const cropStyle = computed(() => ({
 
     <transition name="float-down">
       <div v-if="selected && panelOpen && showPrompt && !cropOn && !trimOn" class="prompt nodrag nowheel" @pointerdown.stop @mousedown.stop @click.stop>
+      <div v-if="type === 'shotVideo'" class="prompt-tools">
+        <button
+          type="button"
+          class="opt"
+          :disabled="generating || gateBlocked || !!toolBusy || optimizingPrompt"
+          @click="optimizePrompt"
+        >
+          {{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+        </button>
+      </div>
       <textarea
+        ref="promptBox"
         rows="12"
         :value="promptValue"
         :placeholder="promptHint"
         @input="promptValue = ($event.target as HTMLTextAreaElement).value"
+        @paste="onPromptPaste"
+        @blur="persistShotVideoPrompt"
       />
       <H3GenModeSelect v-if="isH3VideoNode" v-model="h3GenMode" />
       <FramePairSlots
@@ -884,7 +927,7 @@ const cropStyle = computed(() => ({
           v-if="genLabel"
           class="go"
           type="button"
-          :disabled="generating || gateBlocked || !!toolBusy"
+          :disabled="generating || gateBlocked || !!toolBusy || optimizingPrompt"
           :title="genLabel"
           @click="generateThis"
         >
@@ -1191,6 +1234,25 @@ const cropStyle = computed(() => ({
   font-size: 12px;
   line-height: 1.5;
   font-family: inherit;
+}
+.prompt-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.opt {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.opt:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .prompt-foot {
   display: flex;

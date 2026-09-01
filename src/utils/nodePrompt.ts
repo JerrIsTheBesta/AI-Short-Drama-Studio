@@ -109,8 +109,8 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
     prompt: shotDirectorBrief(shot, project),
     aesthetic: project.script?.h3Aesthetic || project.script?.aesthetic,
     audioDescription: shot.audioDescription,
-    voiceover: spoken,
-    voiceMode: spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none',
+    voiceover: shot.voiceover || '',
+    voiceMode: resolveH3VoiceMode(shot, onScreenNames),
     speakerHint: shot.speakerHint,
     speakerName: visibleSpeaker,
     onScreenNames,
@@ -124,8 +124,10 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
     height: project.settings.height,
     aspectRatio: project.settings.aspectRatio,
     cameraMovement: shot.cameraMovement,
+    shotSize: shot.shotSize,
     promptStyle: getVideoPromptStyle(),
-    mode: 'R2VA'
+    mode: 'R2VA',
+    forceIntegrated: true
   })
 }
 
@@ -210,6 +212,6 @@ export function fillEmptyGeneratePrompt(
     if (hasStoredPrompt(shot.imagePrompt)) return null
     return { imagePrompt: defaultShotImagePrompt(shot, project) }
   }
-  if (hasStoredPrompt(shot.compiledVideoPrompt)) return null
-  return { compiledVideoPrompt: defaultVideoSendPrompt(shot, project) }
+  // 分镜视频：框里有字就永远保留。空着也不自动填默认模板，避免粘贴后被生成/再点开覆盖。
+  return null
 }
