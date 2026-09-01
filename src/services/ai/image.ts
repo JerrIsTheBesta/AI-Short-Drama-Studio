@@ -53,6 +53,20 @@ function isSeedreamModel(model: string): boolean {
   return /^seedream-/i.test(model)
 }
 
+function isGptImageModel(model: string): boolean {
+  return /gpt[-_]?image|dall-e|dalle/i.test(model)
+}
+
+const GPT_IMAGE_QUALITY_SUFFIX = '去除燥波燥点，去除涂抹感，色彩平滑，画面严格执行干净质感。'
+
+function withGptImageQuality(prompt: string, model: string): string {
+  const base = String(prompt || '').trim()
+  if (!isGptImageModel(model)) return base
+  if (!base) return GPT_IMAGE_QUALITY_SUFFIX
+  if (base.includes(GPT_IMAGE_QUALITY_SUFFIX)) return base
+  return `${base} ${GPT_IMAGE_QUALITY_SUFFIX}`
+}
+
 /** 把图片 API 响应统一转成 Blob（优先 b64_json） */
 async function imageResponseToBlob(
   data: any,
@@ -222,7 +236,8 @@ async function blobToChatImageDataUri(
 }
 
 function buildPrompt(input: ImageGenInput, _withRefs: boolean): string {
-  return String(input.prompt || '').trim()
+  const model = imageConfig(input.model).model
+  return withGptImageQuality(input.prompt, model)
 }
 
 /** Seedream：统一走 /images/generations，优先返回 b64_json */
