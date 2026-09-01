@@ -1,4 +1,5 @@
 import type { CanvasNode, ID, Project } from '@/types'
+import { normalizeVideoGenModel, videoMaxRefImages } from '@/types'
 
 /** 返回节点当前产物；绑定节点而不是绑定旧 asset，所以上游重绘后会自动跟随。 */
 export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID | undefined {
@@ -68,10 +69,54 @@ export function appendCanvasReferenceSource(project: Project, targetId: ID, sour
   const source = project.canvas?.nodes.find((node) => node.id === sourceId)
   if (!target || !source || !canvasNodeProducesImage(source)) return false
   if (target.type !== 'imageGen' && target.type !== 'videoGen') return false
-  const max = target.type === 'videoGen' && target.data.videoModel === 'wan-prime' ? 10 : 9
+  const max = target.type === 'videoGen' ? videoMaxRefImages(normalizeVideoGenModel(target.data.videoModel)) : 9
   const current = target.data.referenceSourceNodeIds ?? []
   if (current.includes(sourceId)) return true
   if (current.length + (target.data.referenceAssetIds ?? []).length >= max) return false
   target.data.referenceSourceNodeIds = [...current, sourceId]
   return true
+}
+
+/** 自由节点参考图按连线来源标身份：图1是人设/场景名，而不是笼统的 first frame。 */
+export function canvasReferenceSlotEntries(
+  project: Project,
+  node?: CanvasNode
+): Array<{ kind: 'character' | 'scene' | 'board' | 'extra' | 'keyframe'; name: string }> {
+  const ids = resolvedCanvasReferenceAssetIds(project, node)
+  const nodes = project.canvas?.nodes ?? []
+  return ids.map((id, i) => {
+    const source =
+      nodes.find((item) => canvasNodeOutputAssetId(project, item) === id) ||
+      (node?.data.referenceSourceNodeIds ?? [])
+        .map((sid) => nodes.find((item) => item.id === sid))
+        .find((item) => item && canvasNodeOutputAssetId(project, item) === id)
+    if (source?.type === 'subject' || source?.type === 'subjectProps') {
+      const sub = (project.subjects ?? []).find((item) => item.id === source.data.subjectId)
+      return {
+        kind: 'character' as const,
+        name: sub?.name || source.data.label || `person ${i + 1}`
+      }
+    }
+    if (source?.type === 'scene') {
+      const scn = (project.scenes ?? []).find((item) => item.id === source.data.sceneId)
+      return { kind: 'scene' as const, name: scn?.name || source.data.label || `place ${i + 1}` }
+    }
+    if (source?.type === 'sceneProps') {
+      const scn = (project.scenes ?? []).find((item) => item.id === source.data.sceneId)
+      return {
+        kind: 'extra' as const,
+        name: scn?.name ? `${scn.name} props` : source.data.label || `props ${i + 1}`
+      }
+    }
+    if (source?.type === 'shotBoard') {
+      return { kind: 'board' as const, name: source.data.label || 'storyboard' }
+    }
+    if (source?.type === 'shotImage') {
+      return { kind: 'keyframe' as const, name: source.data.label || 'keyframe' }
+    }
+    return {
+      kind: 'extra' as const,
+      name: source?.data.label || `reference ${i + 1}`
+    }
+  })
 }

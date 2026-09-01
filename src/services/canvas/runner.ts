@@ -14,8 +14,8 @@ import {
   compileH3OfficialPrompt,
   extractSpokenFromNotes,
   spokenCueLines,
-  nodeTextForbidsSpeech,
-  nodeTextHasSpeech,
+  ensurePictureIdentity,
+  isMessyH3Prompt,
   enrichVideoPerformance,
   reviewImageQuality,
   reviewVideoQuality,
@@ -78,10 +78,11 @@ import {
   normalizeH3GenMode,
   normalizeVideoGenModel,
   normalizeVideoResolution,
+  videoMaxRefImages,
   videoMaxSeconds,
   videoMinSeconds
 } from '@/types'
-import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
+import { canvasReferenceSlotEntries, resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 
 export type RunProgress = (nodeId: string, msg: string) => void
 export type NodeRunOpts = { hd?: boolean }
@@ -912,7 +913,20 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const hasKeyframeFrame = packed.some((entry) => entry.kind === 'keyframe')
   const h3Mode = hasKeyframeFrame || hasIdentityRefs || packed.length > 1 ? 'R2VA' : 'I2VA'
   shot = refreshShot(shot.id)
-  const officialPrompt = videoSendPrompt(shot, project.current)
+  let officialPrompt = ensurePictureIdentity(videoSendPrompt(shot, project.current), {
+    prompt: '',
+    imageSlots,
+    duration: shot.duration
+  })
+  if (isMessyH3Prompt(officialPrompt)) {
+    onProgress?.('场记不能当台词，正在重写成镜头提示词…')
+    officialPrompt = await optimizeShotVideoPrompt(shot, signal)
+    officialPrompt = ensurePictureIdentity(officialPrompt, {
+      prompt: '',
+      imageSlots,
+      duration: shot.duration
+    })
+  }
   onProgress?.('使用节点上的完整提示词出视频…')
   const slotNames = packed.map((entry, index) =>
     entry.kind === 'character'
@@ -1038,21 +1052,31 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   const performance = (shot.videoPrompt || '').trim()
   const brief = shotDirectorBrief(shot, p)
   const source = [
-    nodeText ? `【节点当前提示词，改写以此为准】\n${nodeText}` : '',
-    performance && performance !== nodeText ? `【本镜场记】\n${performance}` : '',
-    brief && !nodeText.includes(brief) ? `【分镜字段】\n${brief}` : '',
-    shot.voiceover?.trim() ? `【口播栏】\n${shot.voiceover.trim()}` : ''
+    nodeText ? `【节点当前提示词，改写以此为准；图1图2图3身份以系统映射为准】\n${nodeText}` : '',
+    performance && performance !== nodeText ? `【本镜场记，不是台词】\n${performance}` : '',
+    brief && !nodeText.includes(brief) ? `【分镜字段，不是台词】\n${brief}` : '',
+    shot.voiceover?.trim() ? `【口播栏，只有这里和引号里的原词才是台词】\n${shot.voiceover.trim()}` : ''
   ]
     .filter(Boolean)
     .join('\n\n')
-  const spokenPool = [nodeText, performance, shot.voiceover, shot.audioDescription].filter(Boolean).join('\n')
-  const cueLines = [...extractSpokenFromNotes(spokenPool), ...spokenCueLines(shot.voiceover || '')].filter(
+  // 台词只从口播栏 + 场记里的引号/「台词：」抠；绝不从旧编译稿的 <d> 或场记正文回收
+  const speechSource = [
+    shot.voiceover || '',
+    performance.replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, ''),
+    // 旧稿里的引号对白可以保留，但去掉整段场记式中文
+    nodeText
+      .replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, '')
+      .replace(/Reference pictures[\s\S]*?(?=\[Shot\s*\d+\]|Camera language|$)/i, '')
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const cueLines = [...extractSpokenFromNotes(speechSource), ...spokenCueLines(shot.voiceover || '')].filter(
     (line, i, all) => line && all.indexOf(line) === i
   )
-  const hasSpeech = cueLines.length > 0 || nodeTextHasSpeech(spokenPool)
-  const silent = !hasSpeech && nodeTextForbidsSpeech(spokenPool)
+  const hasSpeech = cueLines.length > 0
+  const silent = !hasSpeech
   const resolvedVoice = resolveH3VoiceMode(shot, onScreenNames)
-  const voiceMode = silent ? 'none' : hasSpeech ? (resolvedVoice === 'voiceover' ? 'voiceover' : 'dialogue') : resolvedVoice
+  const voiceMode = silent ? 'none' : resolvedVoice === 'voiceover' ? 'voiceover' : 'dialogue'
   const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
   const castNotes = cast
     .map((item, i) => {
@@ -1060,8 +1084,9 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
       return `S${i + 1} ${item.name}${look ? `：${look}` : ''}`
     })
     .join('\n')
-  const compiled = await compileH3OfficialPrompt({
-    prompt: [source, castNotes ? `人物（S 序号按出场顺序；写英文外貌+(S1)，中文名只用来对上对白说话人）：\n${castNotes}` : '']
+  const compiled = ensurePictureIdentity(
+    await compileH3OfficialPrompt({
+    prompt: [source, castNotes ? `人物（必须写清图1图2图3分别是谁；正文用这些人名。场记不是台词，只有引号/对白栏里的原词才进 <d>）：\n${castNotes}` : '']
       .filter(Boolean)
       .join('\n\n'),
     aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
@@ -1092,7 +1117,9 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     mode: 'R2VA',
     forceIntegrated: true,
     signal
-  })
+  }),
+    { prompt: '', imageSlots, duration: shot.duration }
+  )
   project.updateShot(shot.id, { compiledVideoPrompt: compiled })
   await project.save()
   return compiled
@@ -1800,37 +1827,29 @@ export async function generateFreeformVideo(
   }
   if (p.folderPath) setActiveProjectDir(p.folderPath)
   const duration = clampVideoDuration(node.data.duration, videoModel, 8)
-  const imageSlots = blobs.map((_, i) => {
-    const index = i + 1
-    return {
-      index,
-      kind: 'extra' as const,
-      name: useFl2va
-        ? index === 1
-          ? 'first frame'
-          : 'last frame'
-        : index === 1
-          ? 'first frame'
-          : `user reference ${index}`,
-      job: useFl2va
-        ? index === 1
-          ? `<Picture 1> is the first frame of the target video.`
-          : `<Picture 2> is the last frame of the target video.`
-        : index === 1
-          ? `<Picture 1> is the first frame of the target video.`
-          : `<Picture ${index}> is an additional user reference. Match people, clothing, product, setting or style from this image. Do not treat it as another first frame.`
-    }
-  })
-  onProgress?.(
-    useFl2va ? '正在出视频（首尾帧）...' : `正在出视频（${blobs.length} 张参考图）...`
+  const slotEntries = canvasReferenceSlotEntries(p, node)
+  const imageSlots = buildH3ImageSlots(
+    slotEntries.length
+      ? slotEntries
+      : blobs.map((_, i) => ({ kind: 'extra' as const, name: `reference ${i + 1}` }))
   )
+  onProgress?.(`正在出视频（${blobs.length} 张参考图）...`)
+  let sendPrompt = ensurePictureIdentity(prompt, {
+    prompt,
+    imageSlots,
+    duration
+  })
+  if (isMessyH3Prompt(sendPrompt)) {
+    onProgress?.('场记不能当台词，正在重写成镜头提示词…')
+    sendPrompt = await optimizeFreeformVideoPrompt(nodeId, signal)
+    sendPrompt = ensurePictureIdentity(sendPrompt, { prompt: sendPrompt, imageSlots, duration })
+  }
   const result = await generateVideo(
     {
-      prompt,
+      prompt: sendPrompt,
       promptAsIs: true,
       imageBlob: blobs[0],
-      lastFrameBlob: useFl2va ? blobs[1] : undefined,
-      referenceImages: useFl2va ? [] : blobs.slice(1, videoModel === 'wan-prime' ? 10 : 9),
+      referenceImages: blobs.slice(1, videoMaxRefImages(videoModel)),
       imageSlots,
       duration,
       width: p.settings.width,
@@ -1840,8 +1859,8 @@ export async function generateFreeformVideo(
       promptStyle: 'scene-narrative',
       videoModel,
       videoResolution: node.data.videoResolution,
-      h3GenMode: useFl2va ? 'fl2va' : 'reference',
-      mode: 'I2VA',
+      h3GenMode: 'reference',
+      mode: 'R2VA',
       signal,
       resumeTaskId: node.data.videoTaskId,
       onTaskSubmitted: async (taskId) => {
@@ -1872,31 +1891,22 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
   const source = (node.data.prompt || '').trim()
   if (!source) throw new Error('请先写提示词')
   const videoModel = normalizeVideoGenModel(node.data.videoModel)
-  if (videoModel === 'wan-prime') throw new Error('万相节点不走 H3 格式，直接改提示词即可')
-  const ids = resolvedCanvasReferenceAssetIds(p, node)
-  const useFl2va = isH3VideoFamily(videoModel) && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
-  const slotEntries = (
-    useFl2va
-      ? [
-          { kind: 'extra' as const, name: 'first frame' },
-          { kind: 'extra' as const, name: 'last frame' }
-        ]
-      : ids.map((_, i) => ({
-          kind: 'extra' as const,
-          name: i === 0 ? 'first frame' : `user reference ${i + 1}`
-        }))
+  const slotEntries = canvasReferenceSlotEntries(p, node)
+  const imageSlots = buildH3ImageSlots(
+    slotEntries.length
+      ? slotEntries
+      : [{ kind: 'extra' as const, name: 'reference 1' }]
   )
-  const imageSlots = buildH3ImageSlots(slotEntries)
-  const cueLines = [...extractSpokenFromNotes(source), ...spokenCueLines(source)].filter(
-    (line, i, all) => line && all.indexOf(line) === i
-  )
-  const hasSpeech = cueLines.length > 0 || nodeTextHasSpeech(source)
-  const silent = !hasSpeech && nodeTextForbidsSpeech(source)
-  const compiled = await compileH3OfficialPrompt({
-    prompt: `【节点当前提示词，改写以此为准】\n${source}`,
+  const cueLines = extractSpokenFromNotes(
+    source.replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, '')
+  ).filter((line, i, all) => line && all.indexOf(line) === i)
+  const hasSpeech = cueLines.length > 0
+  const compiled = ensurePictureIdentity(
+    await compileH3OfficialPrompt({
+    prompt: `【节点当前提示词。场记、时长、画风、图1图2身份都是画面，不是台词。只有引号或「台词/对白」里的原词才进 <d>。必须写清图1是谁、图2是谁、图3是谁。】\n${source}`,
     aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
     voiceover: cueLines.join('\n'),
-    voiceMode: silent || !hasSpeech ? 'none' : 'dialogue',
+    voiceMode: hasSpeech ? 'dialogue' : 'none',
     imageAssignments: imageSlots.map((slot) => slot.job),
     imageSlots,
     duration: clampVideoDuration(node.data.duration, videoModel, 8),
@@ -1905,10 +1915,12 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
     aspectRatio: p.settings.aspectRatio,
     cameraMovement: 'static',
     promptStyle: getVideoPromptStyle(),
-    mode: useFl2va ? 'I2VA' : 'R2VA',
+    mode: 'R2VA',
     forceIntegrated: true,
     signal
-  })
+  }),
+    { prompt: '', imageSlots, duration: clampVideoDuration(node.data.duration, videoModel, 8) }
+  )
   project.patchCanvasNode(nodeId, { prompt: compiled })
   await project.save()
   return compiled

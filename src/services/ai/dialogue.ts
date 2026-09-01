@@ -6,7 +6,7 @@
 const SPEAKER_RE = /^(旁白|画外音|解说|主持人|人声|台词|对白|narrator|voiceover)$/i
 const NAME_RE = /^(?:[\u3400-\u9fff]{1,6})(?:说|问|答)?$/
 const DIRECTION_RE =
-  /景别|镜头|站位|中景|近景|特写|全景|远景|推近|拉远|横摇|运镜|机位|构图|画面中|四宫|六格|分镜|过肩|正反打|视线|承接上一镜|本镜可见|留给下一镜/
+  /景别|镜头|站位|中景|近景|特写|全景|远景|推近|拉远|横摇|运镜|机位|构图|画面中|四宫|六格|分镜|过肩|正反打|视线|承接上一镜|本镜可见|留给下一镜|画风|质感|噪点|武侠|场记|时长轴|参考图|人设|首帧|摄像机|情感镜头|integrated_multimodal|overall_soundscape|Camera language|Performance direction|non_diegetic/
 const PLACEHOLDER_SPEECH_RE =
   /^(?:无|没有|暂无|空|无对白|无台词|无口播|不对白|不说话|没有台词|没有对白|none|n\/a|na|null|nil|-|—|–|\/|／)$/i
 const PERF_HINT_RE =
@@ -35,7 +35,18 @@ function clipSpokenBody(body: string): string {
 export function looksLikeShotDirection(text: string): boolean {
   const t = (text || '').trim()
   if (!t) return false
-  if (t.length > 36 && DIRECTION_RE.test(t)) return true
+  if (/^图\s*\d+\s*[/：:=是]/.test(t) || /^<Picture\s*\d+>/i.test(t)) return true
+  if (/Reference pictures/i.test(t)) return true
+  if (/\[\d{2}:\d{2}\.\d{3}/.test(t) || /\[Shot\s*\d+\]/i.test(t)) return true
+  if (/\d+\s*[-–~到至]\s*\d+\s*秒/.test(t) || /^\d+[s秒]\s*[：:]/.test(t)) return true
+  if (/^(?:镜头|景别|地点|出场|站位|视线|动作承接|可见画面|道具|现场声|画风|时长|场记)\s*[：:]/.test(t)) {
+    return true
+  }
+  if (/这一镜怎么演|连续\s*\d+\s*秒|情感镜头|武侠|雨夜打斗|合围|推近|缓推/.test(t) && !/[“「]/.test(t)) {
+    return true
+  }
+  if (t.length > 40 && !/[。！？!?]/u.test(t) && /[\u3400-\u9fff]/.test(t)) return true
+  if (t.length > 12 && DIRECTION_RE.test(t) && !/[“「]/.test(t)) return true
   if (DIRECTION_RE.test(t) && /[；;]/.test(t)) return true
   return false
 }

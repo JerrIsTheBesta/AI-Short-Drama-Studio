@@ -12,7 +12,7 @@ import {
   shotKeyframePrompt
 } from '@/services/ai/consistency'
 import { spokenTextOnly } from '@/services/ai/dialogue'
-import { composeH3VideoPrompt, compiledH3PromptNeedsRebuild, sanitizeDTagContents, buildH3ImageSlots } from '@/services/ai/h3Prompt'
+import { composeH3VideoPrompt, compiledH3PromptNeedsRebuild, sanitizeDTagContents, buildH3ImageSlots, ensurePictureIdentity } from '@/services/ai/h3Prompt'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import type { Project, Scene, Shot, Subject } from '@/types'
 import {
@@ -160,9 +160,21 @@ function hasStoredPrompt(value: string | undefined): boolean {
   return value != null
 }
 
+function videoPromptInput(shot: Shot, project: Project) {
+  const packed = packVideoRefEntries(collectShotVideoEntries(shot, project))
+  return {
+    prompt: '',
+    imageSlots: buildH3ImageSlots(packed),
+    duration: shot.duration
+  }
+}
+
 export function videoSendPrompt(shot: Shot, project: Project): string {
   const stored = (shot.compiledVideoPrompt || '').trim()
-  if (stored && !compiledH3PromptNeedsRebuild(stored)) return sanitizeDTagContents(stored)
+  const input = videoPromptInput(shot, project)
+  if (stored && !compiledH3PromptNeedsRebuild(stored)) {
+    return ensurePictureIdentity(sanitizeDTagContents(stored), input)
+  }
   return defaultVideoSendPrompt(shot, project)
 }
 
@@ -217,8 +229,8 @@ export function fillEmptyGeneratePrompt(
   }
   const stored = (shot.compiledVideoPrompt || '').trim()
   if (stored && !compiledH3PromptNeedsRebuild(stored)) {
-    const sanitized = sanitizeDTagContents(stored)
-    if (sanitized !== stored) return { compiledVideoPrompt: sanitized }
+    const next = ensurePictureIdentity(sanitizeDTagContents(stored), videoPromptInput(shot, project))
+    if (next !== stored) return { compiledVideoPrompt: next }
     return null
   }
   return { compiledVideoPrompt: defaultVideoSendPrompt(shot, project) }

@@ -81,6 +81,10 @@ export function videoMaxSeconds(model: VideoGenModel): number {
   return 15
 }
 
+export function videoMaxRefImages(_model?: VideoGenModel): number {
+  return 9
+}
+
 export function videoDurationOptions(model: VideoGenModel): number[] {
   const min = videoMinSeconds(model)
   const max = videoMaxSeconds(model)
