@@ -1,8 +1,9 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
-import { emptyCanvas } from '@/types/canvas'
+import { emptyCanvas, normalizeVideoGenModel, stillModeForVideoModel, videoStillNeedsCanvas } from '@/types/canvas'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { boundSubjectIds } from '@/utils/consistency'
-import { usesStoryboardCanvas } from '@/utils/storyboardGate'
+import { stillModeFromNode, stillTypeForMode } from '@/utils/videoStill'
+import { useSettingsStore } from '@/stores/settings'
 
 export const NODE_W = 240
 const GAP = 18
@@ -61,6 +62,22 @@ function persistStatus(
     return hasAsset ? 'success' : 'idle'
   }
   return prevStatus
+}
+
+function fallbackStillMode() {
+  try {
+    return stillModeForVideoModel('h3', useSettingsStore().config.video)
+  } catch {
+    return 'identity' as const
+  }
+}
+
+function activeVideoProfile() {
+  try {
+    return useSettingsStore().config.video
+  } catch {
+    return undefined
+  }
 }
 
 function pos(
@@ -175,7 +192,14 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     return project.canvas ?? emptyCanvas()
   }
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
-  const useBoards = usesStoryboardCanvas(project)
+  const shotVideoPrev = prevList.filter((n) => n.type === 'shotVideo')
+  const defaultStill = fallbackStillMode()
+  const useStills = shotVideoPrev.length
+    ? shotVideoPrev.some((n) => videoStillNeedsCanvas(stillModeFromNode(n)))
+    : videoStillNeedsCanvas(defaultStill)
+  const stillGroupLabel = shotVideoPrev.some((n) => stillModeFromNode(n) === 'storyboard')
+    ? '故事看板'
+    : '分镜关键帧'
   const videosHomed =
     shots.length === 0 ||
     !prevList.some((n) => n.type === 'shotVideo') ||
@@ -188,7 +212,9 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       prevList.some((n) => n.id === 'group-audio') &&
       prevList.some((n) => n.id === 'group-videos') &&
       videosHomed &&
-      (shots.length === 0 || prevList.some((n) => n.type === (useBoards ? 'shotBoard' : 'shotImage')))
+      (shots.length === 0 ||
+        !useStills ||
+        prevList.some((n) => n.type === 'shotBoard' || n.type === 'shotImage'))
   const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
   const nodes: CanvasNode[] = []
@@ -250,8 +276,10 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
 
   if (!freeform || subjects.length) pushGroup('group-subjects', '人物角色', 'subject', subBox)
   if (!freeform || scenes.length) pushGroup('group-scenes', '场景锚点', 'scene', scnBox)
+  if ((!freeform || shots.length) && useStills) {
+    pushGroup('group-shots', stillGroupLabel, 'shot', shotBox)
+  }
   if (!freeform || shots.length) {
-    pushGroup('group-shots', '分镜关键帧', 'shot', shotBox)
     pushGroup('group-videos', '分镜视频', 'video', vidBox)
   }
   if (!freeform) {
@@ -325,21 +353,31 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   })
 
   shots.forEach((shot, i) => {
-    const stillId = useBoards ? `shotBoard:${shot.id}` : `shotImage:${shot.id}`
-    const stillType: CanvasNode['type'] = useBoards ? 'shotBoard' : 'shotImage'
     const vidId = `shotVideo:${shot.id}`
     const audId = `audio:${shot.id}`
-    attach('group-shots', {
-      id: stillId,
-      type: stillType,
-      position: cell(i, 0, shotH),
-      data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
-      status: persistStatus(
-        prev.get(stillId)?.status,
-        Boolean(useBoards ? shot.boardAssetId : shot.imageAssetId)
-      ),
-      parentGroupId: 'group-shots'
-    })
+    const prevVid = prev.get(vidId) || prevAny.get(vidId)
+    const model = normalizeVideoGenModel(prevVid?.data.videoModel)
+    const resolvedStill =
+      prevVid?.data.videoStillMode === 'identity' ||
+      prevVid?.data.videoStillMode === 'keyframe' ||
+      prevVid?.data.videoStillMode === 'storyboard'
+        ? prevVid.data.videoStillMode
+        : stillModeForVideoModel(model, activeVideoProfile())
+    const stillType = stillTypeForMode(resolvedStill)
+    const stillId = stillType ? `${stillType}:${shot.id}` : ''
+    if (stillType && stillId) {
+      attach('group-shots', {
+        id: stillId,
+        type: stillType,
+        position: cell(i, 0, shotH),
+        data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
+        status: persistStatus(
+          prev.get(stillId)?.status,
+          Boolean(stillType === 'shotBoard' ? shot.boardAssetId : shot.imageAssetId)
+        ),
+        parentGroupId: 'group-shots'
+      })
+    }
     attach('group-videos', {
       id: vidId,
       type: 'shotVideo',
@@ -347,10 +385,11 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       data: {
         shotId: shot.id,
         label: `${i + 1}. ${shot.title}`,
-        videoModel: prev.get(vidId)?.data.videoModel,
-        videoResolution: prev.get(vidId)?.data.videoResolution
+        videoModel: prevVid?.data.videoModel,
+        videoResolution: prevVid?.data.videoResolution,
+        videoStillMode: resolvedStill
       },
-      status: persistStatus(prev.get(vidId)?.status, Boolean(shot.videoAssetId)),
+      status: persistStatus(prevVid?.status, Boolean(shot.videoAssetId)),
       parentGroupId: 'group-videos'
     })
     if (!freeform) {
@@ -370,35 +409,38 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       })
     }
 
+    const visualTarget = stillType && stillId ? stillId : vidId
     const wanted = boundSubjectIds(shot, subjects).slice(0, 2)
     wanted.forEach((sid, idx) => {
       const src = `subject:${sid}`
       if (!nodes.some((n) => n.id === src)) return
       edges.push({
-        id: `e-${src}-${stillId}-${idx}`,
+        id: `e-${src}-${visualTarget}-${idx}`,
         source: src,
-        target: stillId,
+        target: visualTarget,
         sourceHandle: 'out',
-        targetHandle: idx === 0 ? 'char1' : 'char2'
+        targetHandle: stillType ? (idx === 0 ? 'char1' : 'char2') : 'in'
       })
     })
     const sceneId = shot.sceneId || scenes[0]?.id
     if (sceneId) {
       edges.push({
-        id: `e-scene-${sceneId}-${stillId}`,
+        id: `e-scene-${sceneId}-${visualTarget}`,
         source: `scene:${sceneId}`,
-        target: stillId,
+        target: visualTarget,
         sourceHandle: 'out',
-        targetHandle: 'scene'
+        targetHandle: stillType ? 'scene' : 'in'
       })
     }
-    edges.push({
-      id: `e-${stillId}-${vidId}`,
-      source: stillId,
-      target: vidId,
-      sourceHandle: 'out',
-      targetHandle: 'image'
-    })
+    if (stillType && stillId) {
+      edges.push({
+        id: `e-${stillId}-${vidId}`,
+        source: stillId,
+        target: vidId,
+        sourceHandle: 'out',
+        targetHandle: 'image'
+      })
+    }
     if (!freeform) {
       edges.push({
         id: `e-${audId}-export`,

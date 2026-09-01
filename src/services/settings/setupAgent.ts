@@ -7,7 +7,6 @@ import { getLlmConfig } from '@/services/ai/runtime'
 import {
   IMAGE_PROVIDERS,
   LLM_PROVIDERS,
-  MUSIC_PROVIDERS,
   TTS_PROVIDERS,
   VIDEO_PROVIDERS,
   VISION_PROVIDERS,
@@ -23,6 +22,7 @@ import {
   useSettingsStore,
   type SetupKind
 } from '@/stores/settings'
+import { stillModeForVideoModel } from '@/types/canvas'
 import settingsSkillRaw from '@/skills/settings-setup.md?raw'
 
 export interface SetupMessage {
@@ -69,7 +69,7 @@ function snapshot() {
   const videos = cfg.videos
     .map(
       (p) =>
-        `- [video] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} workflow=${p.workflowId || '空'} style=${p.promptStyle}`
+        `- [video] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} workflow=${p.workflowId || '空'} style=${p.promptStyle} still=${p.stillMode || 'identity'}`
     )
     .join('\n')
   return `当前本机配置（Key 已脱敏）：
@@ -78,8 +78,7 @@ ${named('llm', cfg.llms)}
 ${named('vision', cfg.visions)}
 ${named('image', cfg.images)}
 ${named('tts', cfg.ttsProfiles)}
-${videos}
-${named('music', cfg.musics)}`
+${videos}`
 }
 
 const SYSTEM = `${settingsSkillRaw}
@@ -88,10 +87,10 @@ const SYSTEM = `${settingsSkillRaw}
 一次最多 8 个 actions。没有把握就 actions 为空，先问。文档已经够写的时候不要空 actions。
 
 可用工具：
-{ "tool": "add_profile", "kind": "vision|image|tts|video|music|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted" }
+{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe" }
 { "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选" }
 { "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
-{ "tool": "add_model", "kind": "llm|vision|image|tts|music", "id": "profile_id，可省略表示当前套", "model": "模型名" }
+{ "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
 
 预设目录（id｜名称｜地址｜默认模型｜常用模型）：
 LLM
@@ -104,8 +103,6 @@ ${catalog(IMAGE_PROVIDERS)}
 ${catalog(TTS_PROVIDERS)}
 视频
 ${catalog(VIDEO_PROVIDERS)}
-配乐
-${catalog(MUSIC_PROVIDERS)}
 
 注意：
 - 用户贴 API 文档或中转地址时：provider 必须是 custom，按文档原文抽 Base URL 和模型名，立刻 add_profile。禁止拒绝。
@@ -121,13 +118,12 @@ function providersFor(kind: SetupKind): ProviderPreset[] {
   if (kind === 'vision') return VISION_PROVIDERS
   if (kind === 'image') return IMAGE_PROVIDERS
   if (kind === 'tts') return TTS_PROVIDERS
-  if (kind === 'video') return VIDEO_PROVIDERS
-  return MUSIC_PROVIDERS
+  return VIDEO_PROVIDERS
 }
 
 function parseKind(raw: unknown): SetupKind | null {
   const k = String(raw || '')
-  if (k === 'llm' || k === 'vision' || k === 'image' || k === 'tts' || k === 'video' || k === 'music') {
+  if (k === 'llm' || k === 'vision' || k === 'image' || k === 'tts' || k === 'video') {
     return k
   }
   return null
@@ -185,7 +181,7 @@ function nextName(kind: SetupKind, wanted: string) {
             ? settings.config.ttsProfiles.map((p) => p.name)
             : kind === 'video'
               ? settings.config.videos.map((p) => p.name)
-              : settings.config.musics.map((p) => p.name)
+              : settings.config.ttsProfiles.map((p) => p.name)
   return uniqueProfileName(names, wanted || kind)
 }
 
@@ -208,13 +204,19 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
     if (kind === 'video') {
       const workflowId = String(action.workflowId || model || merged.model).trim()
       if (!workflowId) return { ok: false, detail: `${name} 还缺工作流 ID`, kind }
+      const stillRaw = String(action.stillMode || '').trim()
+      const stillMode =
+        stillRaw === 'keyframe' || stillRaw === 'storyboard' || stillRaw === 'identity'
+          ? stillRaw
+          : stillModeForVideoModel('h3', { workflowId, provider: merged.provider, stillMode: stillRaw })
       const id = settings.addVideo({
         name,
         baseUrl,
         apiKey,
         workflowId,
         promptStyle: action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
-        provider: merged.provider
+        provider: merged.provider,
+        stillMode
       })
       return { ok: true, detail: `已保存视频接入「${name}」(${id})`, kind }
     }
@@ -225,7 +227,7 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
     else if (kind === 'image') settings.addImage(seed)
     else if (kind === 'tts') {
       settings.addTts({ ...seed, voice: String(action.voice || 'longanhuan_v3.6') })
-    } else settings.addMusic(seed)
+    }
     return { ok: true, detail: `已保存${labelOf(kind)}「${name}」`, kind }
   }
 
@@ -243,20 +245,23 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
     if (kind === 'video') {
       if (action.workflowId || action.model) patch.workflowId = String(action.workflowId || action.model).trim()
       if (action.promptStyle) patch.promptStyle = action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
+      if (action.stillMode === 'identity' || action.stillMode === 'keyframe' || action.stillMode === 'storyboard') {
+        patch.stillMode = action.stillMode
+      }
       const cur = settings.config.videos.find((p) => p.id === id)
       if (!cur) return { ok: false, detail: '找不到这套视频接入', kind }
       settings.selectVideo(id)
       settings.patchVideo(patch)
       return { ok: true, detail: `已更新视频接入「${cur.name}」`, kind }
     }
-    const lists = {
-      llm: settings.config.llms,
-      vision: settings.config.visions,
-      image: settings.config.images,
-      tts: settings.config.ttsProfiles,
-      music: settings.config.musics
-    } as const
-    const list = lists[kind]
+    const list =
+      kind === 'llm'
+        ? settings.config.llms
+        : kind === 'vision'
+          ? settings.config.visions
+          : kind === 'image'
+            ? settings.config.images
+            : settings.config.ttsProfiles
     const cur = list.find((p) => p.id === id)
     if (!cur) return { ok: false, detail: '找不到这套接入', kind }
     if (kind === 'llm') {
@@ -268,12 +273,9 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
     } else if (kind === 'image') {
       settings.selectImage(id)
       settings.patchImage(patch)
-    } else if (kind === 'tts') {
+    } else {
       settings.selectTts(id)
       settings.patchTts(patch)
-    } else {
-      settings.selectMusic(id)
-      settings.patchMusic(patch)
     }
     return { ok: true, detail: `已更新${labelOf(kind)}「${cur.name}」`, kind }
   }
@@ -295,24 +297,19 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
       if (model) settings.selectTtsModel(id, model)
       else settings.selectTts(id)
     } else if (kind === 'video') settings.selectVideo(id)
-    else {
-      if (model) settings.selectMusicModel(id, model)
-      else settings.selectMusic(id)
-    }
     return { ok: true, detail: `已切换到这套${labelOf(kind)}`, kind }
   }
 
   if (tool === 'add_model') {
     const model = String(action.model || '').trim()
     if (!model) return { ok: false, detail: '还缺模型名', kind }
-    if (kind === 'video') return { ok: false, detail: '视频请改工作流 ID', kind }
+    if (kind === 'video' || kind === 'music') return { ok: false, detail: '视频请改工作流 ID', kind }
     const id = String(action.id || '').trim()
     if (id) {
       if (kind === 'llm') settings.selectLlm(id)
       else if (kind === 'vision') settings.selectVision(id)
       else if (kind === 'image') settings.selectImage(id)
       else if (kind === 'tts') settings.selectTts(id)
-      else settings.selectMusic(id)
     }
     settings.addModel(kind, model)
     return { ok: true, detail: `已加入模型 ${model}`, kind }

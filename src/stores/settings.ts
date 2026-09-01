@@ -8,6 +8,7 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/services/ai/env'
 import { desktop, isDesktop } from '@/services/desktop'
+import { stillModeForVideoModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
 const STORAGE_KEY = 'ai-cut:settings'
@@ -57,6 +58,11 @@ export interface VideoEndpoint {
    */
   promptStyle: VideoPromptStyle
   provider?: string
+  /**
+   * 出视频参考图。H3 / AutoDL 默认 identity（人设+场景）；万相及其他模型用 keyframe。
+   * 画布是否铺分镜关键帧跟这个走，必须在出视频前定好。
+   */
+  stillMode: VideoStillMode
 }
 
 export interface VideoProfile extends VideoEndpoint {
@@ -178,11 +184,12 @@ function asTts(ep: TtsEndpoint): TtsEndpoint {
 
 function asVideo(ep: VideoEndpoint): VideoEndpoint {
   return {
-    baseUrl: migrateVideoBaseUrl(ep.baseUrl || ''),
+    baseUrl: (ep.baseUrl || '').trim(),
     apiKey: ep.apiKey || '',
-    workflowId: migrateVideoWorkflowId(ep.workflowId || ''),
+    workflowId: (ep.workflowId || '').trim(),
     promptStyle: ep.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
-    provider: ep.provider
+    provider: ep.provider,
+    stillMode: stillModeForVideoModel('h3', ep)
   }
 }
 
@@ -311,7 +318,8 @@ function buildDefaults(): AppSettings {
     baseUrl: env.video.baseUrl,
     apiKey: env.video.apiKey,
     workflowId: env.video.workflowId,
-    promptStyle: 'scene-narrative'
+    promptStyle: 'scene-narrative',
+    stillMode: 'identity'
   }
   const videoFirst = videoFromEndpoint(video, '默认视频')
   const music = endpoint(env.music.baseUrl, env.music.apiKey, env.music.model, MUSIC_PRESETS)
@@ -400,7 +408,12 @@ function parseSettings(raw: string | null): AppSettings {
         apiKey: parsed.video?.apiKey || defaults.video.apiKey,
         workflowId: migrateVideoWorkflowId(parsed.video?.workflowId || defaults.video.workflowId),
         promptStyle:
-          parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
+          parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
+        stillMode: stillModeForVideoModel('h3', {
+          stillMode: parsed.video?.stillMode,
+          workflowId: parsed.video?.workflowId,
+          provider: parsed.video?.provider
+        })
       },
       parsed.activeVideoId
     )
@@ -466,41 +479,51 @@ async function settingsFilePath(): Promise<string> {
   return api.join(await api.getRoot(), LEGACY_SETTINGS_FILE)
 }
 
-let writing = false
+let writeChain: Promise<void> = Promise.resolve()
 let queued: AppSettings | null = null
 
-async function writeDisk(v: AppSettings) {
+async function persistToDisk(v: AppSettings) {
   if (!isDesktop()) return
-  queued = v
-  if (writing) return
-  writing = true
-  try {
-    while (queued) {
-      const snap = queued
-      queued = null
-      const api = desktop()
-      if (typeof api.kvSet === 'function') {
-        await api.kvSet(SETTINGS_KV_KEY, JSON.stringify(snap))
-      } else {
-        const file = await settingsFilePath()
-        await api.writeText(file, JSON.stringify(snap, null, 2))
-      }
-    }
-  } catch (e) {
-    console.warn('[settings] 写入本地库失败', e)
-  } finally {
-    writing = false
-    if (queued) void writeDisk(queued)
+  const api = desktop()
+  if (typeof api.kvSet === 'function') {
+    await api.kvSet(SETTINGS_KV_KEY, JSON.stringify(v))
+  } else {
+    const file = await settingsFilePath()
+    await api.writeText(file, JSON.stringify(v, null, 2))
   }
+}
+
+function writeDisk(v: AppSettings) {
+  queued = v
+  writeChain = writeChain.catch(() => {}).then(async () => {
+    if (!queued) return
+    try {
+      while (queued) {
+        const snap = queued
+        queued = null
+        await persistToDisk(snap)
+      }
+    } catch (e) {
+      console.warn('[settings] 写入本地库失败', e)
+      throw e
+    }
+  })
+  return writeChain
 }
 
 export const useSettingsStore = defineStore('settings', () => {
   const config = ref<AppSettings>(loadFromLocal())
   const persistPath = ref('')
   const diskReady = ref(false)
+  const lastSavedAt = ref(0)
   let skipDisk = false
   let hydratePromise: Promise<void> | null = null
   let pendingDisk: AppSettings | null = null
+  let userEdited = false
+
+  function touch() {
+    userEdited = true
+  }
 
   watch(
     config,
@@ -511,7 +534,9 @@ export const useSettingsStore = defineStore('settings', () => {
         pendingDisk = v
         return
       }
-      void writeDisk(v)
+      void writeDisk(v).then(() => {
+        lastSavedAt.value = Date.now()
+      }).catch(() => {})
     },
     { deep: true }
   )
@@ -535,12 +560,16 @@ export const useSettingsStore = defineStore('settings', () => {
         }
         if (raw) {
           skipDisk = true
-          config.value = parseSettings(raw)
-          writeLocal(config.value)
+          if (!userEdited) {
+            config.value = parseSettings(raw)
+            writeLocal(config.value)
+          }
           skipDisk = false
           await writeDisk(config.value)
+          lastSavedAt.value = Date.now()
         } else {
           await writeDisk(config.value)
+          lastSavedAt.value = Date.now()
         }
       } catch (e) {
         console.warn('[settings] 读取本地库失败', e)
@@ -559,46 +588,59 @@ export const useSettingsStore = defineStore('settings', () => {
   void ensureHydrated()
 
   if (typeof window !== 'undefined') {
-    const flush = () => {
+    const flushOnLeave = () => {
       writeLocal(config.value)
       if (diskReady.value) void writeDisk(config.value)
     }
-    window.addEventListener('beforeunload', flush)
+    window.addEventListener('beforeunload', flushOnLeave)
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') flush()
+      if (document.visibilityState === 'hidden') flushOnLeave()
     })
   }
 
+  async function flush() {
+    writeLocal(config.value)
+    await writeDisk(config.value)
+    lastSavedAt.value = Date.now()
+  }
+
   function update(patch: Partial<AppSettings>) {
+    touch()
     config.value = { ...config.value, ...patch }
   }
 
   function syncLlm(next: LlmProfile, list?: LlmProfile[]) {
+    touch()
     const llms = (list ?? config.value.llms).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, llms, activeLlmId: next.id, llm: asEndpoint(next) }
   }
 
   function syncVision(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    touch()
     const visions = (list ?? config.value.visions).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, visions, activeVisionId: next.id, vision: asEndpoint(next) }
   }
 
   function syncImage(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    touch()
     const images = (list ?? config.value.images).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, images, activeImageId: next.id, image: asEndpoint(next) }
   }
 
   function syncTts(next: TtsProfile, list?: TtsProfile[]) {
+    touch()
     const ttsProfiles = (list ?? config.value.ttsProfiles).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, ttsProfiles, activeTtsId: next.id, tts: asTts(next) }
   }
 
   function syncVideo(next: VideoProfile, list?: VideoProfile[]) {
+    touch()
     const videos = (list ?? config.value.videos).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, videos, activeVideoId: next.id, video: asVideo(next) }
   }
 
   function syncMusic(next: NamedEndpoint, list?: NamedEndpoint[]) {
+    touch()
     const musics = (list ?? config.value.musics).map((p) => (p.id === next.id ? next : p))
     config.value = { ...config.value, musics, activeMusicId: next.id, music: asEndpoint(next) }
   }
@@ -853,6 +895,7 @@ export const useSettingsStore = defineStore('settings', () => {
     workflowId: string
     promptStyle?: VideoPromptStyle
     provider?: string
+    stillMode?: VideoStillMode
   }) {
     const profile = videoFromEndpoint(
       {
@@ -860,7 +903,8 @@ export const useSettingsStore = defineStore('settings', () => {
         apiKey: seed.apiKey ?? '',
         workflowId: seed.workflowId,
         promptStyle: seed.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
-        provider: seed.provider
+        provider: seed.provider,
+        stillMode: stillModeForVideoModel('h3', seed)
       },
       seed.name
     )
@@ -1000,7 +1044,10 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     config,
     persistPath,
+    diskReady,
+    lastSavedAt,
     ensureHydrated,
+    flush,
     update,
     patchLlm,
     addLlm,

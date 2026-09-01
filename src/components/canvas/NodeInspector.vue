@@ -5,9 +5,11 @@ import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settin
 import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { applyShotVideoModel } from '@/services/canvas/videoModel'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeForShot } from '@/utils/videoStill'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
-import { generateMusic, refineMusicPrompt, buildMusicPrompt, isPlayReady } from '@/services/ai'
+import { isPlayReady } from '@/services/ai'
 import { scriptFromImportedPlay } from '@/utils/scriptMarkdown'
 import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
@@ -44,10 +46,6 @@ const settings = useSettingsStore()
 const preview = ref('')
 const historyUrls = ref<Record<string, string>>({})
 const running = computed(() => (props.node ? isNodeRunning(props.node.id) : false))
-const bgmPrompt = ref('')
-const bgmUrl = ref('')
-const generatingBgm = ref(false)
-const bgmError = ref('')
 
 const continueHint = ref('')
 const pickerOpen = ref(false)
@@ -75,36 +73,9 @@ const ambientVolume = computed({
   get: () => project.current?.settings.originalVolume ?? 0.55,
   set: (v: number) => project.setSettings({ originalVolume: v })
 })
-const bgmVolume = computed({
-  get: () => project.current?.settings.bgmVolume ?? 0.35,
-  set: (v: number) => project.setSettings({ bgmVolume: v })
-})
 const burnCaptions = computed({
   get: () => project.current?.settings.burnCaptions !== false,
   set: (v: boolean) => project.setSettings({ burnCaptions: v })
-})
-const bgmAssetId = computed({
-  get: () => project.current?.bgmAssetId || '',
-  set: (id: string) => {
-    project.setBgm(id || undefined, bgmPrompt.value)
-  }
-})
-const audioAssets = computed(() =>
-  assets.all.filter((a) => a.kind === 'audio' && !String(a.filename).startsWith('vo_'))
-)
-const totalDuration = computed(() => {
-  const p = project.current
-  if (!p) return 24
-  if (p.timeline?.length) {
-    return Math.max(
-      8,
-      p.timeline.filter((c) => c.enabled).reduce((s, c) => s + (c.duration || 0), 0)
-    )
-  }
-  return Math.max(
-    8,
-    p.shots.reduce((s, sh) => s + (sh.duration || 0), 0)
-  )
 })
 const isExportNode = computed(
   () => props.node?.type === 'export' || props.node?.type === 'final'
@@ -261,20 +232,7 @@ const videoModel = computed({
   get: () => normalizeVideoGenModel(props.node?.data.videoModel),
   set: (v: VideoGenModel) => {
     if (!props.node) return
-    const min = videoMinSeconds(v)
-    const max = videoMaxSeconds(v)
-    project.patchCanvasNode(props.node.id, {
-      videoModel: v,
-      videoResolution: normalizeVideoResolution(props.node.data.videoResolution, v),
-      ...(props.node.type === 'videoGen'
-        ? { duration: Math.min(max, Math.max(min, Math.round(props.node.data.duration || min))) }
-        : {})
-    })
-    if (props.node.type === 'shotVideo' && shot.value) {
-      project.updateShot(shot.value.id, {
-        duration: Math.min(max, Math.max(min, Math.round(shot.value.duration || min)))
-      })
-    }
+    applyShotVideoModel(props.node.id, v)
   }
 })
 const videoResolution = computed({
@@ -485,64 +443,6 @@ async function downloadFinal() {
   URL.revokeObjectURL(url)
 }
 
-async function refreshBgmPreview() {
-  const id = project.current?.bgmAssetId
-  if (!id) {
-    bgmUrl.value = ''
-    return
-  }
-  bgmUrl.value = (await assets.getUrl(id)) || ''
-}
-
-async function ensureBgmPrompt() {
-  if (!project.current) return
-  if (!bgmPrompt.value.trim()) {
-    bgmPrompt.value =
-      project.current.bgmPrompt || buildMusicPrompt(project.current)
-  }
-}
-
-async function generateBgm() {
-  if (!project.current) return
-  generatingBgm.value = true
-  bgmError.value = ''
-  try {
-    await ensureBgmPrompt()
-    let prompt = bgmPrompt.value.trim()
-    if (!prompt) {
-      prompt = await refineMusicPrompt(project.current)
-      bgmPrompt.value = prompt
-    }
-    const result = await generateMusic({
-      prompt,
-      duration: totalDuration.value || 24
-    })
-    const typed = result.blob.type.startsWith('audio/')
-      ? result.blob
-      : new Blob([result.blob], { type: result.mimeType || 'audio/mpeg' })
-    const asset = await assets.add(typed, 'audio', 'ai-generated', {
-      filename: `bgm_${Date.now().toString(36)}`,
-      prompt,
-      projectId: project.current.id
-    })
-    project.setBgm(asset.id, prompt)
-    await project.save()
-    await refreshBgmPreview()
-    toast.success('整片配乐已生成，可先试听')
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    bgmError.value = msg
-    toast.error('配乐生成失败：' + msg, 10000)
-  } finally {
-    generatingBgm.value = false
-  }
-}
-
-function onBgmPromptBlur() {
-  if (!project.current) return
-  project.setBgm(project.current.bgmAssetId, bgmPrompt.value)
-}
-
 async function run() {
   if (!props.node) return
   persistShotVideoPrompt()
@@ -602,17 +502,6 @@ watch(
     refreshPreview()
     loadHistory()
   }
-)
-
-watch(
-  () => [props.node?.type, project.current?.bgmAssetId, project.current?.bgmPrompt] as const,
-  async ([type]) => {
-    if (type !== 'export' && type !== 'final') return
-    await assets.refresh()
-    await ensureBgmPrompt()
-    await refreshBgmPreview()
-  },
-  { immediate: true }
 )
 
 watch(running, (now, was) => {
@@ -811,37 +700,6 @@ async function optimizeVideoPrompt() {
           <input v-model.number="ambientVolume" type="range" min="0.1" max="1" step="0.05" />
           <span class="hint">{{ Math.round(ambientVolume * 100) }}%</span>
         </div>
-
-        <label>背景音乐</label>
-        <textarea
-          v-model="bgmPrompt"
-          rows="3"
-          placeholder="配乐风格，例如：温暖弦乐铺底，不要人声…"
-          @blur="onBgmPromptBlur"
-        />
-        <div class="vol-row">
-          <span class="hint">BGM 音量</span>
-          <input v-model.number="bgmVolume" type="range" min="0" max="1" step="0.05" />
-          <span class="hint">{{ Math.round(bgmVolume * 100) }}%</span>
-        </div>
-        <div class="bgm-row">
-          <GradientButton
-            size="sm"
-            :loading="generatingBgm"
-            :disabled="generatingBgm || running"
-            @click="generateBgm"
-          >
-            {{ bgmAssetId ? '重新生成配乐' : '生成配乐' }}
-          </GradientButton>
-          <select v-model="bgmAssetId">
-            <option value="">不使用 BGM</option>
-            <option v-for="a in audioAssets" :key="a.id" :value="a.id">
-              {{ a.filename }}
-            </option>
-          </select>
-        </div>
-        <audio v-if="bgmUrl" class="bgm-player" :src="bgmUrl" controls />
-        <p v-if="bgmError" class="err">{{ bgmError }}</p>
       </template>
 
       <template v-if="node.type === 'script' && project.current">
@@ -1020,7 +878,14 @@ async function optimizeVideoPrompt() {
           <option value="tilt">移</option>
           <option value="orbit">环绕</option>
         </select>
-        <p v-if="videoRequiresStoryboard(project.current) && !isH3Fl2va && !shot.boardAssetId" class="err">这一镜还没有六格故事看板，先生成看板再出视频。</p>
+        <p
+          v-if="shot && project.current && stillModeForShot(shot, project.current) === 'storyboard' && !isH3Fl2va && !shot.boardAssetId"
+          class="err"
+        >这一镜还没有故事看板，先生成看板再出视频。</p>
+        <p
+          v-else-if="shot && project.current && stillModeForShot(shot, project.current) === 'keyframe' && !isH3Fl2va && !shot.imageAssetId"
+          class="err"
+        >这一镜还没有四宫格关键帧，当前模型需要关键帧后再出视频。</p>
         <p v-else-if="isH3Fl2va && !shot.lastFrameAssetId" class="err">首尾帧模式需要尾帧。请在下方选择尾帧。</p>
       </template>
 
@@ -1457,18 +1322,5 @@ textarea {
   padding: 0;
   background: transparent;
   border: none;
-}
-.bgm-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.bgm-row select {
-  flex: 1;
-  min-width: 0;
-}
-.bgm-player {
-  width: 100%;
-  height: 32px;
 }
 </style>

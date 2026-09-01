@@ -19,8 +19,16 @@ const props = defineProps<{
 const project = useProjectStore()
 const toast = useToastStore()
 
-const extractable = computed(() =>
-  props.data.kind === 'subject' || props.data.kind === 'scene' || props.data.kind === 'shot'
+const extractable = computed(() => {
+  if (props.data.kind === 'subject' || props.data.kind === 'scene' || props.data.kind === 'shot') return true
+  return props.data.kind === 'video' && !project.current?.canvas?.nodes.some((n) => n.id === 'group-shots')
+})
+const generatable = computed(
+  () =>
+    props.data.kind === 'subject' ||
+    props.data.kind === 'scene' ||
+    props.data.kind === 'shot' ||
+    props.data.kind === 'video'
 )
 const running = computed(() => isNodeRunning(props.id))
 const generating = computed(() => isNodeRunning(groupGenerateJobId(props.id)))
@@ -42,6 +50,7 @@ const childCount = computed(
           n.type === 'scene' ||
           n.type === 'shotBoard' ||
           n.type === 'shotImage' ||
+          n.type === 'shotVideo' ||
           n.type === 'sceneProps')
     ).length ?? 0
 )
@@ -87,7 +96,7 @@ async function reextract(ev: Event) {
 
 async function generateAll(ev: Event) {
   ev.stopPropagation()
-  if (busy.value || !extractable.value || !hasItems.value) return
+  if (busy.value || !generatable.value || !hasItems.value) return
   if (!isPlayApproved(project.current)) {
     toast.warn(PLAY_GATE_MSG)
     return
@@ -99,7 +108,9 @@ async function generateAll(ev: Event) {
         ? '人物四视图已全部跑完'
         : props.data.kind === 'scene'
           ? '场景锚点图已全部跑完'
-          : '分镜关键帧已全部跑完'
+          : props.data.kind === 'video'
+            ? '分镜视频已全部跑完'
+            : '分镜关键帧已全部跑完'
     )
   } catch (e) {
     if (shouldToastAiError(e)) toast.error(friendlyAiError(e))
@@ -111,8 +122,9 @@ async function generateAll(ev: Event) {
   <div class="gframe" :class="[data.kind ? `tint-${data.kind}` : '', { busy }]">
     <div class="gframe-h">
       <span>{{ data.label || '分组' }}</span>
-      <div v-if="extractable" class="gframe-actions nodrag nopan">
+      <div v-if="extractable || generatable" class="gframe-actions nodrag nopan">
         <button
+          v-if="extractable"
           type="button"
           class="gframe-btn"
           :disabled="busy || !playReady"
@@ -124,6 +136,7 @@ async function generateAll(ev: Event) {
           {{ btnLabel }}
         </button>
         <button
+          v-if="generatable"
           type="button"
           class="gframe-btn gen"
           :disabled="busy || !hasItems"

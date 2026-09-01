@@ -6,7 +6,9 @@ import { runCanvasNode, optimizeShotVideoPrompt } from '@/services/canvas/runner
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
+import { applyShotVideoModel } from '@/services/canvas/videoModel'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeFromNode } from '@/utils/videoStill'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
@@ -169,19 +171,7 @@ const isImageNode = computed(
 )
 const videoModel = computed({
   get: () => normalizeVideoGenModel(nodeMeta.value?.data.videoModel),
-  set: (v: VideoGenModel) => {
-    const min = videoMinSeconds(v)
-    const max = videoMaxSeconds(v)
-    project.patchCanvasNode(props.id, {
-      videoModel: v,
-      videoResolution: normalizeVideoResolution(nodeMeta.value?.data.videoResolution, v)
-    })
-    if (shot.value) {
-      project.updateShot(shot.value.id, {
-        duration: Math.min(max, Math.max(min, Math.round(shot.value.duration || min)))
-      })
-    }
-  }
+  set: (v: VideoGenModel) => applyShotVideoModel(props.id, v)
 })
 const videoResolution = computed({
   get: () => normalizeVideoResolution(nodeMeta.value?.data.videoResolution, videoModel.value),
@@ -207,6 +197,13 @@ const lastFrameId = computed({
 })
 const isH3VideoNode = computed(() => type.value === 'shotVideo' && videoModel.value !== 'wan-prime')
 const isH3Fl2va = computed(() => isH3VideoNode.value && h3GenMode.value === 'fl2va')
+const videoStillHint = computed(() => {
+  if (type.value !== 'shotVideo') return ''
+  const mode = stillModeFromNode(nodeMeta.value)
+  if (mode === 'identity') return '只传人设和场景'
+  if (mode === 'keyframe') return '需四宫格关键帧'
+  return '需故事看板'
+})
 const showPrompt = computed(
   () =>
     type.value === 'shotImage' ||
@@ -940,6 +937,7 @@ const cropStyle = computed(() => ({
       <div class="prompt-foot">
         <ImageModelSelect v-if="isImageNode" />
         <VideoModelSelect v-else-if="type === 'shotVideo'" v-model="videoModel" />
+        <span v-if="type === 'shotVideo' && videoStillHint" class="still-hint">{{ videoStillHint }}</span>
         <span v-else>{{ metaLine }}</span>
         <AspectRatioSeg
           v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo'"

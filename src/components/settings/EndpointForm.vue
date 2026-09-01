@@ -29,6 +29,7 @@ const emit = defineEmits<{
 }>()
 
 const draft = ref('')
+const showKey = ref(false)
 const providerId = computed({
   get() {
     if (props.provider && props.presets.some((p) => p.id === props.provider)) return props.provider
@@ -38,6 +39,16 @@ const providerId = computed({
     const preset = findProvider(id, props.presets)
     emit('patch', applyProviderPreset(props, preset))
   }
+})
+
+const baseUrlModel = computed({
+  get: () => props.baseUrl,
+  set: (v: string) => emit('patch', { baseUrl: v })
+})
+
+const apiKeyModel = computed({
+  get: () => props.apiKey,
+  set: (v: string) => emit('patch', { apiKey: v })
 })
 
 const currentPreset = computed(() => findProvider(providerId.value, props.presets))
@@ -79,19 +90,22 @@ function onAdd() {
 
     <label>接口地址</label>
     <input
-      :value="baseUrl"
+      v-model="baseUrlModel"
       :placeholder="currentPreset.baseUrl || 'https://…/v1'"
-      @change="emit('patch', { baseUrl: ($event.target as HTMLInputElement).value.trim() })"
     />
 
     <label>API Key</label>
-    <input
-      type="password"
-      autocomplete="off"
-      :value="apiKey"
-      :placeholder="currentPreset.keyPlaceholder || 'sk-…'"
-      @change="emit('patch', { apiKey: ($event.target as HTMLInputElement).value.trim() })"
-    />
+    <div class="secret">
+      <input
+        :type="showKey ? 'text' : 'password'"
+        autocomplete="off"
+        v-model="apiKeyModel"
+        :placeholder="currentPreset.keyPlaceholder || 'sk-…'"
+      />
+      <button type="button" class="eye" @click="showKey = !showKey">
+        {{ showKey ? '隐藏' : '显示' }}
+      </button>
+    </div>
 
     <label>这个接入下的模型</label>
     <p class="hint">
@@ -178,6 +192,30 @@ select {
   padding: 8px 10px;
   font: inherit;
   font-size: 13px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.secret {
+  display: flex;
+  gap: 6px;
+}
+.secret input {
+  flex: 1;
+  min-width: 0;
+}
+.eye {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-3);
+  color: var(--color-text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.eye:hover {
+  color: var(--color-text-1);
 }
 .chips {
   display: flex;

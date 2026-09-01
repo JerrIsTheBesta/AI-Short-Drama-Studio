@@ -298,7 +298,8 @@ async function blobToVideoImageDataUrl(blob: Blob): Promise<string> {
 function workflowApiRoot(baseUrl: string): string {
   const raw = migrateVideoBaseUrl(baseUrl).replace(/\/+$/, '')
   if (/\/api\/v1\/comfyui$/i.test(raw)) return raw
-  return `${raw}/api/v1/comfyui`
+  const origin = raw.replace(/\/api\/v1$/i, '')
+  return `${origin}/api/v1/comfyui`
 }
 
 function authHeaders(apiKey: string, jsonBody = true): Record<string, string> {

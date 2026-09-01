@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { exportVideo, parseSRT, buildCuesFromClips, probeMedia, trimTimelineBySpeech } from '@/services/ffmpeg'
-import { generateMusic, refineMusicPrompt, buildMusicPrompt } from '@/services/ai'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
@@ -26,11 +25,6 @@ const captionHighlight = computed({
   get: () => project.current?.settings.captionHighlight === true,
   set: (v: boolean) => project.setSettings({ captionHighlight: v })
 })
-const bgmAssetId = ref<string>('')
-const bgmPrompt = ref('')
-const bgmUrl = ref('')
-const generatingBgm = ref(false)
-const bgmError = ref('')
 const keepAmbientAudio = computed({
   get: () => project.current?.settings.keepAmbientAudio !== false,
   set: (v: boolean) => project.setSettings({ keepAmbientAudio: v })
@@ -48,19 +42,9 @@ const resultSize = ref(0)
 
 const isSpeech = computed(() => project.current?.pipelineMode === 'smart-speech')
 
-const audioAssets = computed(() =>
-  assets.all.filter((a) => a.kind === 'audio' && !String(a.filename).startsWith('vo_'))
-)
-
 onMounted(async () => {
   await assets.refresh()
   ensureExportTimeline()
-  if (project.current?.bgmAssetId) {
-    bgmAssetId.value = project.current.bgmAssetId
-    const url = await assets.getUrl(project.current.bgmAssetId)
-    if (url) bgmUrl.value = url
-  }
-  bgmPrompt.value = project.current?.bgmPrompt || (project.current ? buildMusicPrompt(project.current) : '')
 })
 
 /** 画布模式下往往没走过「剪辑」页，时间线为空会导致导出按钮灰掉——自动从分镜补齐 */
@@ -75,55 +59,6 @@ function ensureExportTimeline(silent = false) {
     return true
   }
   return project.current.timeline.some((c) => c.enabled)
-}
-
-watch(bgmAssetId, async (id) => {
-  if (!id) {
-    bgmUrl.value = ''
-    return
-  }
-  const url = await assets.getUrl(id)
-  bgmUrl.value = url || ''
-  if (project.current && project.current.bgmAssetId !== id) {
-    project.setBgm(id, bgmPrompt.value)
-  }
-})
-
-async function generateBgm() {
-  if (!project.current) return
-  generatingBgm.value = true
-  bgmError.value = ''
-  try {
-    let prompt = bgmPrompt.value.trim()
-    if (!prompt) {
-      prompt = await refineMusicPrompt(project.current)
-      bgmPrompt.value = prompt
-    }
-    const result = await generateMusic({
-      prompt,
-      duration: Number(totalDuration.value) || 24
-    })
-    const typed = result.blob.type.startsWith('audio/')
-      ? result.blob
-      : new Blob([result.blob], { type: result.mimeType || 'audio/mpeg' })
-    const asset = await assets.add(typed, 'audio', 'ai-generated', {
-      filename: `bgm_${Date.now().toString(36)}`,
-      prompt,
-      projectId: project.current.id
-    })
-    project.setBgm(asset.id, prompt)
-    await project.save()
-    bgmAssetId.value = asset.id
-    const url = await assets.getUrl(asset.id)
-    if (url) bgmUrl.value = url
-    toast.success('整片配乐已生成，可先试听')
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    bgmError.value = msg
-    toast.error('配乐生成失败：' + msg, 10000)
-  } finally {
-    generatingBgm.value = false
-  }
 }
 
 const timeline = computed(() => project.current?.timeline ?? [])
@@ -221,20 +156,9 @@ async function doExport() {
       toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕视频。')
     }
 
-    if (!isSpeech.value && !bgmAssetId.value) {
-      progressMsg.value = '生成整片背景音乐...'
-      await generateBgm()
-    }
-
     let bgmBlob: Blob | undefined
-    if (!isSpeech.value && bgmAssetId.value) {
-      bgmBlob = await assets.getBlob(bgmAssetId.value)
-    } else if (!isSpeech.value && !bgmAssetId.value) {
-      toast.warn(
-        keepAmbientAudio.value
-          ? '没有配乐：视频会保留环境音并叠口播（若有）。'
-          : '没有配乐：视频已去掉各镜原声，将只保留口播（若有）。'
-      )
+    if (!isSpeech.value && project.current.bgmAssetId) {
+      bgmBlob = await assets.getBlob(project.current.bgmAssetId)
     }
 
     const digitalHuman = isDigitalHuman.value
@@ -367,7 +291,7 @@ const segmentSummary = computed(() => {
       <div>
         <h1>🚀 导出视频</h1>
         <p v-if="isDigitalHuman">各段视频已经带上传音频。导出时自动切掉没声音的气口再拼接，并烧录字幕和划重点，不再另配一层人声。</p>
-        <p v-else>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠配乐和字幕</p>
+        <p v-else>按分镜的人声模式保留 H3 对白/口播，或改用独立 TTS，再叠字幕</p>
       </div>
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/caption')">← 上一步</GradientButton>
@@ -465,42 +389,6 @@ const segmentSummary = computed(() => {
                   : 'H3 对白/画外口播始终保留；仅静音 TTS / 无口播镜头的原声，避免重复人声。'
               }}
             </p>
-          </div>
-
-          <div v-if="!isSpeech" class="field">
-            <span>背景音乐</span>
-            <p class="hint" style="margin-bottom: 8px;">
-              {{
-                keepAmbientAudio
-                  ? '整片铺一段纯音乐，与环境音、口播混合。'
-                  : '整片铺一段纯音乐，再叠口播人声（各镜原声已去掉）。'
-              }}
-            </p>
-            <textarea
-              v-model="bgmPrompt"
-              class="input bgm-prompt"
-              rows="3"
-              placeholder="描述想要的配乐风格，例如：电影感温暖弦乐，平稳铺底，不要人声..."
-            />
-            <div class="bgm-actions">
-              <GradientButton
-                size="sm"
-                icon="🎵"
-                :loading="generatingBgm"
-                :disabled="generatingBgm || exporting"
-                @click="generateBgm"
-              >
-                {{ bgmAssetId ? '重新生成配乐' : '生成配乐' }}
-              </GradientButton>
-              <select v-model="bgmAssetId" class="input" style="flex: 1;">
-                <option value="">不使用 BGM</option>
-                <option v-for="a in audioAssets" :key="a.id" :value="a.id">
-                  {{ a.filename }}
-                </option>
-              </select>
-            </div>
-            <audio v-if="bgmUrl" class="bgm-player" :src="bgmUrl" controls />
-            <p v-if="bgmError" class="hint" style="color: var(--color-warning);">{{ bgmError }}</p>
           </div>
         </GlassCard>
 
@@ -713,22 +601,6 @@ h3 {
   font-size: 12px;
   color: var(--color-text-1);
   font-family: inherit;
-}
-.bgm-prompt {
-  resize: vertical;
-  min-height: 64px;
-  line-height: 1.5;
-  margin-bottom: 8px;
-}
-.bgm-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.bgm-player {
-  width: 100%;
-  margin-top: 8px;
-  height: 32px;
 }
 .hint {
   font-size: 11px;

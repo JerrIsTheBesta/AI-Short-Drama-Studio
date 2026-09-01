@@ -1,12 +1,14 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { useProjectStore, useSettingsStore, uniqueProfileName } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
 import EndpointForm from '@/components/settings/EndpointForm.vue'
 import ProfileLibrary from '@/components/settings/ProfileLibrary.vue'
+import { type VideoStillMode } from '@/types/canvas'
+import { syncH3ShotStillModes } from '@/services/canvas/videoModel'
 import {
   IMAGE_PROVIDERS,
   LLM_PROVIDERS,
-  MUSIC_PROVIDERS,
   TTS_PROVIDERS,
   VIDEO_PROVIDERS,
   VISION_PROVIDERS,
@@ -21,6 +23,44 @@ defineProps<{
 
 const settings = useSettingsStore()
 const project = useProjectStore()
+const showVideoKey = ref(false)
+
+const llmName = computed({
+  get: () => settings.config.llms.find((p) => p.id === settings.config.activeLlmId)?.name ?? '',
+  set: (v: string) => settings.renameLlm(v)
+})
+const visionName = computed({
+  get: () => settings.config.visions.find((p) => p.id === settings.config.activeVisionId)?.name ?? '',
+  set: (v: string) => settings.renameVision(v)
+})
+const imageName = computed({
+  get: () => settings.config.images.find((p) => p.id === settings.config.activeImageId)?.name ?? '',
+  set: (v: string) => settings.renameImage(v)
+})
+const ttsName = computed({
+  get: () => settings.config.ttsProfiles.find((p) => p.id === settings.config.activeTtsId)?.name ?? '',
+  set: (v: string) => settings.renameTts(v)
+})
+const videoName = computed({
+  get: () => settings.config.videos.find((p) => p.id === settings.config.activeVideoId)?.name ?? '',
+  set: (v: string) => settings.renameVideo(v)
+})
+const videoUrl = computed({
+  get: () => settings.config.video.baseUrl,
+  set: (v: string) => settings.patchVideo({ baseUrl: v })
+})
+const videoWorkflow = computed({
+  get: () => settings.config.video.workflowId,
+  set: (v: string) => settings.patchVideo({ workflowId: v })
+})
+const videoKey = computed({
+  get: () => settings.config.video.apiKey,
+  set: (v: string) => settings.patchVideo({ apiKey: v })
+})
+const ttsVoice = computed({
+  get: () => settings.config.tts.voice,
+  set: (v: string) => onVoice(v)
+})
 
 function onVoice(v: string) {
   settings.patchTts({ voice: v })
@@ -35,7 +75,7 @@ function subtitle(p: { models?: string[]; model?: string; workflowId?: string })
 }
 
 function createNamed(
-  kind: 'llm' | 'vision' | 'image' | 'tts' | 'music',
+  kind: 'llm' | 'vision' | 'image' | 'tts',
   providerId: string,
   presets: ProviderPreset[],
   existing: string[],
@@ -58,8 +98,7 @@ function createNamed(
   if (kind === 'llm') settings.addLlm(seed)
   else if (kind === 'vision') settings.addVision(seed)
   else if (kind === 'image') settings.addImage(seed)
-  else if (kind === 'tts') settings.addTts(seed)
-  else settings.addMusic(seed)
+  else settings.addTts(seed)
 }
 
 function createVideo(providerId: string) {
@@ -74,8 +113,14 @@ function createVideo(providerId: string) {
     apiKey: '',
     workflowId: preset.defaultModel || '',
     promptStyle: 'scene-narrative',
-    provider: preset.id
+    provider: preset.id,
+    stillMode: preset.id === 'autodl' ? 'identity' : 'keyframe'
   })
+}
+
+function patchVideoStillMode(mode: VideoStillMode) {
+  settings.patchVideo({ stillMode: mode })
+  syncH3ShotStillModes(mode)
 }
 </script>
 
@@ -95,9 +140,8 @@ function createVideo(providerId: string) {
       <label class="name-label">名称</label>
       <input
         class="name-input"
-        :value="settings.config.llms.find((p) => p.id === settings.config.activeLlmId)?.name"
+        v-model="llmName"
         placeholder="例如 DeepSeek 官方"
-        @change="settings.renameLlm(($event.target as HTMLInputElement).value)"
       />
       <EndpointForm
         title="连接信息"
@@ -128,9 +172,8 @@ function createVideo(providerId: string) {
       <label class="name-label">名称</label>
       <input
         class="name-input"
-        :value="settings.config.visions.find((p) => p.id === settings.config.activeVisionId)?.name"
+        v-model="visionName"
         placeholder="例如 阿里云百炼视觉"
-        @change="settings.renameVision(($event.target as HTMLInputElement).value)"
       />
       <EndpointForm
         title="连接信息"
@@ -161,9 +204,8 @@ function createVideo(providerId: string) {
       <label class="name-label">名称</label>
       <input
         class="name-input"
-        :value="settings.config.images.find((p) => p.id === settings.config.activeImageId)?.name"
+        v-model="imageName"
         placeholder="例如 火山方舟 Seedream"
-        @change="settings.renameImage(($event.target as HTMLInputElement).value)"
       />
       <EndpointForm
         title="连接信息"
@@ -194,9 +236,8 @@ function createVideo(providerId: string) {
       <label class="name-label">名称</label>
       <input
         class="name-input"
-        :value="settings.config.ttsProfiles.find((p) => p.id === settings.config.activeTtsId)?.name"
+        v-model="ttsName"
         placeholder="例如 阿里云百炼 TTS"
-        @change="settings.renameTts(($event.target as HTMLInputElement).value)"
       />
       <EndpointForm
         title="连接信息"
@@ -212,7 +253,7 @@ function createVideo(providerId: string) {
         @remove-model="settings.removeModel('tts', $event)"
       >
         <label class="extra-label">音色</label>
-        <select :value="settings.config.tts.voice" @change="onVoice(($event.target as HTMLSelectElement).value)">
+        <select v-model="ttsVoice">
           <option v-for="v in TTS_VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
         </select>
       </EndpointForm>
@@ -232,13 +273,42 @@ function createVideo(providerId: string) {
       <label class="name-label">名称</label>
       <input
         class="name-input"
-        :value="settings.config.videos.find((p) => p.id === settings.config.activeVideoId)?.name"
-        placeholder="例如 MiniMax 海螺"
-        @change="settings.renameVideo(($event.target as HTMLInputElement).value)"
+        v-model="videoName"
+        placeholder="例如 AutoDL H3"
       />
       <section class="video">
         <h3>图生视频</h3>
-        <p class="hint">MiniMax 海螺图生视频；节点也可改选阿里云万相 3.0 Prime。多个镜头可以同时提交。</p>
+        <p class="hint">
+          H3 走 AutoDL 算力上的 ComfyUI 工作流，不是海螺官方接口。节点也可改选阿里云万相 3.0 Prime。
+          可在此添加其它工作流；参考图方式决定出视频前要不要铺分镜关键帧。
+        </p>
+        <label>参考图方式</label>
+        <div class="style-cards">
+          <button
+            type="button"
+            :class="{ on: (settings.config.video.stillMode || 'identity') === 'identity' }"
+            @click="patchVideoStillMode('identity')"
+          >
+            <strong>人设 + 场景</strong>
+            <span>H3 推荐。出视频只传角色设计图和场景图，不经过分镜关键帧或故事看板，减少多人物。</span>
+          </button>
+          <button
+            type="button"
+            :class="{ on: settings.config.video.stillMode === 'keyframe' }"
+            @click="patchVideoStillMode('keyframe')"
+          >
+            <strong>人设 + 场景 + 关键帧</strong>
+            <span>万相及其他模型。画布会铺「分镜关键帧」，出视频前先出四宫格。</span>
+          </button>
+          <button
+            type="button"
+            :class="{ on: settings.config.video.stillMode === 'storyboard' }"
+            @click="patchVideoStillMode('storyboard')"
+          >
+            <strong>人设 + 场景 + 故事看板</strong>
+            <span>短剧可选。画布铺看板，出视频带上六格动作计划。</span>
+          </button>
+        </div>
         <label>提示词写法</label>
         <div class="style-cards">
           <button
@@ -247,7 +317,7 @@ function createVideo(providerId: string) {
             @click="settings.patchVideo({ promptStyle: 'scene-narrative' })"
           >
             <strong>场景叙事</strong>
-            <span>选 H3 时按官方 Ref2VA 六段出片：人设/场景/看板不是首帧。[Shot 1] 不加时间戳。台词只进 &lt;d&gt; 标签。选万相不套这套格式。</span>
+            <span>选 H3 时按 Ref2VA 六段出片：人设/场景/看板不是首帧。[Shot 1] 不加时间戳。台词只进 &lt;d&gt; 标签。选万相不套这套格式。</span>
           </button>
           <button
             type="button"
@@ -260,56 +330,27 @@ function createVideo(providerId: string) {
         </div>
         <label>服务地址</label>
         <input
-          :value="settings.config.video.baseUrl"
-          placeholder="https://api.minimaxi.com/v1"
-          @change="settings.patchVideo({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+          v-model="videoUrl"
+          placeholder="https://autodl.art"
         />
         <label>工作流 ID</label>
         <input
-          :value="settings.config.video.workflowId"
+          v-model="videoWorkflow"
           placeholder="minimax_h3_lightx2v_v5_15s"
-          @change="settings.patchVideo({ workflowId: ($event.target as HTMLInputElement).value.trim() })"
         />
         <label>令牌</label>
-        <input
-          type="password"
-          autocomplete="off"
-          :value="settings.config.video.apiKey"
-          placeholder="MiniMax API Key"
-          @change="settings.patchVideo({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
-        />
+        <div class="secret">
+          <input
+            :type="showVideoKey ? 'text' : 'password'"
+            autocomplete="off"
+            v-model="videoKey"
+            placeholder="AutoDL Token"
+          />
+          <button type="button" class="eye" @click="showVideoKey = !showVideoKey">
+            {{ showVideoKey ? '隐藏' : '显示' }}
+          </button>
+        </div>
       </section>
-
-      <ProfileLibrary
-        title="已保存的配乐接入"
-        hint="整片 BGM，可选。"
-        :profiles="settings.config.musics.map((p) => ({ id: p.id, name: p.name, subtitle: subtitle(p) }))"
-        :active-id="settings.config.activeMusicId"
-        :providers="MUSIC_PROVIDERS"
-        @select="settings.selectMusic"
-        @create="createNamed('music', $event, MUSIC_PROVIDERS, settings.config.musics.map((p) => p.name), '自定义配乐')"
-        @remove="settings.removeMusic(settings.config.activeMusicId)"
-      />
-      <label class="name-label">名称</label>
-      <input
-        class="name-input"
-        :value="settings.config.musics.find((p) => p.id === settings.config.activeMusicId)?.name"
-        placeholder="例如 MiniMax 配乐"
-        @change="settings.renameMusic(($event.target as HTMLInputElement).value)"
-      />
-      <EndpointForm
-        title="配乐连接"
-        hint="整片 BGM，可选。"
-        :presets="MUSIC_PROVIDERS"
-        :base-url="settings.config.music.baseUrl"
-        :api-key="settings.config.music.apiKey"
-        :model="settings.config.music.model"
-        :models="settings.config.music.models"
-        :provider="settings.config.music.provider"
-        @patch="settings.patchMusic($event)"
-        @add-model="settings.addModel('music', $event)"
-        @remove-model="settings.removeModel('music', $event)"
-      />
     </template>
   </div>
 </template>
@@ -354,6 +395,31 @@ select {
   padding: 8px 10px;
   font: inherit;
   font-size: 13px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.secret {
+  display: flex;
+  gap: 6px;
+  max-width: 640px;
+}
+.secret input {
+  flex: 1;
+  min-width: 0;
+}
+.eye {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-3);
+  color: var(--color-text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.eye:hover {
+  color: var(--color-text-1);
 }
 .name-input {
   max-width: 640px;

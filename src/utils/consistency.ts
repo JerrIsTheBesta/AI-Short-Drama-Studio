@@ -2,6 +2,7 @@ import type { ID, Project, Scene, Shot, Subject } from '@/types'
 import { sceneForShotPlace } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeForShot } from '@/utils/videoStill'
 
 export interface ShotRefBundle {
   ids: ID[]
@@ -103,9 +104,10 @@ export interface VideoRefEntry {
   name?: string
 }
 
-/** 视频参考：本镜每个角色的设计图 + 场景图 + 故事看板。不传人物+场景配图。 */
+/** 视频参考：按该镜视频模型的 stillMode 打包。H3 identity 只人设+场景，不传看板/四宫格。 */
 export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefEntry[] {
   const omitted = new Set(shot.omittedRefAssetIds ?? [])
+  const stillMode = stillModeForShot(shot, project)
   const subjects = project.subjects ?? []
   const bound = boundSubjectIds(shot, subjects)
   const speakerLabel = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
@@ -131,7 +133,7 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       label: `SCENE PLATE of ${scene.name}; lock only space, materials and light; do not generate a four-panel grid`
     })
   }
-  if (videoRequiresStoryboard(project) && shot.boardAssetId && !omitted.has(shot.boardAssetId)) {
+  if (stillMode === 'storyboard' && shot.boardAssetId && !omitted.has(shot.boardAssetId)) {
     out.push({
       id: shot.boardAssetId,
       kind: 'board',
@@ -139,7 +141,7 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       label: `six-panel STORYBOARD for [Shot 1]; action plan only; one continuous full-frame take; never copy panels or play them as a slideshow`
     })
   }
-  if (!videoRequiresStoryboard(project) && shot.imageAssetId && !omitted.has(shot.imageAssetId)) {
+  if (stillMode === 'keyframe' && shot.imageAssetId && !omitted.has(shot.imageAssetId)) {
     out.unshift({
       id: shot.imageAssetId,
       kind: 'keyframe',
@@ -149,7 +151,8 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
   }
   const used = new Set(out.map((item) => item.id))
   for (const id of uniqueIds(shot.referenceAssetIds ?? [])) {
-    if (!id || used.has(id) || omitted.has(id) || id === shot.imageAssetId) continue
+    if (!id || used.has(id) || omitted.has(id)) continue
+    if (id === shot.imageAssetId || id === shot.boardAssetId) continue
     used.add(id)
     out.push({
       id,

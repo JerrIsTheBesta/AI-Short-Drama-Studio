@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useToastStore } from '@/stores'
 import { runCanvasNode } from '@/services/canvas/runner'
+import { applyShotVideoModel } from '@/services/canvas/videoModel'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import { cssAspectRatio } from '@/services/canvas/layout'
@@ -27,9 +28,7 @@ import {
   normalizeVideoGenModel,
   normalizeVideoResolution,
   videoAllows1080p,
-  videoDurationOptions,
-  videoMaxSeconds,
-  videoMinSeconds
+  videoDurationOptions
 } from '@/types'
 
 const props = defineProps<{
@@ -110,15 +109,7 @@ const lastFrameId = computed({
 })
 const videoModel = computed({
   get: () => normalizeVideoGenModel(node.value?.data.videoModel),
-  set: (v: VideoGenModel) => {
-    const min = videoMinSeconds(v)
-    const max = videoMaxSeconds(v)
-    project.patchCanvasNode(props.id, {
-      videoModel: v,
-      duration: Math.min(max, Math.max(min, duration.value)),
-      videoResolution: normalizeVideoResolution(node.value?.data.videoResolution, v)
-    })
-  }
+  set: (v: VideoGenModel) => applyShotVideoModel(props.id, v)
 })
 const videoResolution = computed({
   get: () => normalizeVideoResolution(node.value?.data.videoResolution, videoModel.value),

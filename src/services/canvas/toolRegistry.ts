@@ -1,6 +1,6 @@
 import { useProjectStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
-import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { topicFromBrief } from '@/utils/storyBrief'
 import { controlledSignal, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
@@ -129,10 +129,8 @@ function counts() {
       (p?.subjects ?? []).filter((s) => !s.propSheetAssetId).length
       + (p?.scenes ?? []).filter((s) => !s.propSheetAssetId).length,
     scenes: (p?.scenes ?? []).filter((s) => !s.plateAssetId).length,
-    boards: videoRequiresStoryboard(p)
-      ? (p?.shots ?? []).filter((s) => !s.boardAssetId).length
-      : (p?.shots ?? []).filter((s) => !s.imageAssetId).length,
-    images: (p?.shots ?? []).filter((s) => !s.imageAssetId).length,
+    boards: p ? shotsMissingStoryboard(p).length + shotsMissingKeyframe(p).length : 0,
+    images: p ? shotsMissingKeyframe(p).length : 0,
     videos: (p?.shots ?? []).filter((s) => !s.videoAssetId).length,
     audio: (p?.shots ?? []).filter((s) => needsExternalTts(s, p) && !s.audioAssetId).length
   }
@@ -166,24 +164,18 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     const shot = shotFor(action)
     if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
     if (shot.imageAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
-    if (videoRequiresStoryboard(project) && !shot.boardAssetId) {
-      return {
-        state: 'repair',
-        detail: `第 ${shot.index + 1} 镜缺少故事看板，先补看板`,
-        actions: [{ tool: 'generate_shot_board', shotId: shot.id }]
-      }
+    if (stillModeForShot(shot, project) !== 'keyframe') {
+      return { state: 'skip', detail: `第 ${shot.index + 1} 镜当前视频模型不需要分镜关键帧` }
     }
-    if (!videoRequiresStoryboard(project)) {
-      const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
-      const missingSubjects = (project.subjects ?? []).filter(
-        (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
-      )
-      const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
-      const repairs: AgentToolAction[] = missingSubjects.map((subject) => ({ tool: 'generate_sheet', subjectId: subject.id }))
-      if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
-      if (repairs.length) {
-        return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少人设或场景，先补齐再出关键帧`, actions: repairs }
-      }
+    const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
+    const missingSubjects = (project.subjects ?? []).filter(
+      (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
+    )
+    const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
+    const repairs: AgentToolAction[] = missingSubjects.map((subject) => ({ tool: 'generate_sheet', subjectId: subject.id }))
+    if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
+    if (repairs.length) {
+      return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少人设或场景，先补齐再出关键帧`, actions: repairs }
     }
   }
 
@@ -193,11 +185,19 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
 
     if (action.tool === 'generate_video') {
       if (shot.videoAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜视频已经存在` }
-      if (videoRequiresStoryboard(project) && !shot.boardAssetId) {
+      const stillMode = stillModeForShot(shot, project)
+      if (stillMode === 'storyboard' && !shot.boardAssetId) {
         return {
           state: 'repair',
           detail: `第 ${shot.index + 1} 镜缺少故事看板，先补看板`,
           actions: [{ tool: 'generate_shot_board', shotId: shot.id }]
+        }
+      }
+      if (stillMode === 'keyframe' && !shot.imageAssetId) {
+        return {
+          state: 'repair',
+          detail: `第 ${shot.index + 1} 镜缺少四宫格关键帧，先补关键帧`,
+          actions: [{ tool: 'generate_shot_image', shotId: shot.id }]
         }
       }
       const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
@@ -218,7 +218,11 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     }
 
     if (action.tool === 'generate_shot_board') {
-      if (!videoRequiresStoryboard(project)) {
+      const stillMode = stillModeForShot(shot, project)
+      if (stillMode === 'identity') {
+        return { state: 'skip', detail: `第 ${shot.index + 1} 镜当前视频模型不需要看板或关键帧` }
+      }
+      if (stillMode === 'keyframe') {
         if (shot.imageAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
       } else if (shot.boardAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜故事看板已经存在` }
       const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
@@ -246,9 +250,9 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
   }
 
   if (action.tool === 'generate_all_boards') {
-    if (!videoRequiresStoryboard(project)) {
-      if (!(project.shots ?? []).some((shot) => !shot.imageAssetId)) return { state: 'skip', detail: '关键帧已经补齐' }
-    } else if (!(project.shots ?? []).some((shot) => !shot.boardAssetId)) return { state: 'skip', detail: '故事看板已经补齐' }
+    if (!shotsMissingStoryboard(project).length && !shotsMissingKeyframe(project).length) {
+      return { state: 'skip', detail: '当前视频模型不需要看板或关键帧，或已经补齐' }
+    }
     const repairs: AgentToolAction[] = []
     if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
     if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
@@ -256,24 +260,22 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
   }
 
   if (action.tool === 'generate_all_images') {
-    if (!(project.shots ?? []).some((shot) => !shot.imageAssetId)) return { state: 'skip', detail: '关键帧已经补齐' }
-    if (videoRequiresStoryboard(project) && (project.shots ?? []).some((shot) => !shot.boardAssetId)) {
+    if (!shotsMissingKeyframe(project).length) return { state: 'skip', detail: '当前不需要分镜关键帧，或已经补齐' }
+    if (shotsMissingStoryboard(project).length) {
       return { state: 'repair', detail: '批量配图缺少故事看板，先补看板', actions: [{ tool: 'generate_all_boards' }] }
     }
-    if (!videoRequiresStoryboard(project)) {
-      const repairs: AgentToolAction[] = []
-      if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
-      if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
-      if (repairs.length) return { state: 'repair', detail: '批量关键帧缺少人设或场景，先补依赖', actions: repairs }
-    }
+    const repairs: AgentToolAction[] = []
+    if ((project.subjects ?? []).some((subject) => !subject.designSheetAssetId)) repairs.push({ tool: 'generate_all_sheets' })
+    if ((project.scenes ?? []).some((scene) => !scene.plateAssetId)) repairs.push({ tool: 'generate_all_scenes' })
+    if (repairs.length) return { state: 'repair', detail: '批量关键帧缺少人设或场景，先补依赖', actions: repairs }
   }
 
   if (action.tool === 'generate_all_videos') {
     if (!(project.shots ?? []).some((shot) => !shot.videoAssetId)) return { state: 'skip', detail: '分镜视频已经补齐' }
-    if (!videoRequiresStoryboard(project) && (project.shots ?? []).some((shot) => !shot.imageAssetId)) {
+    if (shotsMissingKeyframe(project).length) {
       return { state: 'repair', detail: '批量视频缺少关键帧，先补事件画面', actions: [{ tool: 'generate_all_images' }] }
     }
-    if (videoRequiresStoryboard(project) && (project.shots ?? []).some((shot) => !shot.boardAssetId)) {
+    if (shotsMissingStoryboard(project).length) {
       return { state: 'repair', detail: '批量视频缺少故事看板，先补看板', actions: [{ tool: 'generate_all_boards' }] }
     }
     const repairs: AgentToolAction[] = []
@@ -317,26 +319,23 @@ export function verifyRegisteredTool(raw: unknown): string | null {
       return (project.subjects ?? []).every((item) => item.designSheetAssetId) ? null : '仍有角色四视图缺失'
     case 'generate_all_scenes':
       return (project.scenes ?? []).every((item) => item.plateAssetId) ? null : '仍有场景锚点图缺失'
-    case 'generate_shot_board':
-      return videoRequiresStoryboard(project)
-        ? shot?.boardAssetId
-          ? null
-          : '故事看板没有落库'
-        : shot?.imageAssetId
-          ? null
-          : '关键帧没有落库'
+    case 'generate_shot_board': {
+      if (!shot) return '故事看板没有落库'
+      const mode = stillModeForShot(shot, project)
+      if (mode === 'identity') return null
+      if (mode === 'storyboard') return shot.boardAssetId ? null : '故事看板没有落库'
+      return shot.imageAssetId ? null : '关键帧没有落库'
+    }
     case 'generate_shot_image':
-      return shot?.imageAssetId ? null : '关键帧没有落库'
+      if (!shot) return '关键帧没有落库'
+      if (stillModeForShot(shot, project) !== 'keyframe') return null
+      return shot.imageAssetId ? null : '关键帧没有落库'
     case 'generate_all_boards':
-      return videoRequiresStoryboard(project)
-        ? project.shots.every((item) => item.boardAssetId)
-          ? null
-          : '仍有故事看板缺失'
-        : project.shots.every((item) => item.imageAssetId)
-          ? null
-          : '仍有关键帧缺失'
+      return shotsMissingStoryboard(project).length || shotsMissingKeyframe(project).length
+        ? '仍有看板或关键帧缺失'
+        : null
     case 'generate_all_images':
-      return project.shots.every((item) => item.imageAssetId) ? null : '仍有关键帧缺失'
+      return shotsMissingKeyframe(project).length ? '仍有关键帧缺失' : null
     case 'generate_video':
       return shot?.videoAssetId ? null : '分镜视频没有落库'
     case 'generate_all_videos':
@@ -557,12 +556,13 @@ const definitions: ToolDefinition[] = [
     name: 'generate_shot_board', phase: 2, timeoutMs: 240_000, required: ['shotId'], estimate: oneImage,
     async execute(action, ctx) {
       const project = useProjectStore().current
-      const nodeId = videoRequiresStoryboard(project)
-        ? `shotBoard:${action.shotId}`
-        : `shotImage:${action.shotId}`
+      const shot = project?.shots.find((item) => item.id === action.shotId)
+      const mode = shot && project ? stillModeForShot(shot, project) : 'identity'
+      if (mode === 'identity') return '当前视频模型不需要看板或关键帧'
+      const nodeId = mode === 'storyboard' ? `shotBoard:${action.shotId}` : `shotImage:${action.shotId}`
       await runCanvasNode(nodeId, progress(ctx), ctx.signal)
       revealCanvas(nodeId)
-      return videoRequiresStoryboard(project) ? '故事看板完成' : '关键帧完成'
+      return mode === 'storyboard' ? '故事看板完成' : '关键帧完成'
     }
   },
   {
@@ -570,7 +570,7 @@ const definitions: ToolDefinition[] = [
     estimate: () => ({ calls: counts().boards, seconds: counts().boards * 45 }),
     async execute(_action, ctx) {
       const project = useProjectStore().current
-      if (videoRequiresStoryboard(project)) {
+      if (project && shotsMissingStoryboard(project).length) {
         await generateMissingBoards(ctx.onLog, ctx.signal)
         return '故事看板已补齐'
       }

@@ -21,8 +21,15 @@ export function isLegacyVideoConfig(value: string): boolean {
 
 export function migrateVideoBaseUrl(url: string): string {
   const raw = (url || '').trim().replace(/\/+$/, '')
-  if (!raw || isLegacyVideoConfig(raw)) return VIDEO_AUTODL_ROOT
-  return raw
+  if (!raw || isLegacyVideoConfig(raw) || /minimaxi\.com/i.test(raw)) return VIDEO_AUTODL_ROOT
+  try {
+    const u = new URL(raw.includes('://') ? raw : `https://${raw}`)
+    u.pathname = u.pathname.replace(/\/api\/v1(?:\/comfyui)?\/?$/i, '') || '/'
+    const path = u.pathname.replace(/\/+$/, '')
+    return `${u.protocol}//${u.host}${path === '/' ? '' : path}`
+  } catch {
+    return raw.replace(/\/api\/v1(?:\/comfyui)?$/i, '') || VIDEO_AUTODL_ROOT
+  }
 }
 
 export function migrateVideoWorkflowId(id: string): string {
@@ -72,7 +79,7 @@ export function envDefaults() {
       voice: envStr('VITE_TTS_VOICE', 'longanhuan_v3.6')
     },
     video: {
-      baseUrl: migrateVideoBaseUrl(envStr('VITE_VIDEO_BASE_URL', 'https://api.minimaxi.com/v1')),
+      baseUrl: migrateVideoBaseUrl(envStr('VITE_VIDEO_BASE_URL', VIDEO_AUTODL_ROOT)),
       apiKey: envStr('VITE_VIDEO_API_KEY'),
       workflowId: migrateVideoWorkflowId(envStr('VITE_VIDEO_WORKFLOW_ID', 'MiniMax-Hailuo-2.3'))
     },

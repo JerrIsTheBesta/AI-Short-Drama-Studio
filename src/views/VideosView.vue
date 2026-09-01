@@ -17,7 +17,8 @@ import {
   DIGITAL_HUMAN_IMAGE_ASSIGNMENT
 } from '@/services/ai'
 import { collectShotVideoEntries, packVideoRefEntries, sceneForShot, subjectsForShot } from '@/utils/consistency'
-import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeForShot, shotMissingStill } from '@/utils/videoStill'
+import { applyShotVideoModel } from '@/services/canvas/videoModel'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { generateShotVideo, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
@@ -88,10 +89,15 @@ const videoPromptPlaceholder = computed(() =>
     : '画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
 )
 
-const shotsWithoutBoard = computed(() =>
-  isDigitalHuman.value || !videoRequiresStoryboard(project.current)
+const shotsWithoutStill = computed(() =>
+  isDigitalHuman.value
     ? []
-    : shots.value.filter((s) => normalizeH3GenMode(s.h3GenMode) !== 'fl2va' && !s.boardAssetId)
+    : shots.value.filter(
+        (s) =>
+          project.current &&
+          normalizeH3GenMode(s.h3GenMode) !== 'fl2va' &&
+          shotMissingStill(s, project.current)
+      )
 )
 
 function shotH3Mode(shot: Shot): H3VideoGenMode {
@@ -119,15 +125,7 @@ function shotVideoResolution(shot: Shot): VideoResolution {
 function setShotVideoModel(shot: Shot, model: VideoGenModel) {
   const id = shotVideoNodeId(shot)
   if (!id) return
-  const min = videoMinSeconds(model)
-  const max = videoMaxSeconds(model)
-  project.patchCanvasNode(id, {
-    videoModel: model,
-    videoResolution: normalizeVideoResolution(shotVideoResolution(shot), model)
-  })
-  project.updateShot(shot.id, {
-    duration: Math.min(max, Math.max(min, Math.round(shot.duration || min)))
-  })
+  applyShotVideoModel(id, model)
 }
 
 function setShotVideoResolution(shot: Shot, resolution: VideoResolution) {
@@ -360,8 +358,8 @@ function next() {
       </div>
     </header>
 
-    <GlassCard v-if="shotsWithoutBoard.length > 0" padding="md" class="warn-card">
-      ⚠️ 还有 {{ shotsWithoutBoard.length }} 个分镜没有故事看板。参考图生成需要角色设计图、场景图和本镜看板；首尾帧模式只需要首帧和尾帧。
+    <GlassCard v-if="shotsWithoutStill.length > 0" padding="md" class="warn-card">
+      ⚠️ 还有 {{ shotsWithoutStill.length }} 个分镜缺当前模型需要的参考图。H3 只需要人设和场景；万相需要四宫格关键帧。
     </GlassCard>
 
     <EmptyState
@@ -384,7 +382,16 @@ function next() {
           <Tag v-if="shot.videoAssetId" type="success" size="sm">已完成</Tag>
           <Tag v-else-if="generating.has(shot.id)" type="warning" size="sm">生成中</Tag>
           <Tag v-else-if="shotH3Mode(shot) === 'fl2va' && !shot.lastFrameAssetId" type="error" size="sm">缺尾帧</Tag>
-          <Tag v-else-if="shotH3Mode(shot) !== 'fl2va' && videoRequiresStoryboard(project.current) && !shot.boardAssetId" type="error" size="sm">缺看板</Tag>
+          <Tag
+            v-else-if="shotH3Mode(shot) !== 'fl2va' && project.current && stillModeForShot(shot, project.current) === 'storyboard' && !shot.boardAssetId"
+            type="error"
+            size="sm"
+          >缺看板</Tag>
+          <Tag
+            v-else-if="shotH3Mode(shot) !== 'fl2va' && project.current && stillModeForShot(shot, project.current) === 'keyframe' && !shot.imageAssetId"
+            type="error"
+            size="sm"
+          >缺关键帧</Tag>
           <Tag v-else size="sm">待生成</Tag>
         </div>
 

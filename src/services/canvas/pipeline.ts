@@ -1,7 +1,7 @@
 import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
-import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 
 export interface PipelineStep {
   id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'videos' | 'audio'
@@ -86,7 +86,8 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-scenes'
     }
   }
-  if (videoRequiresStoryboard(p) && p.shots.some((s) => !s.boardAssetId)) {
+  const missingBoards = shotsMissingStoryboard(p)
+  if (missingBoards.length) {
     return {
       id: 'panels',
       label: '故事看板图',
@@ -94,7 +95,8 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       focusNodeId: 'group-shots'
     }
   }
-  if (!videoRequiresStoryboard(p) && p.shots.some((s) => !s.imageAssetId)) {
+  const missingKeyframes = shotsMissingKeyframe(p)
+  if (missingKeyframes.length) {
     return {
       id: 'images',
       label: '分镜关键帧',
@@ -108,14 +110,6 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       label: '分镜视频',
       tools: [{ tool: 'generate_all_videos' }],
       focusNodeId: 'group-videos'
-    }
-  }
-  if (videoRequiresStoryboard(p) && p.shots.some((s) => !s.imageAssetId)) {
-    return {
-      id: 'images',
-      label: '分镜配图',
-      tools: [{ tool: 'generate_all_images' }],
-      focusNodeId: 'group-shots'
     }
   }
   if (p.shots.some((s) => needsExternalTts(s, p) && !s.audioAssetId)) {

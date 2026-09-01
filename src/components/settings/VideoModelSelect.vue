@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { normalizeVideoGenModel, type VideoGenModel } from '@/types'
+import { normalizeVideoGenModel, stillModeForVideoModel, type VideoGenModel } from '@/types'
 import { useSettingsStore } from '@/stores'
 
 const props = withDefaults(
@@ -37,13 +37,15 @@ function onChange(event: Event) {
     <select :value="value" @change="onChange">
       <optgroup v-if="settings.config.videos.length" label="已配置的视频接入">
         <option v-for="p in settings.config.videos" :key="p.id" :value="p.id">
-          {{ p.name }}
+          {{ p.name }}{{ stillModeForVideoModel('h3', p) === 'keyframe' ? ' · 关键帧' : stillModeForVideoModel('h3', p) === 'storyboard' ? ' · 看板' : '' }}
         </option>
       </optgroup>
-      <optgroup label="内置">
-        <option value="h3">H3 v5 · 15秒</option>
-        <option value="h3-v5">H3 v5 · 10秒 1080p</option>
-        <option value="wan-prime">万相 3.0 Prime</option>
+      <optgroup label="工作流（用设置里的 AutoDL 令牌）">
+        <option value="h3">
+          H3 v5 · 15秒{{ stillModeForVideoModel('h3', settings.config.video) === 'keyframe' ? '（需关键帧）' : stillModeForVideoModel('h3', settings.config.video) === 'storyboard' ? '（需看板）' : '（人设+场景）' }}
+        </option>
+        <option value="h3-v5">H3 v5 · 10秒 1080p（人设+场景）</option>
+        <option value="wan-prime">万相 3.0 Prime（需关键帧）</option>
       </optgroup>
     </select>
   </label>

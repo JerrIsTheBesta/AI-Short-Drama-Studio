@@ -39,6 +39,7 @@ import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime
 import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 import {
   extractPlayDirectives,
   extractSceneSlice
@@ -564,10 +565,11 @@ async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => voi
     await generateScenePlate(scene, onProgress, signal)
   }
   shot = refreshShot(shot.id)
-  if (videoRequiresStoryboard(project.current) && !shot.boardAssetId) {
+  const stillMode = stillModeForShot(shot, project.current)
+  if (stillMode === 'storyboard' && !shot.boardAssetId) {
     onProgress?.('先补本镜故事看板…')
     await generateShotBoard(shot, onProgress, signal)
-  } else if (!videoRequiresStoryboard(project.current) && !shot.imageAssetId) {
+  } else if (stillMode === 'keyframe' && !shot.imageAssetId) {
     onProgress?.('先生成本镜四宫格关键帧…')
     await generateShotImage(shot, onProgress, signal)
   }
@@ -810,23 +812,32 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   }
   shot = await ensureShotVideoRefs(shot, onProgress, signal)
 
+  const stillMode = stillModeForShot(shot, project.current)
   const allEntries = collectShotVideoEntries(shot, project.current)
   let packed = packVideoRefEntries(allEntries)
-  if (!packed.length && shot.imageAssetId) {
+  if (stillMode === 'keyframe' && !packed.some((entry) => entry.kind === 'keyframe') && shot.imageAssetId) {
     packed = [
       {
         id: shot.imageAssetId,
         kind: 'keyframe',
         name: 'keyframe',
         label: '2x2 four-panel keyframe for [Shot 1]; exactly 4 cells'
-      }
+      },
+      ...packed.filter((entry) => entry.id !== shot.imageAssetId)
     ]
   }
-  if (videoRequiresStoryboard(project.current) && !packed.some((entry) => entry.kind === 'board')) {
+  if (stillMode === 'storyboard' && !packed.some((entry) => entry.kind === 'board')) {
     throw new Error('没有本镜故事看板，无法出视频。看板是这一镜的整体故事架构。')
   }
+  if (stillMode === 'keyframe' && !packed.some((entry) => entry.kind === 'keyframe')) {
+    throw new Error('没有本镜四宫格关键帧，无法出视频。当前模型需要分镜关键帧。')
+  }
   if (!packed.length) {
-    throw new Error('没有参考图，无法出视频。请先做人设、场景、配图，或给这一镜加参考图。')
+    throw new Error(
+      stillMode === 'identity'
+        ? '没有参考图，无法出视频。请先做角色设计图和场景图，或给这一镜加参考图。'
+        : '没有参考图，无法出视频。请先做人设、场景、配图，或给这一镜加参考图。'
+    )
   }
   const blobs: Blob[] = []
   const library = useLibraryStore()
@@ -840,7 +851,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const extraDropped = allEntries.filter((entry) => entry.kind === 'extra').length
     - packed.filter((entry) => entry.kind === 'extra').length
   if (extraChars > 0 || extraDropped > 0) {
-    onProgress?.(`参考图已按最多 9 张打包：角色设计图、场景、故事看板，再加你补充的参考`)
+    onProgress?.(`参考图已按最多 9 张打包：角色设计图、场景${stillMode === 'keyframe' ? '、四宫格关键帧' : stillMode === 'storyboard' ? '、故事看板' : ''}，再加你补充的参考`)
   }
 
   const promptStyle = getVideoPromptStyle()
@@ -1385,7 +1396,7 @@ export async function runExtractStoryboard(
   return run
 }
 
-const GROUP_GEN_TYPES = new Set(['subject', 'scene', 'shotBoard', 'shotImage', 'sceneProps'])
+const GROUP_GEN_TYPES = new Set(['subject', 'scene', 'shotBoard', 'shotImage', 'sceneProps', 'shotVideo'])
 const IMAGE_GEN_CONCURRENCY = 3
 
 export function groupGenerateJobId(groupId: string) {
@@ -1406,7 +1417,8 @@ export async function runGenerateGroup(
   if (
     groupId !== 'group-subjects' &&
     groupId !== 'group-scenes' &&
-    groupId !== 'group-shots'
+    groupId !== 'group-shots' &&
+    groupId !== 'group-videos'
   ) {
     throw new Error('这个分组不能一键生成')
   }
@@ -1422,12 +1434,20 @@ export async function runGenerateGroup(
     ensureNotCancelled(signal)
     const source = onProgress ? 'agent' : 'canvas'
     const noun =
-      groupId === 'group-subjects' ? '人物四视图' : groupId === 'group-scenes' ? '场景锚点图' : '分镜关键帧'
+      groupId === 'group-subjects'
+        ? '人物四视图'
+        : groupId === 'group-scenes'
+          ? '场景锚点图'
+          : groupId === 'group-videos'
+            ? '分镜视频'
+            : '分镜关键帧'
     const activity = trackActivity(groupId, `一键生成${noun}`, source, (msg) => onProgress?.(groupId, msg))
     try {
       activity.progress(`同时生成 ${pending.length} 个节点…`)
-      await mapPool(pending, IMAGE_GEN_CONCURRENCY, (id) =>
-        runCanvasNode(id, (nid, msg) => onProgress?.(nid, msg), signal)
+      await mapPool(
+        pending,
+        groupId === 'group-videos' ? VIDEO_GEN_CONCURRENCY : IMAGE_GEN_CONCURRENCY,
+        (id) => runCanvasNode(id, (nid, msg) => onProgress?.(nid, msg), signal)
       )
       activity.done(`${noun}已全部提交`)
     } catch (e: any) {
@@ -1445,7 +1465,13 @@ export async function runExtractGroup(
   model?: string
 ) {
   const stage: ExtractStage | undefined =
-    groupId === 'group-subjects' ? 'subjects' : groupId === 'group-scenes' ? 'scenes' : groupId === 'group-shots' ? 'shots' : undefined
+    groupId === 'group-subjects'
+      ? 'subjects'
+      : groupId === 'group-scenes'
+        ? 'scenes'
+        : groupId === 'group-shots' || groupId === 'group-videos'
+          ? 'shots'
+          : undefined
   if (!stage) throw new Error('这个分组不能重新提取')
   return withNodeJob(groupId, async () => {
     ensureNotCancelled(signal)
@@ -1893,12 +1919,11 @@ export async function generateMissingPropSheets(onProgress?: (msg: string) => vo
 export async function generateMissingBoards(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
-  if (!videoRequiresStoryboard(p)) {
-    await generateMissingImages(onProgress, signal)
-    return
+  const boardIds = shotsMissingStoryboard(p).map((s) => `shotBoard:${s.id}`)
+  if (boardIds.length) {
+    await mapPool(boardIds, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
   }
-  const ids = p.shots.filter((s) => !s.boardAssetId).map((s) => `shotBoard:${s.id}`)
-  await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
+  await generateMissingImages(onProgress, signal)
 }
 
 export async function generateMissingPlates(onProgress?: (msg: string) => void, signal?: AbortSignal) {
@@ -1911,7 +1936,8 @@ export async function generateMissingPlates(onProgress?: (msg: string) => void, 
 export async function generateMissingImages(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
-  const ids = p.shots.filter((s) => !s.imageAssetId).map((s) => `shotImage:${s.id}`)
+  const ids = shotsMissingKeyframe(p).map((s) => `shotImage:${s.id}`)
+  if (!ids.length) return
   await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }
 

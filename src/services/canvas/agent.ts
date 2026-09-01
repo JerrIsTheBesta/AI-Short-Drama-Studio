@@ -2,7 +2,7 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
-import { videoRequiresStoryboard } from '@/utils/storyboardGate'
+import { shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
@@ -124,9 +124,9 @@ function skillSelectContext(userText: string) {
     hasShots: shots.length > 0,
     missingSheets: subjects.some((s) => !s.designSheetAssetId),
     missingPlates: scenes.some((s) => !s.plateAssetId),
-    missingImages: videoRequiresStoryboard(p)
-      ? shots.some((s) => !s.boardAssetId)
-      : shots.some((s) => !s.imageAssetId),
+    missingImages: Boolean(
+      p && (shotsMissingStoryboard(p).length || shotsMissingKeyframe(p).length)
+    ),
     missingVideos: shots.some((s) => !s.videoAssetId)
   }
 }
@@ -138,19 +138,11 @@ function qaNotes(p: Project): string {
   if (noSheet.length) issues.push(`没人设：${noSheet.map((s) => s.name).join('、')}`)
   const noPlate = (p.scenes ?? []).filter((s) => !s.plateAssetId)
   if (noPlate.length) issues.push(`没底板：${noPlate.map((s) => s.name).join('、')}`)
-  const noImg = videoRequiresStoryboard(p)
-    ? p.shots.filter((s) => !s.boardAssetId)
-    : p.shots.filter((s) => !s.imageAssetId)
-  if (noImg.length) {
-    issues.push(
-      videoRequiresStoryboard(p)
-        ? `${noImg.length} 镜还没故事看板`
-        : `${noImg.length} 镜还没关键帧`
-    )
-  }
-  const noVid = videoRequiresStoryboard(p)
-    ? p.shots.filter((s) => s.boardAssetId && !s.videoAssetId)
-    : p.shots.filter((s) => !s.videoAssetId)
+  const noBoard = shotsMissingStoryboard(p)
+  const noKf = shotsMissingKeyframe(p)
+  if (noBoard.length) issues.push(`${noBoard.length} 镜还没故事看板`)
+  if (noKf.length) issues.push(`${noKf.length} 镜还没关键帧`)
+  const noVid = p.shots.filter((s) => !s.videoAssetId)
   if (noVid.length) issues.push(`${noVid.length} 镜还没视频`)
   const unbound = p.shots.filter((s) => !s.sceneId || !(s.subjectIds && s.subjectIds.length))
   if (unbound.length) issues.push(`${unbound.length} 镜没绑人物或场景`)
@@ -769,10 +761,10 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     if (!actions.some((a) => a.tool === 'generate_all_scenes')) {
       actions.push({ tool: 'generate_all_scenes' })
     }
-    if (!videoRequiresStoryboard(p) && !actions.some((a) => a.tool === 'generate_all_images')) {
+    if (shotsMissingKeyframe(p).length && !actions.some((a) => a.tool === 'generate_all_images')) {
       actions.push({ tool: 'generate_all_images' })
     }
-    if (videoRequiresStoryboard(p) && !actions.some((a) => a.tool === 'generate_all_boards')) {
+    if (shotsMissingStoryboard(p).length && !actions.some((a) => a.tool === 'generate_all_boards')) {
       actions.push({ tool: 'generate_all_boards' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_videos')) {

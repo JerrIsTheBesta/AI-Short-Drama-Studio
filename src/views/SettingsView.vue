@@ -31,12 +31,27 @@ const diag = ref({
   npmmirrorReachable: false
 })
 
+const saving = ref(false)
+
 onMounted(async () => {
   await settings.ensureHydrated()
   storage.value = await estimateStorage()
   await assets.refresh()
   await runDiagnostics()
 })
+
+async function saveSettings() {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await settings.flush()
+    toast.success('配置已保存到本机')
+  } catch (e: any) {
+    toast.error(e?.message || '保存失败，请再试一次')
+  } finally {
+    saving.value = false
+  }
+}
 
 async function openSettingsFolder() {
   if (!isDesktop()) return
@@ -207,7 +222,7 @@ const nav = [
   { id: 'vision' as const, label: '视觉理解', desc: '看图与质检' },
   { id: 'image' as const, label: '图像生成', desc: '人设、场景、看板' },
   { id: 'tts' as const, label: '配音', desc: '后期口播 TTS' },
-  { id: 'video' as const, label: '视频', desc: '图生视频与配乐' },
+  { id: 'video' as const, label: '视频', desc: '图生视频' },
   { id: 'system' as const, label: '系统', desc: '引擎、存储、关于' }
 ]
 
@@ -245,7 +260,7 @@ function navReady(id: SettingsSection) {
       <div class="brand">
         <div>
           <h1>设置</h1>
-          <p>{{ currentNav.desc }}。改完立刻写入本机文件，重启电脑也不会丢。</p>
+          <p>{{ currentNav.desc }}。改完点右下角「保存」，写入本机文件，重启也不会丢。</p>
         </div>
       </div>
     </header>
@@ -279,7 +294,13 @@ function navReady(id: SettingsSection) {
 
       <main class="main">
         <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
-        <StudioSettings v-if="section !== 'agent' && section !== 'system'" :module="section" />
+        <StudioSettings
+          v-if="settings.diskReady && section !== 'agent' && section !== 'system'"
+          :module="section"
+        />
+        <p v-else-if="!settings.diskReady && section !== 'agent' && section !== 'system'" class="loading">
+          正在读取本机配置…
+        </p>
 
         <div v-else-if="section === 'system'" class="sys">
           <section v-if="isDesktop()" class="panel">
@@ -377,6 +398,12 @@ function navReady(id: SettingsSection) {
         </div>
       </main>
     </div>
+    <footer v-if="section !== 'system'" class="save-bar">
+      <span>地址、Key、工作流都可以直接改，改完请点保存。</span>
+      <button type="button" class="save" :disabled="saving || !settings.diskReady" @click="saveSettings">
+        {{ saving ? '保存中…' : '保存' }}
+      </button>
+    </footer>
   </div>
 </template>
 
@@ -493,6 +520,45 @@ function navReady(id: SettingsSection) {
   min-width: 0;
   overflow: auto;
   padding: 24px 28px 40px;
+}
+.loading {
+  margin: 12px 0;
+  font-size: 13px;
+  color: var(--color-text-4);
+}
+.save-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.save-bar span {
+  font-size: 12px;
+  color: var(--color-text-4);
+}
+.save {
+  margin: 0;
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.save:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.save:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 .sys {
   display: grid;
