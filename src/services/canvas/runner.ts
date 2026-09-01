@@ -1862,6 +1862,58 @@ export async function generateFreeformVideo(
   return asset
 }
 
+export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: AbortSignal): Promise<string> {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const p = project.current
+  if (!p) throw new Error('没有打开的项目')
+  const node = p.canvas?.nodes.find((n) => n.id === nodeId)
+  if (!node || node.type !== 'videoGen') throw new Error('找不到图生视频节点')
+  const source = (node.data.prompt || '').trim()
+  if (!source) throw new Error('请先写提示词')
+  const videoModel = normalizeVideoGenModel(node.data.videoModel)
+  if (videoModel === 'wan-prime') throw new Error('万相节点不走 H3 格式，直接改提示词即可')
+  const ids = resolvedCanvasReferenceAssetIds(p, node)
+  const useFl2va = isH3VideoFamily(videoModel) && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
+  const slotEntries = (
+    useFl2va
+      ? [
+          { kind: 'extra' as const, name: 'first frame' },
+          { kind: 'extra' as const, name: 'last frame' }
+        ]
+      : ids.map((_, i) => ({
+          kind: 'extra' as const,
+          name: i === 0 ? 'first frame' : `user reference ${i + 1}`
+        }))
+  )
+  const imageSlots = buildH3ImageSlots(slotEntries)
+  const cueLines = [...extractSpokenFromNotes(source), ...spokenCueLines(source)].filter(
+    (line, i, all) => line && all.indexOf(line) === i
+  )
+  const hasSpeech = cueLines.length > 0 || nodeTextHasSpeech(source)
+  const silent = !hasSpeech && nodeTextForbidsSpeech(source)
+  const compiled = await compileH3OfficialPrompt({
+    prompt: `【节点当前提示词，改写以此为准】\n${source}`,
+    aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
+    voiceover: cueLines.join('\n'),
+    voiceMode: silent || !hasSpeech ? 'none' : 'dialogue',
+    imageAssignments: imageSlots.map((slot) => slot.job),
+    imageSlots,
+    duration: clampVideoDuration(node.data.duration, videoModel, 8),
+    width: p.settings.width,
+    height: p.settings.height,
+    aspectRatio: p.settings.aspectRatio,
+    cameraMovement: 'static',
+    promptStyle: getVideoPromptStyle(),
+    mode: useFl2va ? 'I2VA' : 'R2VA',
+    forceIntegrated: true,
+    signal
+  })
+  project.patchCanvasNode(nodeId, { prompt: compiled })
+  await project.save()
+  return compiled
+}
+
 export async function runCanvasNode(
   nodeId: string,
   onProgress?: RunProgress,

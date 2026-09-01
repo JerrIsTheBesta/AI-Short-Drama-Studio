@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from '@/stores'
 import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
-import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
+import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { applyShotVideoModel } from '@/services/canvas/videoModel'
@@ -596,10 +596,16 @@ async function resetVideoPrompt() {
 
 async function optimizeVideoPrompt() {
   persistShotVideoPrompt()
-  if (!shot.value || optimizingPrompt.value) return
+  if (optimizingPrompt.value) return
   optimizingPrompt.value = true
   try {
-    await optimizeShotVideoPrompt(shot.value)
+    if (props.node?.type === 'videoGen') {
+      await optimizeFreeformVideoPrompt(props.node.id)
+    } else if (shot.value) {
+      await optimizeShotVideoPrompt(shot.value)
+    } else {
+      return
+    }
     toast.success('已按 H3 格式优化提示词')
   } catch (e: any) {
     toast.error(friendlyAiError(e) || '优化失败')
@@ -908,7 +914,27 @@ async function optimizeVideoPrompt() {
         v-else-if="node.type === 'subject' || node.type === 'sceneProps' || node.type === 'scene'"
         v-model:extra-ids="extraRefIds"
       />
-      <div v-else-if="node.type === 'imageGen' || node.type === 'videoGen'" class="insp-refs">
+      <template v-if="node.type === 'videoGen'">
+        <div class="lab-row">
+          <label>实际出视频提示词</label>
+          <button
+            class="link"
+            type="button"
+            :disabled="optimizingPrompt || running || videoModel === 'wan-prime'"
+            @click="optimizeVideoPrompt"
+          >
+            {{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+          </button>
+        </div>
+        <p class="hint">优化按这个框里的原文改写成 H3 格式。只有真正台词进 &lt;d&gt;。</p>
+        <textarea
+          rows="12"
+          :value="node.data.prompt ?? ''"
+          placeholder="写视频提示词，描述动作、镜头和声音。"
+          @input="project.patchCanvasNode(node.id, { prompt: ($event.target as HTMLTextAreaElement).value })"
+        />
+      </template>
+      <div v-if="node.type === 'imageGen' || node.type === 'videoGen'" class="insp-refs">
         <div class="lab-row"><label>参考图</label></div>
         <div v-if="inspectorRefIds.length" class="insp-ref-list">
           <div v-for="id in inspectorRefIds" :key="id" class="insp-ref">

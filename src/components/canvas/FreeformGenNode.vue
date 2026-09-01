@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useToastStore } from '@/stores'
-import { runCanvasNode } from '@/services/canvas/runner'
+import { runCanvasNode, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import { applyShotVideoModel } from '@/services/canvas/videoModel'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
@@ -57,6 +57,7 @@ const pickerMode = ref<'ref' | 'output'>('ref')
 const panelOpen = ref(false)
 const moreOpen = ref(false)
 const busyLabel = ref('')
+const optimizingPrompt = ref(false)
 let mediaSeq = 0
 
 const { updateNodeData } = useVueFlow()
@@ -434,6 +435,24 @@ function copyPrompt() {
   moreOpen.value = false
 }
 
+async function optimizePrompt(ev?: Event) {
+  ev?.stopPropagation()
+  if (!isH3Video.value || optimizingPrompt.value || generating.value) return
+  if (!prompt.value.trim()) {
+    toast.warn('请先写提示词')
+    return
+  }
+  optimizingPrompt.value = true
+  try {
+    await optimizeFreeformVideoPrompt(props.id)
+    toast.success('已按 H3 格式优化提示词')
+  } catch (e: unknown) {
+    toast.error(friendlyAiError(e) || '优化失败')
+  } finally {
+    optimizingPrompt.value = false
+  }
+}
+
 function duplicateSelf() {
   moreOpen.value = false
   durOpen.value = ''
@@ -460,7 +479,7 @@ function removeSelf() {
     <transition name="float-up">
       <div v-if="selected && panelOpen" class="toolbar-wrap nodrag nowheel" @mousedown.stop @click.stop>
         <div class="toolbar">
-          <button type="button" :disabled="generating" @click="generate">
+          <button type="button" :disabled="generating || optimizingPrompt" @click="generate">
             <span>↺</span>{{ genLabel }}
           </button>
           <button type="button" :disabled="generating" title="选用已有资源，不重新生成" @click="openOutputPicker">
@@ -585,6 +604,16 @@ function removeSelf() {
           <button type="button" class="add nodrag" title="上传参考图" @click="uploadRefs">＋</button>
           <button type="button" class="add nodrag" title="从本页或资产库选择参考图" @click="openRefPicker">库</button>
         </div>
+        <div v-if="isH3Video" class="prompt-tools">
+          <button
+            type="button"
+            class="opt"
+            :disabled="generating || optimizingPrompt"
+            @click="optimizePrompt"
+          >
+            {{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+          </button>
+        </div>
         <textarea
           v-model="prompt"
           rows="6"
@@ -592,7 +621,7 @@ function removeSelf() {
             isVideo
               ? videoModel === 'wan-prime'
                 ? '写视频提示词。多张参考图时可用图1、图2指代人物/场景…'
-                : '写视频提示词，描述动作、镜头和声音…'
+                : '写视频提示词，描述动作、镜头和声音。点「优化提示词」会编成 H3 格式。'
               : '写提示词，可加参考图做图生图…'
           "
         />
@@ -622,7 +651,7 @@ function removeSelf() {
               </button>
             </div>
           </div>
-          <button class="go" type="button" :disabled="generating" :title="genLabel" @click="generate">↑</button>
+          <button class="go" type="button" :disabled="generating || optimizingPrompt" :title="genLabel" @click="generate">↑</button>
         </div>
       </div>
     </transition>
@@ -955,6 +984,25 @@ function removeSelf() {
   font-size: 13px;
   line-height: 1.55;
   font-family: inherit;
+}
+.prompt-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.opt {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.opt:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .prompt-foot {
   display: flex;
