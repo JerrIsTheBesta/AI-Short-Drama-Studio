@@ -628,9 +628,30 @@ async function generateShotWorkBatch(
   batch: ShotWorkBatch,
   subjectNames: string[],
   sceneNames: string[],
-  directives: string
+  directives: string,
+  retry = false
 ): Promise<{ shots: Record<string, unknown>[]; model?: string }> {
-  const ask = async (retry = false) =>
+  const parseBatch = (content: string): Record<string, unknown>[] => {
+    try {
+      const raw = parseJsonRobust(content)
+      const rows = Array.isArray(raw?.shots)
+        ? raw.shots
+        : Array.isArray(raw)
+          ? raw
+          : []
+      if (rows.length) {
+        return rows
+          .slice(0, SHOTS_PER_BATCH)
+          .filter((item: unknown) => item && typeof item === 'object') as Record<string, unknown>[]
+      }
+    } catch {
+      /* 兼容普通聊天模型返回的自然语言分镜表。 */
+    }
+    return parseOutlineText(content)
+      .slice(0, SHOTS_PER_BATCH)
+      .map((outline) => outlineToRawShot(outline))
+  }
+  const ask = async () =>
     callLLM({
       messages: [
         {
@@ -639,9 +660,9 @@ async function generateShotWorkBatch(
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
 忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
-visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频描述，写清起幅 → 触发 → 动作与反应 → 运镜 → 落幅，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要写秒表式模板，不要输出否定词清单。
-每镜要写清景别、站位、视线、道具、与相邻镜头的承接。人物看场景内的人或物，不看镜头。
-只输出合法 JSON：{"shots":[{"title":"3-8字","purpose":"本镜戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字连续动态镜头","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","speakerHint":"声线情绪或空字符串","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名","blocking":"人物空间关系","eyeline":"每个人看谁或看什么","continuity":"承接前态 → 本镜变化 → 留下末态","propFocus":"关键道具或无"}]}。shots 数组只能有 1–${SHOTS_PER_BATCH} 项。${retry ? '上一轮无有效 shots；这次立即给 JSON，不要解释。' : ''}`
+visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频描述，写清起幅 → 触发 → 动作与反应 → 运镜 → 落幅，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要写秒表式模板。
+每镜要写清景别和人物空间关系。人物看场景内的人或物，不看镜头。
+优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"120-360字连续动态镜头","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${SHOTS_PER_BATCH} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
         },
         {
           role: 'user',
@@ -658,41 +679,36 @@ ${batch.nextHint ? `\n下一工作包开头（只用于留下末态，不要提�
       ],
       model,
       temperature: retry ? 0.1 : 0.35,
-      jsonMode: true,
-      maxTokens: 4200,
+      // 不强制 response_format：部分兼容接口在并发 JSON 约束下会一直推理到超时。
+      // 提示仍优先要 JSON，同时下方解析器接受普通分镜文本。
+      jsonMode: false,
+      maxTokens: 3200,
       signal: input.signal,
-      timeoutMs: SHOT_OUTLINE_TIMEOUT_MS
+      timeoutMs: retry ? FILM_SHOT_OUTLINE_TIMEOUT_MS : 90_000
     })
-
-  let lastError: unknown
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const response = await ask(attempt > 0)
-      const raw = parseJsonRobust(response.content)
-      const rows = Array.isArray(raw?.shots) ? raw.shots.slice(0, SHOTS_PER_BATCH) : []
-      const shots = rows
-        .filter((item: unknown) => item && typeof item === 'object')
-        .map((item: Record<string, unknown>) => {
-          const text = `${item.title || ''}\n${item.visualPrompt || ''}\n${item.videoPrompt || ''}\n${item.voiceover || ''}`
-          const inferredSubjects = subjectNames.filter((name) => name && text.includes(name))
-          const inferredScene = sceneNames.find((name) => name && text.includes(name))
-          return {
-            ...item,
-            subjectNames: Array.isArray(item.subjectNames) && item.subjectNames.length
-              ? item.subjectNames
-              : inferredSubjects,
-            sceneName: String(item.sceneName || inferredScene || '').trim() || undefined
-          }
-        })
-      if (!shots.length) throw new Error('返回 JSON 中没有有效 shots 数组')
-      return { shots, model: response.model }
-    } catch (error) {
-      if (isAbortError(error) && !isTimeoutAbort(error)) throw error
-      lastError = error
-      log(`⚠ 分镜工作包 ${batch.index + 1} 第 ${attempt + 1} 次失败：${(error as Error).message.split('\n')[0]}`)
-    }
+  try {
+    const response = await ask()
+    const rows = parseBatch(response.content)
+    const shots = rows.map((item: Record<string, unknown>) => {
+      const text = `${item.title || ''}\n${item.visualPrompt || ''}\n${item.videoPrompt || ''}\n${item.voiceover || ''}`
+      const inferredSubjects = subjectNames.filter((name) => name && text.includes(name))
+      const inferredScene = sceneNames.find((name) => name && text.includes(name))
+      return {
+        ...item,
+        subjectNames:
+          Array.isArray(item.subjectNames) && item.subjectNames.length
+            ? item.subjectNames
+            : inferredSubjects,
+        sceneName: String(item.sceneName || inferredScene || '').trim() || undefined
+      }
+    })
+    if (!shots.length) throw new Error('模型回复中没有可解析的分镜')
+    return { shots, model: response.model }
+  } catch (error) {
+    if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+    log(`⚠ 分镜工作包 ${batch.index + 1}${retry ? '单路重试' : '并发首轮'}失败：${(error as Error).message.split('\n')[0]}`)
+    throw error
   }
-  throw lastError instanceof Error ? lastError : new Error('分镜工作包生成失败')
 }
 
 function asShotOutlineList(raw: unknown): ShotOutline[] {
@@ -1297,6 +1313,30 @@ ${extractPlayForSceneStage(play)}`
         { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
       )
     }
+    const landFinishedBatch = async (
+      index: number,
+      result: { shots: Record<string, unknown>[]; model?: string }
+    ) => {
+      batchShots[index] = result.shots
+      batchModels[index] = result.model
+      completed++
+      while (batchShots[persistedPrefix]) persistedPrefix++
+      if (persistedPrefix > 0 && index < persistedPrefix) {
+        const partial = normalizedFromFinishedBatches(true)
+        const completedSnapshot = completed
+        onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成，按剧本顺序累计 ${partial.shots.length} 镜，正在写入画布…`)
+        persistQueue = persistQueue.then(() =>
+          input.onExtractStage?.('shots', partial, {
+            partial: true,
+            completed: completedSnapshot,
+            total: workBatches.length
+          })
+        )
+        await persistQueue
+      } else {
+        onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成；等待前一段后按镜号写入`)
+      }
+    }
 
     await mapLimit(
       workBatches,
@@ -1311,25 +1351,7 @@ ${extractPlayForSceneStage(play)}`
             sceneNames,
             directives
           )
-          batchShots[index] = result.shots
-          batchModels[index] = result.model
-          completed++
-          while (batchShots[persistedPrefix]) persistedPrefix++
-          if (persistedPrefix > 0 && index < persistedPrefix) {
-            const partial = normalizedFromFinishedBatches(true)
-            const completedSnapshot = completed
-            onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成，按剧本顺序累计 ${partial.shots.length} 镜，正在写入画布…`)
-            persistQueue = persistQueue.then(() =>
-              input.onExtractStage?.('shots', partial, {
-                partial: true,
-                completed: completedSnapshot,
-                total: workBatches.length
-              })
-            )
-            await persistQueue
-          } else {
-            onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成；等待前一段后按镜号写入`)
-          }
+          await landFinishedBatch(index, result)
         } catch (error) {
           if (isAbortError(error) && !isTimeoutAbort(error)) throw error
           failed.push({
@@ -1337,12 +1359,43 @@ ${extractPlayForSceneStage(play)}`
             label: batch.label,
             error: (error as Error).message.split('\n')[0]
           })
-          onProgress?.(`⚠ ${batch.label} 两次失败；其他小组继续，已完成镜头不会丢失`)
+          onProgress?.(`⚠ ${batch.label} 并发首轮未完成；其他小组继续`)
         }
       },
       input.signal
     )
     await persistQueue
+
+    if (failed.length) {
+      const retryRows = [...failed].sort((a, b) => a.index - b.index)
+      failed.length = 0
+      onProgress?.(`有 ${retryRows.length} 个小组未完成，已自动降为单路逐个重试，避免接口并发限流…`)
+      for (const item of retryRows) {
+        throwIfAborted(input.signal)
+        const batch = workBatches[item.index]
+        try {
+          const result = await generateShotWorkBatch(
+            input,
+            parallelModel,
+            batch,
+            subjectNames,
+            sceneNames,
+            directives,
+            true
+          )
+          await landFinishedBatch(item.index, result)
+        } catch (error) {
+          if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+          failed.push({
+            index: item.index,
+            label: item.label,
+            error: (error as Error).message.split('\n')[0]
+          })
+          onProgress?.(`⚠ ${item.label} 单路重试仍失败；继续处理下一包`)
+        }
+      }
+      await persistQueue
+    }
 
     let rawShots = batchShots.flatMap((rows) => rows || [])
     if (!rawShots.length) {

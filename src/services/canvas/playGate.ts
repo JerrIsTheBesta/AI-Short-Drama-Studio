@@ -28,12 +28,6 @@ export function isApprovePlayRequest(text: string) {
 }
 
 export const DOWNSTREAM_TOOLS = new Set([
-  'generate_sheet',
-  'generate_all_sheets',
-  'generate_all_prop_sheets',
-  'generate_prop_sheet',
-  'generate_scene',
-  'generate_all_scenes',
   'generate_shot_board',
   'generate_all_boards',
   'generate_shot_image',

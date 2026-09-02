@@ -374,6 +374,22 @@ const definitions: ToolDefinition[] = [
       const cur = project.current
       if (!cur) throw new Error('请先创建项目')
       const text = String(action.text || '').trim()
+      const hasFullPlay = Boolean(
+        cur.script?.playReady &&
+        (
+          /^#{1,4}\s+/m.test(cur.script.content || '') ||
+          (cur.script.content || '').length >= 500 ||
+          (cur.subjects ?? []).length ||
+          (cur.scenes ?? []).length ||
+          (cur.shots ?? []).length
+        )
+      )
+      const explicitReplace =
+        /重新写(?:完整)?剧本|重写(?:完整)?剧本|换(?:一个|成).{0,12}(?:故事|剧本)|新故事|新剧本|从头(?:写|开始)/.test(text)
+      if (hasFullPlay && !explicitReplace) {
+        ctx.onLog('已有完整剧本；已阻止用当前聊天短句覆盖正文')
+        return '保留已有完整剧本。人物反馈或局部修改不会再清空正文。'
+      }
       const topic = topicFromBrief(text) || cur.name
       const inferred = inferVisualStyleFromText(text)
       const style = inferred || cur.script?.style || 'cinematic'

@@ -97,7 +97,10 @@ async function reextract(ev: Event) {
 async function generateAll(ev: Event) {
   ev.stopPropagation()
   if (busy.value || !generatable.value || !hasItems.value) return
-  if (!isPlayApproved(project.current)) {
+  if (
+    (props.data.kind === 'shot' || props.data.kind === 'video') &&
+    !isPlayApproved(project.current)
+  ) {
     toast.warn(PLAY_GATE_MSG)
     return
   }

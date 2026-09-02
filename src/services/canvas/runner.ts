@@ -53,7 +53,7 @@ import { rebuildCanvasGraph } from './layout'
 import { emitCanvasActivity } from './canvasBridge'
 import { extractStageLabel, extractStageNoun, nextExtractStage, type ExtractStage } from './pipeline'
 import { friendlyAiError } from '@/services/ai/abort'
-import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
+import { lookFromScript, lookFromTexts, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
 import { aspectToSize } from '@/utils/aspect'
 import {
   boardSendPrompt,
@@ -1150,18 +1150,16 @@ export async function runGeneratePlay(
   if (continueMode && !isPlayReady(project.current?.script)) {
     throw new Error('请先写好完整剧本，再续写')
   }
-  if (brief && !continueMode && project.current?.script) {
-    const topic = topicFromBrief(brief) || project.current.script.topic
-    const inferred = inferVisualStyleFromText(brief)
-    project.current.name = topic
-    project.setScript({
-      ...project.current.script,
-      topic,
-      content: brief,
-      playReady: false,
-      ...(inferred ? { style: inferred } : {})
-    })
-  }
+  // brief 只是本次生成输入。模型失败前绝不能先把已有完整剧本覆盖成一句聊天消息。
+  const requestTopic =
+    brief && !continueMode
+      ? topicFromBrief(brief) || project.current?.script?.topic || project.current?.name || ''
+      : project.current?.script?.topic || project.current?.name || ''
+  const requestContent = brief && !continueMode ? brief : project.current?.script?.content || ''
+  const requestStyle =
+    (brief && !continueMode ? inferVisualStyleFromText(brief) : undefined) ||
+    project.current?.script?.style ||
+    'cinematic'
   if (
     !continueMode &&
     project.current?.pipelineMode === 'remake' &&
@@ -1182,7 +1180,12 @@ export async function runGeneratePlay(
       /* skip */
     }
   }
-  const look = lookFromScript(project.current.script)
+  const look = lookFromTexts(
+    requestStyle,
+    requestTopic,
+    requestContent,
+    project.current.script.keywords
+  )
   if (look.matched && look.matched !== project.current.script.style) {
     onProgress?.(`已按你的原话锁定画风：${styleLabel(look.matched)}`)
     project.setScript({ ...project.current.script, style: look.matched })
@@ -1193,8 +1196,8 @@ export async function runGeneratePlay(
   onProgress?.(continueMode ? '续写剧本…' : '写完整剧本…')
   const run = await generatePlay(
     {
-      topic: project.current.script.topic,
-      content: project.current.script.content,
+      topic: requestTopic,
+      content: requestContent,
       style: look.style,
       shotDuration: project.current.script.shotDuration,
       aspectRatio: project.current.settings.aspectRatio,
@@ -1215,7 +1218,7 @@ export async function runGeneratePlay(
   }
   project.setScript({
     ...project.current.script,
-    topic: run.result.topic || project.current.script.topic,
+    topic: run.result.topic || requestTopic || project.current.script.topic,
     content: run.result.playMarkdown,
     playReady: true,
     ...(look.matched ? { style: look.matched } : {}),
@@ -1486,7 +1489,13 @@ export async function runGenerateGroup(
   const project = useProjectStore()
   const p = project.current
   if (!p?.canvas) throw new Error('画布为空')
-  if (!isPlayApproved(p)) throw new Error(PLAY_GATE_MSG)
+  // 人物和场景资产可以在分镜失败前先生成；验收只拦截镜头/视频下游。
+  if (
+    (groupId === 'group-shots' || groupId === 'group-videos') &&
+    !isPlayApproved(p)
+  ) {
+    throw new Error(PLAY_GATE_MSG)
+  }
   const ids = groupChildNodeIds(groupId)
   if (!ids.length) throw new Error('这一组还没有可生成的节点')
   const pending = ids.filter((id) => !isNodeRunning(id))
@@ -1930,6 +1939,9 @@ export async function runCanvasNode(
       node.type !== 'final' &&
       node.type !== 'imageGen' &&
       node.type !== 'videoGen' &&
+      node.type !== 'subject' &&
+      node.type !== 'scene' &&
+      node.type !== 'sceneProps' &&
       !isPlayApproved(p)
     ) {
       throw new Error(PLAY_GATE_MSG)
