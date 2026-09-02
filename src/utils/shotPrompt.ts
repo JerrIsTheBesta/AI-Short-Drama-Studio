@@ -48,13 +48,17 @@ export function formatBeatRangeEn(start: number, end: number): string {
 }
 
 /** 编辑器里仍写中文内容表现；选 H3 出片时再编译成官方 Ref2VA / I2VA。用户若已粘贴官方英文全文，原样使用。 */
-export const SCENE_NARRATIVE_SPEC = `用导演给演员说戏的口吻，连续写这一镜里到底发生了什么。中文 80–320 字。只写本镜，不要把上一镜或下一镜的剧情演进来。
+export const SCENE_NARRATIVE_SPEC = `用导演给演员和摄影说戏的口吻，写这一镜最终会怎样动起来。中文 220–650 字。只写本镜，不要把上一镜或下一镜的剧情演进来。
 
 先写清楚开场站位：画面里每一个出场的人各写一句——在近处还是后面、身体朝哪、眼睛看谁或看什么。说话的人可以在后面或侧面，前面的人必须侧对或回头看他、或看他指的东西。禁止合影式正面排排站、禁止所有人看镜头。人设图是正面身份锁，成片姿势不要抄人设。
 
-再写中间的动作和看见了什么，情绪怎么跟着变，最后停在什么状态。表情必须跟这件事挂钩。运镜一句话。有台词只写口播原词；成年旁白是画外音，画面里的人闭嘴。剧本写了不拍的必须遵守。
+再按因果写清：开场身体状态 → 什么声音/目光/道具触发变化 → 手脚和身体如何完成动作 → 道具与环境产生什么可见结果 → 最后停在什么状态。必须使用本镜真实道具和空间细节，不能把动作缩成情绪摘要。表情必须跟正在发生的事挂钩。
 
-人物脸和衣服由参考图负责，这里不要报身份证。不要按秒切段，不要写「0–1.5秒」，不要写「禁止呆脸空眼」「衣摆、光和空气里的东西跟着动」这种套话，也不要只在结尾加一句「人物看向场景里的人或物，不要看镜头」却不写每个人看哪。
+摄影不是另贴一句“固定/推近”：写明镜头从哪里、什么景别起幅，为什么随某个动作移动或改变焦点，移动中逐步揭示什么，最后落在哪里。动作较多时可按实际节奏写 2–3 个时间段；安静的一镜到底则连续写，不要机械三段式。大场面、走位、揭示与冲击必须允许拉远、跟拍、升降、摇移或切镜，不能一律固定近景。
+
+写出与画面同步的声音节点，以及光、雨、雾、灰尘、火焰、衣料、桌面物件如何被动作影响。有台词只写口播原词；成年旁白是画外音，画面里的人闭嘴。剧本写了不拍的必须遵守。
+
+人物脸和衣服由参考图负责，这里不要报身份证。不要写「禁止呆脸空眼」「衣摆、光和空气里的东西跟着动」这种套话，也不要只在结尾加一句「人物看向场景里的人或物，不要看镜头」却不写每个人看哪。
 
 坏例子：「林遥指着田垄说话。老农和差役在场。人物看向场景里的人或物，不要看镜头。」
 好例子：「近处：老农和差役侧对镜头站在石板路上，不朝向镜头。林遥在他们身后稍远，从跪姿撑起半身，泥手指向田垄。老农回头眯眼打量林遥，差役停步，视线跟着那只手看向田垄。三个人都不看镜头。」`
@@ -67,7 +71,7 @@ export function videoPerformanceSpec(style: VideoPromptStyle = 'scene-narrative'
 }
 
 export function videoPromptJsonHint(_style: VideoPromptStyle = 'scene-narrative'): string {
-  return '<导演口吻。先写每个出场人物：近处还是后面、身体朝哪、眼睛看谁。说话者可以在后；前面的人侧对或回头看他/他指的东西。禁止合影看镜头。再写动作和台词原词。80-320字。>'
+  return '<中文220-650字的可执行镜头。写起幅景别与机位、人物前后站位和视线、触发事件、连续动作与道具结果、由动作驱动的运镜及落幅、同步声音和环境反应。动作多时可分2-3个实际时间段，禁止机械三段模板。>'
 }
 
 /** 写给编剧 / 质检 / 出视频：默认按当前主流的场景叙事 */
@@ -180,7 +184,7 @@ function cameraStoryCn(movement: Shot['cameraMovement']): string {
 
 export function isVideoPerformanceThin(text: string): boolean {
   const t = (text || '').trim()
-  if (t.length < 50) return true
+  if (t.length < 120) return true
   if (isVideoPerformanceTemplate(t)) return true
   return !(BODY_RE.test(t) || FACE_RE.test(t))
 }
@@ -189,7 +193,7 @@ export function videoPerformanceIssue(text: string, names?: string[]): string | 
   const t = (text || '').trim()
   if (!t) return '缺少视频内容表现'
   if (isVideoPerformanceTemplate(t)) return '视频内容表现是套话，没有写出每个人站哪、看谁'
-  if (t.length < 40) return '视频内容表现过短，没写清这一镜发生了什么'
+  if (t.length < 120) return '视频内容表现过短，必须写清触发、连续动作、道具结果、运镜落点和同步声音'
   if (lacksEnsembleBlocking(t, names)) {
     return '多人同框却没写谁在近处、谁在后面、各自看谁，会拍成合影看镜头'
   }

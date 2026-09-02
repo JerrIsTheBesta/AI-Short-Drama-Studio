@@ -12,8 +12,7 @@ import {
   shotKeyframePrompt
 } from '@/services/ai/consistency'
 import { spokenTextOnly } from '@/services/ai/dialogue'
-import { composeH3VideoPrompt, compiledH3PromptNeedsRebuild, sanitizeDTagContents, buildH3ImageSlots, ensurePictureIdentity } from '@/services/ai/h3Prompt'
-import { getVideoPromptStyle } from '@/services/ai/runtime'
+import { buildH3ImageSlots, pictureIdentityBlock } from '@/services/ai/h3Prompt'
 import type { Project, Scene, Shot, Subject } from '@/types'
 import {
   collectShotVideoEntries,
@@ -24,7 +23,6 @@ import {
 } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { lookFromScript } from '@/utils/visualStyle'
-import { resolveH3VoiceMode } from '@/utils/shot'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export function defaultSubjectSheetPrompt(subject: Subject, project: Project): string {
@@ -99,40 +97,33 @@ export function shotDirectorBrief(shot: Shot, project: Project): string {
 export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
   const packed = packVideoRefEntries(collectShotVideoEntries(shot, project))
   const imageSlots = buildH3ImageSlots(packed)
-  const cast = subjectsForShot(shot, project)
-  const scene = sceneForShot(shot, project)
-  const place = resolveShotPlace(shot, scene)
   const spoken = spokenTextOnly(shot.voiceover || '')
-  const onScreenNames = cast.map((item) => item.name)
-  const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
-  return composeH3VideoPrompt({
-    prompt: shotDirectorBrief(shot, project),
-    aesthetic: project.script?.h3Aesthetic || project.script?.aesthetic,
-    audioDescription: shot.audioDescription,
-    voiceover: spoken,
-    voiceMode: spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none',
-    speakerHint: shot.speakerHint,
-    speakerName: visibleSpeaker,
-    onScreenNames,
-    sceneName: place.name,
-    sceneLighting: place.lighting,
-    shotTitle: shot.title,
-    imageAssignments: imageSlots.map((slot) => slot.job),
-    imageSlots,
-    duration: shot.duration,
-    width: project.settings.width,
-    height: project.settings.height,
-    aspectRatio: project.settings.aspectRatio,
-    cameraMovement: shot.cameraMovement,
-    shotSize: shot.shotSize,
-    blocking: shot.blocking,
-    eyeline: shot.eyeline,
-    continuity: shot.continuity,
-    purpose: shot.purpose,
-    promptStyle: getVideoPromptStyle(),
-    mode: 'R2VA',
-    forceIntegrated: true
-  })
+  const roster = pictureIdentityBlock({ prompt: '', imageSlots, duration: shot.duration })
+  const camera: Record<string, string> = {
+    push: '从当前景别随人物注意力缓慢推近，落在动作结果上',
+    pull: '从动作细节缓慢后拉，逐步带出人物关系和完整空间',
+    pan: '顺着人物移动或视线平移，停在新出现的信息上',
+    tilt: '顺着人物抬头、俯身或物体方向俯仰，停在叙事焦点上',
+    orbit: '围绕人物做有明确起点和落点的小幅弧线运动，带出空间层次',
+    static: '机位是否保持不动服从具体动作；发生走位、揭示或环境变化时允许跟随和重新构图'
+  }
+  const visual = String(shot.visualPrompt || '').trim()
+  const performance = String(shot.videoPrompt || '').trim()
+  return [
+    roster,
+    `镜头：${shot.title || `第${shot.index + 1}镜`}`,
+    `景别与运镜：${shot.shotSize || '按动作选择景别'}；${camera[shot.cameraMovement || 'static']}；在 ${shot.duration} 秒内完成并落到清楚的结束状态。`,
+    visual ? `画面与动作依据：${visual}` : '',
+    performance && performance !== visual ? `动态表演依据：${performance}` : '',
+    shot.blocking ? `人物调度：${shot.blocking}` : '',
+    shot.eyeline ? `视线关系：${shot.eyeline}` : '',
+    shot.continuity ? `动作承接：${shot.continuity}` : '',
+    shot.propFocus && shot.propFocus !== '无' ? `关键道具：${shot.propFocus}` : '',
+    shot.audioDescription ? `同步声音：${shot.audioDescription}` : '',
+    spoken ? `原词台词：${shot.voiceover}` : '无对白，不需要人物做说话口型。'
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 export function subjectSendPrompt(subject: Subject, project: Project): string {
@@ -160,22 +151,10 @@ function hasStoredPrompt(value: string | undefined): boolean {
   return value != null
 }
 
-function videoPromptInput(shot: Shot, project: Project) {
-  const packed = packVideoRefEntries(collectShotVideoEntries(shot, project))
-  return {
-    prompt: '',
-    imageSlots: buildH3ImageSlots(packed),
-    duration: shot.duration
-  }
-}
-
 export function videoSendPrompt(shot: Shot, project: Project): string {
-  const stored = (shot.compiledVideoPrompt || '').trim()
-  const input = videoPromptInput(shot, project)
-  if (stored && !compiledH3PromptNeedsRebuild(stored)) {
-    return ensurePictureIdentity(sanitizeDTagContents(stored), input)
-  }
-  return defaultVideoSendPrompt(shot, project)
+  void project
+  // 单一数据源：文本框字段就是接口参数。禁止清洗、补映射、迁移或自动改写。
+  return shot.compiledVideoPrompt ?? ''
 }
 
 export function rebuildGeneratePrompt(
@@ -227,11 +206,6 @@ export function fillEmptyGeneratePrompt(
     if (hasStoredPrompt(shot.imagePrompt)) return null
     return { imagePrompt: defaultShotImagePrompt(shot, project) }
   }
-  const stored = (shot.compiledVideoPrompt || '').trim()
-  if (stored && !compiledH3PromptNeedsRebuild(stored)) {
-    const next = ensurePictureIdentity(sanitizeDTagContents(stored), videoPromptInput(shot, project))
-    if (next !== stored) return { compiledVideoPrompt: next }
-    return null
-  }
-  return { compiledVideoPrompt: defaultVideoSendPrompt(shot, project) }
+  // 视频框永不自动初始化、迁移或回填。只有用户主动点“按分镜重铺”才改它。
+  return null
 }

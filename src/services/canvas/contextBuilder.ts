@@ -2,6 +2,7 @@ import { useProjectStore } from '@/stores'
 import type { Project, Shot } from '@/types'
 import { getAgentState } from './taskStore'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
+import { shotsMissingKeyframe } from '@/utils/videoStill'
 
 function shotContext(shot: Shot) {
   return {
@@ -12,6 +13,7 @@ function shotContext(shot: Shot) {
     visualPrompt: shot.visualPrompt,
     imagePrompt: shot.imagePrompt,
     videoPrompt: shot.videoPrompt,
+    compiledVideoPrompt: shot.compiledVideoPrompt,
     voiceover: shot.voiceover,
     audioMode: effectiveShotAudioMode(shot),
     speakerHint: shot.speakerHint,
@@ -100,9 +102,30 @@ export function buildProjectContext(userText: string) {
         shots: p.shots.length,
         timelineClips: p.timeline.length,
         missingBoards: p.shots.filter((s) => !s.boardAssetId).length,
-        missingImages: 0,
+        missingImages: shotsMissingKeyframe(p).length,
         missingVideos: p.shots.filter((s) => !s.videoAssetId).length,
         missingAudio: p.shots.filter((s) => needsExternalTts(s, p) && !s.audioAssetId).length
+      },
+      canvas: {
+        nodes: (p.canvas?.nodes ?? []).map((node) => ({
+          id: node.id,
+          type: node.type,
+          label: node.data.label,
+          shotId: node.data.shotId,
+          subjectId: node.data.subjectId,
+          sceneId: node.data.sceneId,
+          prompt: node.data.prompt,
+          duration: node.data.duration,
+          aspectRatio: node.data.aspectRatio ?? p.settings.aspectRatio,
+          status: node.status ?? 'idle',
+          hasOutput: Boolean(node.data.outputAssetId),
+          error: node.error
+        })),
+        groups: (p.canvas?.groups ?? []).map((group) => ({
+          id: group.id,
+          label: group.label,
+          nodeIds: group.nodeIds
+        }))
       }
     },
     agent: {

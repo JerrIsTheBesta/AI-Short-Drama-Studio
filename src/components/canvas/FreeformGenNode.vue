@@ -22,7 +22,7 @@ import {
   canvasNodeOutputAssetId,
   resolvedCanvasReferenceAssetIds
 } from '@/services/canvas/references'
-import type { CanvasNodeType, H3VideoGenMode, ID, VideoGenModel, VideoResolution } from '@/types'
+import type { AspectRatio, CanvasNodeType, H3VideoGenMode, ID, VideoGenModel, VideoResolution } from '@/types'
 import {
   normalizeH3GenMode,
   normalizeVideoGenModel,
@@ -41,6 +41,7 @@ const props = defineProps<{
     referenceSourceNodeIds?: string[]
     outputAssetId?: string
     duration?: number
+    aspectRatio?: AspectRatio
     videoModel?: VideoGenModel
     nodeType?: CanvasNodeType
   }
@@ -83,7 +84,11 @@ const generating = computed(() => isNodeRunning(props.id))
 const title = computed(() => node.value?.data.label || (isVideo.value ? '视频' : '图片'))
 const prompt = computed({
   get: () => node.value?.data.prompt ?? '',
-  set: (v: string) => project.patchCanvasNode(props.id, { prompt: v })
+  set: (v: string) => project.setCanvasNodePrompt(props.id, v)
+})
+const aspectRatio = computed({
+  get: () => node.value?.data.aspectRatio ?? project.current?.settings.aspectRatio ?? '16:9',
+  set: (v: AspectRatio) => project.patchCanvasNode(props.id, { aspectRatio: v, outputAssetId: undefined, videoTaskId: undefined })
 })
 const h3GenMode = computed({
   get: () => normalizeH3GenMode(node.value?.data.h3GenMode),
@@ -520,7 +525,7 @@ function removeSelf() {
       </div>
     </transition>
 
-    <div class="media" :style="{ aspectRatio: cssAspectRatio(project.current?.settings.aspectRatio) }">
+    <div class="media" :style="{ aspectRatio: cssAspectRatio(aspectRatio) }">
       <template v-if="isVideo && mediaUrl">
         <img
           v-if="posterUrl"
@@ -625,7 +630,7 @@ function removeSelf() {
               : '写提示词，可加参考图做图生图…'
           "
         />
-        <AspectRatioSeg compact />
+        <AspectRatioSeg v-model="aspectRatio" compact />
         <VideoResolutionSeg
           v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
           v-model="videoResolution"

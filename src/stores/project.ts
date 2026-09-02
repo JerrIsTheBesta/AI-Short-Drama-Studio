@@ -354,6 +354,24 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  /** 视频提示词的唯一写入口：改字即让旧视频任务失效，绝不续跑旧 prompt。 */
+  function setShotVideoPrompt(id: ID, value: string) {
+    if (!current.value) return
+    const idx = current.value.shots.findIndex((s) => s.id === id)
+    if (idx === -1) return
+    const shot = current.value.shots[idx]
+    if ((shot.compiledVideoPrompt ?? '') === value) return
+    current.value.shots[idx] = {
+      ...shot,
+      compiledVideoPrompt: value,
+      videoTaskId: undefined,
+      videoHistoryIds: pushHistory(shot.videoAssetId, '', shot.videoHistoryIds).filter(Boolean),
+      videoAssetId: undefined,
+      status: shot.imageAssetId ? 'image-generated' : 'draft'
+    }
+    touch()
+  }
+
   function assignShotBoard(shotId: ID, assetId: ID) {
     if (!current.value) return
     const shot = current.value.shots.find((s) => s.id === shotId)
@@ -486,9 +504,11 @@ export const useProjectStore = defineStore('project', () => {
     if (from === 'image') {
       patch.imageAssetId = undefined
       patch.videoAssetId = undefined
+      patch.videoTaskId = undefined
       patch.status = 'draft'
     } else if (from === 'video') {
       patch.videoAssetId = undefined
+      patch.videoTaskId = undefined
       patch.status = shot.imageAssetId ? 'image-generated' : 'draft'
     } else {
       patch.audioAssetId = undefined
@@ -522,6 +542,21 @@ export const useProjectStore = defineStore('project', () => {
     const node = current.value?.canvas?.nodes.find((n) => n.id === id)
     if (!node) return
     node.data = { ...node.data, ...data }
+    touch()
+  }
+
+  /** 自由生成节点的 prompt 单一写入口；修改后禁止复用旧任务或旧输出。 */
+  function setCanvasNodePrompt(id: string, prompt: string) {
+    const node = current.value?.canvas?.nodes.find((n) => n.id === id)
+    if (!node || (node.data.prompt ?? '') === prompt) return
+    node.data = {
+      ...node.data,
+      prompt,
+      outputAssetId: undefined,
+      videoTaskId: undefined
+    }
+    node.status = 'idle'
+    node.error = undefined
     touch()
   }
 
@@ -589,8 +624,9 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   function duplicateCanvasNode(id: string): string | null {
-    const canvas = current.value?.canvas
-    if (!canvas) return null
+    const p = current.value
+    const canvas = p?.canvas
+    if (!p || !canvas) return null
     const idx = canvas.nodes.findIndex((n) => n.id === id)
     if (idx < 0) return null
     const src = canvas.nodes[idx]
@@ -610,6 +646,7 @@ export const useProjectStore = defineStore('project', () => {
         referenceAssetIds: [...(src.data.referenceAssetIds ?? [])],
         referenceSourceNodeIds: [...(src.data.referenceSourceNodeIds ?? [])],
         duration: src.data.duration ?? 8,
+        aspectRatio: src.data.aspectRatio ?? p.settings.aspectRatio,
         ...(type === 'videoGen'
           ? {
               videoModel: normalizeVideoGenModel(src.data.videoModel),
@@ -754,6 +791,7 @@ export const useProjectStore = defineStore('project', () => {
     setScenes,
     updateScene,
     updateShot,
+    setShotVideoPrompt,
     setShotAudioMode,
     assignShotBoard,
     assignShotImage,
@@ -772,6 +810,7 @@ export const useProjectStore = defineStore('project', () => {
     patchAgentState,
     setCanvas,
     patchCanvasNode,
+    setCanvasNodePrompt,
     removeCanvasNodeRef,
     assignCanvasNodeAsset,
     addCanvasNode,

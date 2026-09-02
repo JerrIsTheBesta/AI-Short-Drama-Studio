@@ -42,6 +42,9 @@ export type AgentToolName =
   | 'generate_all_audio'
   | 'sync_canvas'
   | 'focus_node'
+  | 'create_image_node'
+  | 'create_video_node'
+  | 'update_node'
   | 'run_node'
 
 export interface AgentToolAction {
@@ -54,6 +57,7 @@ export interface AgentToolAction {
   visualPrompt?: string
   imagePrompt?: string
   videoPrompt?: string
+  compiledVideoPrompt?: string
   voiceover?: string
   duration?: number
   cameraMovement?: 'push' | 'pull' | 'pan' | 'tilt' | 'static' | 'orbit'
@@ -493,7 +497,11 @@ const definitions: ToolDefinition[] = [
       const patch = {
         ...(action.visualPrompt ? { visualPrompt: action.visualPrompt } : {}),
         ...(action.imagePrompt ? { imagePrompt: action.imagePrompt } : {}),
-        ...(action.videoPrompt ? { videoPrompt: action.videoPrompt } : {}),
+        ...(action.videoPrompt
+          ? { videoPrompt: action.videoPrompt, compiledVideoPrompt: action.videoPrompt }
+          : action.compiledVideoPrompt !== undefined
+            ? { compiledVideoPrompt: action.compiledVideoPrompt }
+            : {}),
         ...(action.voiceover !== undefined ? { voiceover: action.voiceover } : {}),
         ...(typeof action.duration === 'number' ? { duration: Math.max(3, Math.min(10, Math.round(action.duration))) } : {}),
         ...(action.cameraMovement ? { cameraMovement: action.cameraMovement } : {})
@@ -502,7 +510,7 @@ const definitions: ToolDefinition[] = [
       project.updateShot(shot.id, patch)
       if (action.visualPrompt) project.updateShot(shot.id, { boardAssetId: undefined })
       if (action.visualPrompt || action.imagePrompt) project.invalidateShotAssets(shot.id, 'image')
-      else if (action.videoPrompt || action.cameraMovement || action.duration) project.invalidateShotAssets(shot.id, 'video')
+      else if (action.videoPrompt || action.compiledVideoPrompt !== undefined || action.cameraMovement || action.duration) project.invalidateShotAssets(shot.id, 'video')
       if (action.voiceover !== undefined) {
         project.invalidateShotAssets(shot.id, 'audio')
         project.invalidateShotAssets(shot.id, 'video')
@@ -625,6 +633,79 @@ const definitions: ToolDefinition[] = [
     async execute(action) { revealCanvas(action.nodeId); return '已定位节点' }
   },
   {
+    name: 'create_image_node', phase: 2, timeoutMs: 5_000, required: ['text'], estimate: noCost,
+    async execute(action) {
+      const project = useProjectStore()
+      const canvas = project.current?.canvas
+      if (!project.current || !canvas) throw new Error('当前项目没有可用画布')
+      const count = canvas.nodes.filter((node) => node.type === 'imageGen').length + 1
+      const right = canvas.nodes.reduce((max, node) => Math.max(max, node.position.x), 0)
+      const id = `imageGen_${Date.now().toString(36)}`
+      project.addCanvasNode({
+        id,
+        type: 'imageGen',
+        position: { x: right + 340, y: 120 + ((count - 1) % 4) * 260 },
+        data: { label: `图片 ${count}`, prompt: action.text, aspectRatio: project.current.settings.aspectRatio },
+        status: 'idle'
+      })
+      await project.save()
+      revealCanvas(id)
+      return `已创建图片节点 ${id}，提示词已写入，可继续 run_node 生成`
+    }
+  },
+  {
+    name: 'create_video_node', phase: 2, timeoutMs: 5_000, required: ['text'], estimate: noCost,
+    async execute(action) {
+      const project = useProjectStore()
+      const canvas = project.current?.canvas
+      if (!project.current || !canvas) throw new Error('当前项目没有可用画布')
+      const count = canvas.nodes.filter((node) => node.type === 'videoGen').length + 1
+      const right = canvas.nodes.reduce((max, node) => Math.max(max, node.position.x), 0)
+      const id = `videoGen_${Date.now().toString(36)}`
+      project.addCanvasNode({
+        id,
+        type: 'videoGen',
+        position: { x: right + 340, y: 140 + ((count - 1) % 4) * 280 },
+        data: {
+          label: `视频 ${count}`,
+          prompt: action.text,
+          aspectRatio: project.current.settings.aspectRatio,
+          duration: Math.max(1, Math.min(15, Math.round(action.duration || 8)))
+        },
+        status: 'idle'
+      })
+      await project.save()
+      revealCanvas(id)
+      return `已创建视频节点 ${id}，动态提示词已写入，可继续 run_node 生成`
+    }
+  },
+  {
+    name: 'update_node', phase: 2, timeoutMs: 5_000, required: ['nodeId'], estimate: noCost,
+    async execute(action) {
+      const project = useProjectStore()
+      const node = project.current?.canvas?.nodes.find((item) => item.id === action.nodeId)
+      if (!node) throw new Error(`找不到画布节点 ${action.nodeId}`)
+      if (node.type !== 'imageGen' && node.type !== 'videoGen') {
+        throw new Error('update_node 只修改自由图片/视频节点；分镜节点请用 revise_shot')
+      }
+      if (action.text === undefined && action.duration === undefined) {
+        throw new Error('update_node 至少需要 prompt(text) 或 duration')
+      }
+      project.patchCanvasNode(node.id, {
+        ...(action.text !== undefined ? { prompt: action.text } : {}),
+        ...(action.duration !== undefined
+          ? { duration: Math.max(1, Math.min(15, Math.round(action.duration))) }
+          : {}),
+        outputAssetId: undefined
+      })
+      node.status = 'idle'
+      node.error = undefined
+      await project.save()
+      revealCanvas(node.id)
+      return `已更新节点 ${node.id}，旧输出已失效，可继续 run_node 生成`
+    }
+  },
+  {
     name: 'run_node', phase: 2, timeoutMs: 20 * 60_000, required: ['nodeId'], estimate: oneImage,
     async execute(action, ctx) { await runCanvasNode(action.nodeId!, progress(ctx), ctx.signal); return '节点完成' }
   }
@@ -655,6 +736,7 @@ export function validateToolAction(raw: unknown): AgentToolAction {
     ,...(typeof action.visualPrompt === 'string' ? { visualPrompt: action.visualPrompt } : {})
     ,...(typeof action.imagePrompt === 'string' ? { imagePrompt: action.imagePrompt } : {})
     ,...(typeof action.videoPrompt === 'string' ? { videoPrompt: action.videoPrompt } : {})
+    ,...(typeof action.compiledVideoPrompt === 'string' ? { compiledVideoPrompt: action.compiledVideoPrompt } : {})
     ,...(typeof action.voiceover === 'string' ? { voiceover: action.voiceover } : {})
     ,...(typeof action.duration === 'number' ? { duration: action.duration } : {})
     ,...(['push', 'pull', 'pan', 'tilt', 'static', 'orbit'].includes(String(action.cameraMovement))

@@ -62,7 +62,7 @@ export interface AgentRunOptions {
 const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活一边告诉用户画布上发生了什么。
 
 硬性规则：
-1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ] }
+1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ], "done": false }。actions 是“下一小批”真实画布操作，不是一次性的建议清单；工具执行后你会重新看到最新画布并继续判断。确认用户目标已经落到画布上时返回 done=true、actions=[]。
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
 3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本。写剧本、改编、续写必须按 ai-short-film-screenwriter 的故事引擎、改编硬约束、节拍、AI 制作约束和逐场规则来；成稿前自检。必须含一句话故事、对抗引擎、完整梗概、人物小传（主角/对手/关键亲人，含欲望恐惧弧光）、环境与场景、每场场次任务、分场动作和对白；禁止口播/画面/时长四格表；禁止把传说压成高潮切片；禁止默片，相认/唤名/对峙/问答必须有出镜对白往来；不创建人物/场景/分镜节点。用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
@@ -72,7 +72,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 5. 每做完一步，say 里问要不要继续下一步。用户说「继续」才走下一步。用户说「续写」不是流水线的「继续」。
 6. 没说「全流程 / 全部做完」禁止一次把人设+场景+关键帧+视频全做完。普通创作不生成故事看板，用人设图和场景图画「这一镜正在发生的事件」关键帧，再出视频。AI 短剧才走故事看板。
 7. 分镜节点未验收时禁止生成故事看板或视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。
-8. 一次最多 8 个 actions。
+8. 一次最多 6 个 actions。能用工具完成的请求必须实际操作画布，不要只回复教程。先修改节点提示词，再按用户要求生成对应图片或视频；每批执行后依据新的资产状态验收，禁止无意义重复成功工具。新建自由节点时本批只 create，下一轮从最新画布取得真实 nodeId 后再 run_node，禁止臆造 ID。
 
 可用工具：
 { "tool": "seed_script", "text": "用户这几轮的故事原文，必须完整" }
@@ -82,7 +82,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "extract_cast", "extractStage": "subjects|scenes|shots" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
-{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "看板画面与动作，可选", "videoPrompt": "场景叙事：画面中谁是谁；然后连续写这一镜怎么演、怎么说、镜头怎么走", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
+{ "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "静帧/关键帧画面，可选", "imagePrompt": "实际出图提示词，可选", "videoPrompt": "实际发给视频模型的动态导演提示词：起幅、触发、动作链、运镜、落幅、同步声音", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
 { "tool": "generate_sheet", "subjectId": "sub_1" }
 { "tool": "generate_scene", "sceneId": "scn_1" }
 { "tool": "generate_shot_board", "shotId": "shot_xxx" }
@@ -95,20 +95,25 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "generate_all_videos" }
 { "tool": "generate_all_audio" }
 { "tool": "sync_canvas" }
-{ "tool": "focus_node", "nodeId": "script" }`
+{ "tool": "focus_node", "nodeId": "script" }
+{ "tool": "create_image_node", "text": "完整出图提示词" }
+{ "tool": "create_video_node", "text": "完整动态导演提示词", "duration": 8 }
+{ "tool": "update_node", "nodeId": "imageGen_xxx 或 videoGen_xxx", "text": "新的完整提示词", "duration": 8 }
+{ "tool": "run_node", "nodeId": "画布上下文中的节点 id" }`
 
-function parseAgentJson(text: string): { say: string; actions: any[] } {
+function parseAgentJson(text: string): { say: string; actions: any[]; done: boolean } {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return { say: text.slice(0, 400), actions: [] }
+  if (start < 0 || end <= start) return { say: text.slice(0, 400), actions: [], done: true }
   try {
     const obj = JSON.parse(text.slice(start, end + 1))
     return {
       say: String(obj.say || '好的'),
-      actions: Array.isArray(obj.actions) ? obj.actions : []
+      actions: Array.isArray(obj.actions) ? obj.actions : [],
+      done: obj.done === true
     }
   } catch {
-    return { say: text.slice(0, 400), actions: [] }
+    return { say: text.slice(0, 400), actions: [], done: true }
   }
 }
 
@@ -217,6 +222,7 @@ export async function runAgentTurn(
     }
   }
   if (
+    getAIMode() !== 'real' &&
     isVagueRequest(userText, p0) &&
     !wantAll(userText) &&
     !isContinueRequest(userText) &&
@@ -230,7 +236,7 @@ export async function runAgentTurn(
   const skillPack = skillContextForAgent(skillSelectContext(userText))
   const wantQa = skillPack.selected.some((s) => s.id === 'qa-verify')
 
-  let plan: { say: string; actions: any[] }
+  let plan: { say: string; actions: any[]; done?: boolean }
 
   if (isContinueRequest(userText) && !wantAll(userText)) {
     plan = continuePlan(p0)
@@ -288,7 +294,7 @@ export async function runAgentTurn(
 
   onEvent({ kind: 'log', label: '开始在画布上干活' })
   const autonomy = options.autonomy ?? getAgentState().autonomy
-  const loop = await runAgentLoop(plan.actions.slice(0, 8), {
+  const loop = await runAgentLoop(plan.actions.slice(0, 6), {
     request: userText,
     autonomy,
     signal: options.signal,
@@ -317,6 +323,37 @@ export async function runAgentTurn(
             dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, userText), userText, history)),
             userText
           ).slice(0, 4)
+        }
+      : undefined,
+    continue: getAIMode() === 'real' && autonomy !== 'assist'
+      ? async ({ completed, results: observedResults, round }) => {
+          const response = await callLLM({
+            messages: [
+              {
+                role: 'system',
+                content: `${TOOLS_HINT}\n\n你现在处于同一个任务的第 ${round} 次观察。工具已经真实执行，项目状态已经改变。请对照原始任务逐项验收：\n- 需要写/改提示词：确认目标分镜字段已经具体、可拍、动态，不是静态模板。\n- 需要出图/视频：确认对应资产字段已经存在；如果提示词刚改导致旧资产失效，再生成一次。\n- 需要操控节点：使用 focus_node、run_node、sync_canvas 或对应的精确生成工具。\n- 目标已经完成：done=true 且 actions=[]，say 简洁报告实际完成内容。\n- 仍缺一步：done=false，只给下一小批必要动作。\n禁止重复已成功且未被后续修改失效的工具，禁止扩大原始请求范围，禁止把“建议用户自己点”冒充完成。`
+              },
+              {
+                role: 'user',
+                content: `原始任务：${userText}\n\n已执行动作：${JSON.stringify(completed)}\n执行结果：${JSON.stringify(observedResults)}\n\n最新画布与项目状态：\n${projectContextPrompt(userText)}`
+              }
+            ],
+            temperature: 0.1,
+            jsonMode: true,
+            maxTokens: 2400,
+            signal: options.signal,
+            timeoutMs: 120_000
+          })
+          const next = parseAgentJson(response.content)
+          const actions = applyPlayGate(
+            dedupeActions(alignNewStoryActions(sanitizeActions(next.actions, userText), userText, history)),
+            userText
+          ).slice(0, 6)
+          return {
+            say: next.say,
+            actions,
+            done: next.done || !actions.length
+          }
         }
       : undefined
   })
@@ -351,7 +388,7 @@ export async function runAgentTurn(
 
   const wrap = wrapUpReply(results, userText, plan.say)
   const qa = wantQa && project.current ? `\n${qaNotes(project.current)}` : ''
-  return { reply: wrap.reply + qa, results, chips: wrap.chips }
+  return { reply: (loop.finalSay || wrap.reply) + qa, results, chips: wrap.chips }
 }
 
 function continuePlan(p: Project): { say: string; actions: any[] } {

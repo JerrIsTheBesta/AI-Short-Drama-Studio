@@ -63,7 +63,8 @@ export interface StoryboardInput {
   /** 提炼模式分阶段交付；每完成一步立即持久化，后续失败不回滚。 */
   onExtractStage?: (
     stage: 'subjects' | 'scenes' | 'shots',
-    partial: StoryboardResult
+    partial: StoryboardResult,
+    meta?: { partial?: boolean; completed?: number; total?: number }
   ) => void | Promise<void>
   /** 失败重试时从未完成的阶段继续，避免重复提炼已落库内容。 */
   extractStartAt?: 'subjects' | 'scenes' | 'shots'
@@ -493,6 +494,10 @@ const SHOT_OUTLINE_TIMEOUT_MS = 60_000
 const FILM_SHOT_OUTLINE_TIMEOUT_MS = 180_000
 const SHOT_EXPAND_TIMEOUT_MS = 45_000
 const SHOT_EXPAND_CONCURRENCY = 5
+const SHOT_BATCH_CONCURRENCY = 3
+const SHOTS_PER_BATCH = 3
+const SHOT_BATCH_MAX_CHARS = 1100
+const SHOT_BATCH_MAX_PARAGRAPHS = 4
 
 interface ShotOutline {
   title: string
@@ -506,6 +511,188 @@ interface ShotOutline {
   audioMode?: ShotAudioMode
   subjectNames?: string[]
   sceneName?: string
+}
+
+interface ShotWorkBatch {
+  index: number
+  label: string
+  excerpt: string
+  previousHint?: string
+  nextHint?: string
+}
+
+function splitLongStoryBeat(text: string, maxChars: number): string[] {
+  const clean = text.trim()
+  if (!clean) return []
+  if (clean.length <= maxChars) return [clean]
+  const pieces = clean
+    .split(/(?<=[。！？!?；;])\s*|\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const out: string[] = []
+  let current = ''
+  for (const piece of pieces.length ? pieces : [clean]) {
+    if (piece.length > maxChars) {
+      if (current) out.push(current)
+      current = ''
+      for (let offset = 0; offset < piece.length; offset += maxChars) {
+        out.push(piece.slice(offset, offset + maxChars))
+      }
+      continue
+    }
+    const next = current ? `${current}\n${piece}` : piece
+    if (next.length > maxChars && current) {
+      out.push(current)
+      current = piece
+    } else {
+      current = next
+    }
+  }
+  if (current) out.push(current)
+  return out
+}
+
+/**
+ * 先在本地按场次和剧情段落切工作包，避免把整份剧本交给一个模型。
+ * 每个工作包只允许产出 1–3 镜；并发数由调用方限制为 3。
+ */
+function buildShotWorkBatches(play: string): ShotWorkBatch[] {
+  const normalized = String(play || '').replace(/\r\n?/g, '\n').trim()
+  if (!normalized) return []
+  const headingRe = /^#{1,4}\s+(.+)$/gm
+  const headings = [...normalized.matchAll(headingRe)].map((match) => ({
+    title: String(match[1] || '').trim(),
+    level: String(match[0] || '').match(/^#+/)?.[0].length || 2,
+    start: match.index || 0,
+    bodyStart: (match.index || 0) + match[0].length
+  }))
+  const sceneHeading = (title: string) =>
+    /^(?:场景\s*[一二三四五六七八九十百0-9]|第[^\n]{1,12}场(?:\b|[：:]?)|scene\b)/i.test(title)
+  const scenes = headings
+    .map((heading, index) => ({
+      ...heading,
+      end:
+        headings.slice(index + 1).find((next) => next.level <= heading.level)?.start ??
+        normalized.length
+    }))
+    .filter((heading) => sceneHeading(heading.title))
+    .map((heading) => ({
+      title: heading.title,
+      text: normalized.slice(heading.bodyStart, heading.end).trim()
+    }))
+
+  const sections = scenes.length ? scenes : [{ title: '完整剧情', text: normalized }]
+  const drafts: Array<{ label: string; excerpt: string }> = []
+  for (const section of sections) {
+    const paragraphs = section.text
+      .split(/\n\s*\n+/)
+      .flatMap((paragraph) => splitLongStoryBeat(paragraph, SHOT_BATCH_MAX_CHARS))
+      .filter(Boolean)
+    let current = ''
+    let paragraphCount = 0
+    let part = 1
+    const flush = () => {
+      if (!current.trim()) return
+      drafts.push({
+        label: paragraphs.length > 1 ? `${section.title} · 第${part++}段` : section.title,
+        excerpt: `## ${section.title}\n\n${current.trim()}`
+      })
+      current = ''
+      paragraphCount = 0
+    }
+    for (const paragraph of paragraphs.length ? paragraphs : [section.text]) {
+      const next = current ? `${current}\n\n${paragraph}` : paragraph
+      if (
+        current &&
+        (next.length > SHOT_BATCH_MAX_CHARS || paragraphCount >= SHOT_BATCH_MAX_PARAGRAPHS)
+      ) {
+        flush()
+      }
+      current = current ? `${current}\n\n${paragraph}` : paragraph
+      paragraphCount++
+    }
+    flush()
+  }
+
+  return drafts.map((draft, index) => ({
+    index,
+    ...draft,
+    previousHint: index > 0 ? drafts[index - 1].excerpt.slice(-320) : undefined,
+    nextHint: index + 1 < drafts.length ? drafts[index + 1].excerpt.slice(0, 320) : undefined
+  }))
+}
+
+async function generateShotWorkBatch(
+  input: StoryboardInput,
+  model: string,
+  batch: ShotWorkBatch,
+  subjectNames: string[],
+  sceneNames: string[],
+  directives: string
+): Promise<{ shots: Record<string, unknown>[]; model?: string }> {
+  const ask = async (retry = false) =>
+    callLLM({
+      messages: [
+        {
+          role: 'system',
+          content: `你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${SHOTS_PER_BATCH} 个真正能拍的连续镜头，绝对不得超过 ${SHOTS_PER_BATCH} 个。
+
+画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
+忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
+visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频描述，写清起幅 → 触发 → 动作与反应 → 运镜 → 落幅，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要写秒表式模板，不要输出否定词清单。
+每镜要写清景别、站位、视线、道具、与相邻镜头的承接。人物看场景内的人或物，不看镜头。
+只输出合法 JSON：{"shots":[{"title":"3-8字","purpose":"本镜戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字连续动态镜头","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","speakerHint":"声线情绪或空字符串","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名","blocking":"人物空间关系","eyeline":"每个人看谁或看什么","continuity":"承接前态 → 本镜变化 → 留下末态","propFocus":"关键道具或无"}]}。shots 数组只能有 1–${SHOTS_PER_BATCH} 项。${retry ? '上一轮无有效 shots；这次立即给 JSON，不要解释。' : ''}`
+        },
+        {
+          role: 'user',
+          content: `工作包：${batch.label}
+已有人物：${subjectNames.join('、') || '（按原文识别）'}
+已有地点：${sceneNames.join('、') || '（按原文识别）'}
+单镜时长参考：${input.shotDuration} 秒，可按动作与台词在 3–10 秒调整。
+${directives ? `\n全片约束（只用于保真）：\n${directives}\n` : ''}
+${batch.previousHint ? `上一工作包末尾（只用于承接，不要重复拍）：\n${batch.previousHint}\n` : ''}
+本工作包剧本原文：
+${batch.excerpt}
+${batch.nextHint ? `\n下一工作包开头（只用于留下末态，不要提前拍）：\n${batch.nextHint}` : ''}`
+        }
+      ],
+      model,
+      temperature: retry ? 0.1 : 0.35,
+      jsonMode: true,
+      maxTokens: 4200,
+      signal: input.signal,
+      timeoutMs: SHOT_OUTLINE_TIMEOUT_MS
+    })
+
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await ask(attempt > 0)
+      const raw = parseJsonRobust(response.content)
+      const rows = Array.isArray(raw?.shots) ? raw.shots.slice(0, SHOTS_PER_BATCH) : []
+      const shots = rows
+        .filter((item: unknown) => item && typeof item === 'object')
+        .map((item: Record<string, unknown>) => {
+          const text = `${item.title || ''}\n${item.visualPrompt || ''}\n${item.videoPrompt || ''}\n${item.voiceover || ''}`
+          const inferredSubjects = subjectNames.filter((name) => name && text.includes(name))
+          const inferredScene = sceneNames.find((name) => name && text.includes(name))
+          return {
+            ...item,
+            subjectNames: Array.isArray(item.subjectNames) && item.subjectNames.length
+              ? item.subjectNames
+              : inferredSubjects,
+            sceneName: String(item.sceneName || inferredScene || '').trim() || undefined
+          }
+        })
+      if (!shots.length) throw new Error('返回 JSON 中没有有效 shots 数组')
+      return { shots, model: response.model }
+    } catch (error) {
+      if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+      lastError = error
+      log(`⚠ 分镜工作包 ${batch.index + 1} 第 ${attempt + 1} 次失败：${(error as Error).message.split('\n')[0]}`)
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('分镜工作包生成失败')
 }
 
 function asShotOutlineList(raw: unknown): ShotOutline[] {
@@ -792,7 +979,7 @@ async function expandOneShot(
 口播必须用场记里的原词；场记写了对白而你输出空字符串视为不合格。同一空间的对白往来可以留在一镜。只有场记标明画外音/旁白时才用 audioMode=h3-voiceover。
 必须写 videoPrompt：先写每个出场人物站在近处还是后面、身体朝哪、眼睛看谁；再写动作。说话者可以在后面，前面的人侧对或回头看他。禁止合影看镜头，禁止只在结尾加「不要看镜头」。
 ${film ? '本镜必须能在剧本原文里找到对应拍点。蒙太奇要写成看得见的连续动作。剧本写了不拍的，写进 videoPrompt 末尾一句。善意是普通人做的小事。' : ''}
-只输出一个 JSON 对象：{"title":"3-8字","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别","blocking":"每个人：近处或后面、身体朝向、相对谁站","eyeline":"每个人看谁或看什么，禁止看镜头","continuity":"上一镜末态 → 本镜变化 → 下一镜初态","propFocus":"道具或无","visualPrompt":"中文静帧画面","videoPrompt":"导演说戏，含每人占位和视线，80-320字","audioDescription":"现场声音","voiceover":"人物名：台词，无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"声线与情绪","duration":6,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["短名"],"sceneName":"地点原名"}`
+只输出一个 JSON 对象：{"title":"3-8字","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别","blocking":"每个人：近处或后面、身体朝向、相对谁站","eyeline":"每个人看谁或看什么，禁止看镜头","continuity":"上一镜末态 → 本镜变化 → 下一镜初态","propFocus":"道具或无","visualPrompt":"中文静帧画面","videoPrompt":"中文220-650字可执行镜头：起幅、触发、连续动作、道具结果、运镜落幅、同步声音","audioDescription":"现场声音","voiceover":"人物名：台词，无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"声线与情绪","duration":6,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["短名"],"sceneName":"地点原名"}`
         },
         {
           role: 'user',
@@ -1079,24 +1266,88 @@ ${extractPlayForSceneStage(play)}`
       onProgress?.(`✓ 已有 ${input.existingScenes?.length || 0} 个场景，从已保存结果继续`)
     }
 
-    onProgress?.('第 3/3 步：一次拆完分镜场记…')
+    onProgress?.('第 3/3 步：按场次拆成小组并发写分镜…')
     const subjectNames = (Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : [])
       .map((item: { name?: unknown }) => String(item?.name || '').trim())
       .filter(Boolean)
     const sceneNames = extractSceneRows(scenePart.raw)
       .map((item: { name?: unknown }) => String(item?.name || '').trim())
       .filter(Boolean)
-    const { outlines, model: outlineModel } = await extractShotOutline(
-      input,
-      parallelModel,
-      play,
-      subjectNames,
-      sceneNames,
-      onProgress
+    const workBatches = buildShotWorkBatches(play)
+    if (!workBatches.length) throw new Error('剧本正文为空，无法拆分镜')
+    onProgress?.(
+      `已拆成 ${workBatches.length} 个剧情工作包；每包最多 ${SHOTS_PER_BATCH} 镜，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
     )
-
-    let rawShots = outlines.map((item) => outlineToRawShot(item))
+    const directives = extractPlayDirectives(play)
+    const batchShots: Array<Record<string, unknown>[] | undefined> = new Array(workBatches.length)
+    const batchModels: Array<string | undefined> = new Array(workBatches.length)
+    const failed: Array<{ index: number; label: string; error: string }> = []
+    let completed = 0
+    let persistedPrefix = 0
+    let persistQueue = Promise.resolve()
     const subjectRows = Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : []
+    const sceneRows = extractSceneRows(scenePart.raw)
+    const normalizedFromFinishedBatches = (onlyContiguousPrefix = false) => {
+      const rows = onlyContiguousPrefix
+        ? batchShots.slice(0, persistedPrefix)
+        : batchShots
+      const shots = rows.flatMap((batch) => batch || [])
+      return normalizeStoryboard(
+        { ...scenePart.raw, subjects: subjectRows, scenes: sceneRows, shots },
+        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
+      )
+    }
+
+    await mapLimit(
+      workBatches,
+      SHOT_BATCH_CONCURRENCY,
+      async (batch, index) => {
+        try {
+          const result = await generateShotWorkBatch(
+            input,
+            parallelModel,
+            batch,
+            subjectNames,
+            sceneNames,
+            directives
+          )
+          batchShots[index] = result.shots
+          batchModels[index] = result.model
+          completed++
+          while (batchShots[persistedPrefix]) persistedPrefix++
+          if (persistedPrefix > 0 && index < persistedPrefix) {
+            const partial = normalizedFromFinishedBatches(true)
+            const completedSnapshot = completed
+            onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成，按剧本顺序累计 ${partial.shots.length} 镜，正在写入画布…`)
+            persistQueue = persistQueue.then(() =>
+              input.onExtractStage?.('shots', partial, {
+                partial: true,
+                completed: completedSnapshot,
+                total: workBatches.length
+              })
+            )
+            await persistQueue
+          } else {
+            onProgress?.(`✓ 小组 ${completed}/${workBatches.length} 完成；等待前一段后按镜号写入`)
+          }
+        } catch (error) {
+          if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+          failed.push({
+            index,
+            label: batch.label,
+            error: (error as Error).message.split('\n')[0]
+          })
+          onProgress?.(`⚠ ${batch.label} 两次失败；其他小组继续，已完成镜头不会丢失`)
+        }
+      },
+      input.signal
+    )
+    await persistQueue
+
+    let rawShots = batchShots.flatMap((rows) => rows || [])
+    if (!rawShots.length) {
+      throw new Error(`所有分镜小组均失败。人物和场景已保留；请重试拆分镜。${failed[0]?.error ? `首个错误：${failed[0].error}` : ''}`)
+    }
     if (!subjectRows.length) {
       const names = new Set<string>()
       for (const shot of rawShots) {
@@ -1116,7 +1367,6 @@ ${extractPlayForSceneStage(play)}`
         }))
       )
     }
-    const sceneRows = extractSceneRows(scenePart.raw)
     if (!sceneRows.length) {
       const names = [...new Set(rawShots.map((shot) => String(shot?.sceneName || '').trim()).filter(Boolean))]
       sceneRows.push(
@@ -1130,7 +1380,18 @@ ${extractPlayForSceneStage(play)}`
       )
     }
 
-    onProgress?.(`✓ 已拆 ${outlines.length} 个镜头，不再逐镜再问模型`)
+    if (failed.length) {
+      const partial = normalizedFromFinishedBatches()
+      await input.onExtractStage?.('shots', partial, {
+        partial: true,
+        completed,
+        total: workBatches.length
+      })
+      throw new Error(
+        `${failed.length}/${workBatches.length} 个分镜小组失败；其余 ${rawShots.length} 镜已经保存。失败段：${failed.map((item) => item.label).join('、')}`
+      )
+    }
+    onProgress?.(`✓ ${workBatches.length} 个小组全部完成，共拆出 ${rawShots.length} 镜`)
     const merged = {
       ...scenePart.raw,
       subjects: subjectRows,
@@ -1150,8 +1411,12 @@ ${extractPlayForSceneStage(play)}`
     } else {
       onProgress?.('人物、场景、分镜均已完成并绑定…')
     }
-    await input.onExtractStage?.('shots', parsed)
-    const usedModel = outlineModel || subjectPart.model || scenePart.model || parallelModel
+    await input.onExtractStage?.('shots', parsed, {
+      partial: false,
+      completed: workBatches.length,
+      total: workBatches.length
+    })
+    const usedModel = batchModels.find(Boolean) || subjectPart.model || scenePart.model || parallelModel
     return { result: parsed, model: usedModel }
   }
 
@@ -1977,6 +2242,8 @@ export function storyboardToShots(
     title: s.title,
     visualPrompt: s.visualPrompt,
     videoPrompt: s.videoPrompt,
+    // 拆分镜时只初始化一次。之后用户即使全部删除，也绝不自动回填。
+    compiledVideoPrompt: s.videoPrompt,
     audioDescription: s.audioDescription ?? '',
     voiceover: cleanShotVoiceover(s.voiceover),
     audioMode: s.audioMode,

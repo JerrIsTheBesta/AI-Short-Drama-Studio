@@ -29,7 +29,7 @@ const feed = ref<FeedItem[]>([
     type: 'msg',
     role: 'assistant',
     content:
-      '跟我说你要拍什么。剧本写完后先拆人物，再拆场景，再拆分镜，每步做完会停下来。右侧点生成时，这边也会同步进度；失败了会告诉你原因。说「全流程」才自动跑完。'
+      '我能直接读取和操作当前画布：写或修改剧本与分镜、重写某一镜的图片/视频提示词、创建生成节点，并按你的要求出图或出视频。你可以直接说结果，例如“把第3镜改成手持跟拍并重新出图”。关键制作阶段仍会按当前确认模式停下来问你。'
   }
 ])
 const messages = computed<AgentMessage[]>(() =>
@@ -394,7 +394,7 @@ async function send() {
           v-model="input"
           rows="5"
           :disabled="busy"
-          placeholder="说主题，或点「继续」。需求不清我会先问。"
+          placeholder="直接说你想让画布变成什么样，例如：改第3镜提示词并重新出图"
           @keydown.enter.exact.prevent="send"
         />
         <div class="bar">

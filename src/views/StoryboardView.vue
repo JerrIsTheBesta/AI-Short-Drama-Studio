@@ -3,7 +3,6 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useAssetsStore } from '@/stores'
 import { generateStoryboard, storyboardToShots } from '@/services/ai'
-import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { lookFromScript } from '@/utils/visualStyle'
 import GlassCard from '@/components/common/GlassCard.vue'
@@ -128,12 +127,6 @@ async function generate() {
     project.setShots(newShots)
     project.setSubjects(runResult.result.subjects ?? [])
     project.setScenes(runResult.result.scenes ?? [])
-    if (project.current) {
-      for (const shot of project.current.shots) {
-        const patch = fillEmptyGeneratePrompt('shotVideo', project.current, shot)
-        if (patch) project.updateShot(shot.id, patch)
-      }
-    }
     await project.save()
     // 把项目级导演字段存到 Script
     if (project.current?.script) {

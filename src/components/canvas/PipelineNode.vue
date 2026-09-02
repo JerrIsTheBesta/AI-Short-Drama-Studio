@@ -33,6 +33,7 @@ import {
   videoDurationOptions,
   videoMaxSeconds,
   videoMinSeconds,
+  type AspectRatio,
   type CanvasNodeType,
   type H3VideoGenMode,
   type ID,
@@ -146,7 +147,7 @@ const mediaAspect = computed(() => {
     return cssAspectRatio('16:9')
   }
   if (type.value === 'audio' || type.value === 'export') return '16 / 10'
-  return cssAspectRatio(project.current?.settings.aspectRatio)
+  return cssAspectRatio(nodeAspectRatio.value)
 })
 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
@@ -176,6 +177,16 @@ const videoModel = computed({
 const videoResolution = computed({
   get: () => normalizeVideoResolution(nodeMeta.value?.data.videoResolution, videoModel.value),
   set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
+})
+const nodeAspectRatio = computed({
+  get: () => nodeMeta.value?.data.aspectRatio ?? project.current?.settings.aspectRatio ?? '16:9',
+  set: (v: AspectRatio) => {
+    project.patchCanvasNode(props.id, { aspectRatio: v })
+    if (type.value === 'shotVideo' && shot.value) project.invalidateShotAssets(shot.value.id, 'video')
+    else if ((type.value === 'shotImage' || type.value === 'shotBoard') && shot.value) {
+      project.invalidateShotAssets(shot.value.id, 'image')
+    }
+  }
 })
 const h3GenMode = computed({
   get: () => normalizeH3GenMode(shot.value?.h3GenMode),
@@ -254,19 +265,19 @@ const promptValue = computed({
     else if (type.value === 'scene' && scene.value) project.updateScene(scene.value.id, { platePrompt: v })
     else if (type.value === 'shotBoard' && shot.value) project.updateShot(shot.value.id, { boardPrompt: v })
     else if (type.value === 'shotImage' && shot.value) project.updateShot(shot.value.id, { imagePrompt: v })
-    else if (type.value === 'shotVideo' && shot.value) project.updateShot(shot.value.id, { compiledVideoPrompt: v })
+    else if (type.value === 'shotVideo' && shot.value) project.setShotVideoPrompt(shot.value.id, v)
     else if (type.value === 'audio' && shot.value) project.updateShot(shot.value.id, { voiceover: v })
   }
 })
 
 const promptHint = computed(() => {
   if (type.value === 'audio') return '改口播后重新合成配音'
-  if (type.value === 'shotVideo') return '拆分镜后会自动填入发给视频模型的全文。空着点开也会补上，改完原样发送。'
+  if (type.value === 'shotVideo') return '这里完全由你编辑。清空后不会回填；可自己填写，或主动点“优化提示词 / 按分镜重铺”。'
   return '这里就是实际发出去的全文。改完原样发送，不会再背后加词。'
 })
 
 const metaLine = computed(() => {
-  const ar = project.current?.settings.aspectRatio || '16:9'
+  const ar = nodeAspectRatio.value
   const w = project.current?.settings.width ?? 1280
   const h = project.current?.settings.height ?? 720
   if (type.value === 'shotVideo') return `MiniMax H3 · ${ar}`
@@ -307,7 +318,7 @@ function persistShotVideoPrompt() {
   if (type.value !== 'shotVideo' || !shot.value) return
   const v = promptBox.value?.value ?? promptValue.value
   if (v !== (shot.value.compiledVideoPrompt ?? '')) {
-    project.updateShot(shot.value.id, { compiledVideoPrompt: v })
+    project.setShotVideoPrompt(shot.value.id, v)
   }
 }
 
@@ -317,15 +328,15 @@ function onPromptPaste() {
 
 watch(assetId, () => loadMedia(), { immediate: true })
 watch(
-  () =>
-    [
-      props.selected,
-      type.value,
-      shot.value?.id,
-      subject.value?.id,
-      scene.value?.id,
-      Boolean((shot.value?.compiledVideoPrompt || '').trim())
-    ] as const,
+  // 必须把每一项作为独立 source。若用 getter 每次返回一个新数组，回写提示词后
+  // 即使数组内容完全相同也会被判定为变化，从而递归触发本 watcher。
+  [
+    () => props.selected,
+    () => type.value,
+    () => shot.value?.id,
+    () => subject.value?.id,
+    () => scene.value?.id
+  ],
   ([on]) => {
     panelOpen.value = Boolean(on)
     if (!on) {
@@ -351,9 +362,6 @@ watch(
       if (patch) project.updateShot(shot.value.id, patch)
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
-      if (patch) project.updateShot(shot.value.id, patch)
-    } else if (t === 'shotVideo' && shot.value) {
-      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
     }
   },
@@ -952,6 +960,7 @@ const cropStyle = computed(() => ({
         <span v-else>{{ metaLine }}</span>
         <AspectRatioSeg
           v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo'"
+          v-model="nodeAspectRatio"
           compact
         />
         <VideoResolutionSeg

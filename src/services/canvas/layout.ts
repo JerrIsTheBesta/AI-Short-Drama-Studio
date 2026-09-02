@@ -366,11 +366,16 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     const stillType = stillTypeForMode(resolvedStill)
     const stillId = stillType ? `${stillType}:${shot.id}` : ''
     if (stillType && stillId) {
+      const prevStillNode = prev.get(stillId) || prevAny.get(stillId)
       attach('group-shots', {
         id: stillId,
         type: stillType,
         position: cell(i, 0, shotH),
-        data: { shotId: shot.id, label: `${i + 1}. ${shot.title}` },
+        data: {
+          shotId: shot.id,
+          label: `${i + 1}. ${shot.title}`,
+          aspectRatio: prevStillNode?.data.aspectRatio ?? project.settings.aspectRatio
+        },
         status: persistStatus(
           prev.get(stillId)?.status,
           Boolean(stillType === 'shotBoard' ? shot.boardAssetId : shot.imageAssetId)
@@ -387,7 +392,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         label: `${i + 1}. ${shot.title}`,
         videoModel: prevVid?.data.videoModel,
         videoResolution: prevVid?.data.videoResolution,
-        videoStillMode: resolvedStill
+        videoStillMode: resolvedStill,
+        aspectRatio: prevVid?.data.aspectRatio ?? project.settings.aspectRatio
       },
       status: persistStatus(prevVid?.status, Boolean(shot.videoAssetId)),
       parentGroupId: 'group-videos'

@@ -145,7 +145,7 @@ async function optimize() {
       }
     )
     undo.value = { nodeId: props.node.id, prompt: props.node.data.prompt || '' }
-    project.patchCanvasNode(props.node.id, { prompt: result.prompt })
+    project.setCanvasNodePrompt(props.node.id, result.prompt)
     feed.value.push({
       id: `a-${Date.now()}`,
       role: 'assistant',
@@ -169,7 +169,7 @@ async function optimize() {
 function restoreLast() {
   const snap = undo.value
   if (!snap || !project.current?.canvas?.nodes.some((item) => item.id === snap.nodeId)) return
-  project.patchCanvasNode(snap.nodeId, { prompt: snap.prompt })
+  project.setCanvasNodePrompt(snap.nodeId, snap.prompt)
   const label =
     project.current.canvas.nodes.find((item) => item.id === snap.nodeId)?.data.label || '该节点'
   undo.value = null

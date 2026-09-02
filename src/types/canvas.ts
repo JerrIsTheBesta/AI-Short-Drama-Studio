@@ -123,6 +123,8 @@ export interface CanvasNode {
     referenceSourceNodeIds?: string[]
     outputAssetId?: string
     duration?: number
+    /** 节点自己的画幅；为空时只继承项目默认值，不反向修改其他节点。 */
+    aspectRatio?: import('./project').AspectRatio
     videoModel?: VideoGenModel
     /** 这一镜出视频时用什么参考图；切模型时写入，决定画布是否铺分镜关键帧 */
     videoStillMode?: VideoStillMode

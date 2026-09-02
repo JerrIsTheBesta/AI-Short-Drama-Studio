@@ -464,7 +464,7 @@ export function ensurePictureIdentity(prompt: string, input: H3PromptInput): str
   let src = String(prompt || '').trim()
   // 清掉旧的 Reference pictures / 残缺图号段，再强制插入权威映射
   src = src
-    .replace(/Reference pictures\s*\([^)]*\)\s*:[\s\S]*?(?=\n\s*\[Shot\s*\d+\]|\n\s*Camera language\s*:|\n\s*overall_soundscape\s*:|$)/i, '')
+    .replace(/Reference pictures\s*\([^)]*\)\s*:[\s\S]*?(?=\n\s*\[Shot\s*\d+\]|\n\s*(?:镜头|景别与运镜|画面与动作依据)\s*[：:]|\n\s*Camera language\s*:|\n\s*overall_soundscape\s*:|$)/i, '')
     .replace(/(?:^|\n)(?:图\s*\d+\s*[/：:=是][^\n]*\n)+/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
@@ -781,9 +781,11 @@ export function nodeTextForbidsSpeech(text: string): boolean {
 }
 
 function spokenLinesForPrompt(input: H3PromptInput): string[] {
-  // 只信任口播栏 + 用户原文里的引号/台词行。绝不拿模型自己写进稿子的 <d> 当依据。
+  // 口播栏一旦有内容，它就是唯一台词来源。人物小传里的「欲望」「弧光」等引号
+  // 不是对白，不能再从整包场记中二次抽取。
   if (input.voiceMode === 'none') return []
   const fromVo = spokenCueLines(input.voiceover || '')
+  if (fromVo.length) return [...new Set(fromVo)]
   const fromNotes = extractSpokenFromNotes(
     String(input.prompt || '')
       .replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, '')
@@ -1041,6 +1043,7 @@ Play the emotional change of this beat in order. Avoid calm exposition, emotionl
 export function compiledH3PromptNeedsRebuild(text: string | undefined): boolean {
   const t = String(text || '').trim()
   if (!t) return true
+  if (isLifelessH3Prompt(t)) return true
   if (/<d>\s*\[(?:Chinese|English|Japanese|Korean)\]\s*(?:无|没有|无对白|无台词|none|N\/A)\s*<\/d>/i.test(t)) {
     return true
   }
@@ -1067,6 +1070,20 @@ function isGenericActionDump(desc: string): boolean {
     isH3FillTemplate(desc) ||
     cjkOutsideSpokenTags(desc)
   )
+}
+
+/** 识别旧版“按模板填词”的无生机成片稿。 */
+export function isLifelessH3Prompt(text: string | undefined): boolean {
+  const t = String(text || '')
+  if (!t.trim()) return true
+  const repeatedStatic = (t.match(/camera holds a static shot/gi) || []).length >= 2
+  const genericTimeline =
+    /Begin with the opening frame[\s\S]*Faces show a specific reaction[\s\S]*Hold the last expression and let the frame breathe/i.test(t)
+  const restrainedConflict =
+    /no pan, tilt, or zoom/i.test(t) && /restrained camera move|push-in|pull-out|pan right|tilt up|arc around/i.test(t)
+  const genericPerformance =
+    /Play the emotional change of this beat in order[\s\S]*Avoid calm exposition/i.test(t)
+  return isH3FillTemplate(t) || (repeatedStatic && genericTimeline) || genericPerformance || restrainedConflict
 }
 
 export interface H3PromptValidation {
@@ -1096,6 +1113,9 @@ export function validateH3Prompt(prompt: string, expectedDialogue?: string): H3P
   }
   if (!/overall_soundscape\s*:/i.test(prompt)) issues.push('缺少 overall_soundscape')
   if (!/non_diegetic_music\s*:/i.test(prompt)) issues.push('缺少 non_diegetic_music')
+  if (isLifelessH3Prompt(prompt)) {
+    issues.push('镜头稿仍是机械时间槽或存在静态/运镜冲突，缺少由剧情动作驱动的镜头语言')
+  }
   if (!/\[Shot\s*1\]/i.test(prompt)) issues.push('正文必须以 [Shot 1] 开镜，且第一镜不加时间戳')
   if (/\[Shot\s*1\][^\n]*At\s+\d{2}:\d{2}/i.test(prompt)) {
     issues.push('[Shot 1] 不得加时间戳；后续镜才写 [Shot 2] At 00:03.000')
@@ -1193,8 +1213,6 @@ export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<str
 
   const cueLines = spokenLinesForPrompt(resolved)
   const camera = CAMERA_EN[normalizeCameraMovement(resolved.cameraMovement)]
-  const plan = describeInternalShotPlan(resolved.duration, cueLines.length)
-  const lastBeat = h3InternalShotPlan(resolved.duration, cueLines.length).at(-1)?.beat || durationText(resolved)
   try {
     const resp = await callLLM({
       messages: [
@@ -1203,55 +1221,53 @@ export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<str
           content: `You write MiniMax / Seedance shot-video prompts. Output JSON only:
 {"integrated_multimodal_description":"...","overall_soundscape":"..."}
 
-This is ONE generated clip. Follow this specimen layout exactly.
+This is ONE generated clip. The field format is fixed, but the filmmaking is NOT a fill-in template. Read the dramatic event first, then author the shot around its unique action and emotional causality.
 
-Layout of integrated_multimodal_description:
-1) START with the picture roster. One line per reference image. This is mandatory. Format:
+Required output structure:
+1) START with the picture roster. One line per reference image. This is mandatory:
 Reference pictures (follow this mapping exactly):
 图1：「中文名」 / <Picture 1> is this person's character design. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
 图2：「中文名」 / <Picture 2> is ...
 图3：「场景名」 / <Picture 3> is the location. ...
 Never omit 图1/图2/图3 when those pictures exist. These images are identity/location locks, NOT first frames. Do not write "Picture 1 is the first frame" or "Picture 1 aligns with 0.00 seconds".
 
-2) Then [Shot 1] plus a grounded style paragraph: genre, photorealistic live-action, aspect, clean low-noise digital cinema, natural skin, light. Who is in the room, what the beat is emotionally, that this is one continuous N-second shot, camera extremely restrained.
+2) After the roster, write [Shot 1]. Add [Shot 2] At 00:SS.mmm and [Shot 3] only when a cut, reframe, reveal, impact, or change of dramatic focus genuinely earns them. A quiet reaction may remain one shot; a doorway-to-desk action, supernatural reveal, chase, fight, or large-scale effect usually needs changing framing. Never divide time into automatic opening/middle/hold slots.
 
-3) Then timed beats using [00:00.000–00:01.200] ranges covering the whole clip. Write concrete props, hands, eyelines, breath, and the order of the emotional change.
+3) Build a visible cause-and-effect chain specific to this scene: opening physical state -> trigger -> immediate bodily response -> purposeful action -> visible result -> final continuity state. Name the actual door, switch, key ring, statue, wardrobe, rain-streaked window, weapon, debris, or other story prop. Make the environment respond where appropriate: light flickers, fabric trails, rain reflections shift, dust lifts, furniture jolts, or sound changes. Every sentence must describe something filmable.
 
-4) Dialogue ONLY inside <d>. Use this form when someone speaks on screen:
+4) Camera movement must be motivated by what the audience needs to discover. State where the camera begins, what action or reveal makes it move, what foreground/background parallax or focus change occurs, and where it lands. The supplied camera family is only a preference, not a command. Static is valid only when stillness creates tension; do not repeat a static-camera sentence in every beat. Never combine “no pan, tilt, or zoom” with a push, pull, pan, tilt, or arc.
+
+5) Direct performance through observable behavior and progression, not emotion labels: weight in the steps, a delayed glance, fingers missing the switch, breath catching, shoulders releasing, jaw tightening, or attention shifting to a sound. Derive the exact emotion from this beat; never turn every 怒 into “cold and controlled,” and never use generic instructions such as “faces show a specific reaction,” “play the emotional change,” or “hold the last expression and let the frame breathe.”
+
+6) Treat each reference character according to the state described in the scene: living body, carved statue, portrait, reflection, shadow, off-screen voice, hidden presence, or absent identity reference. A character reference does NOT prove that a full living person is physically present. Do not duplicate a referenced identity as both a person and a prop unless the action explicitly shows a transformation.
+
+7) Dialogue ONLY inside <d>. Use this form when someone speaks on screen:
 <d>[Chinese, spoken on screen by EnglishName, delivery and accurate lip synchronization] 原词</d>
 Delivery stays in the bracket. The tag contains ONLY the words a mouth actually says. Never dump 场记, timestamps, style, 图1, Camera language, or performance notes into <d>.
 Nobody else mouths those words. If a character does not speak, their lips remain completely closed.
 
-5) End the description with:
-Camera language:
-...
-Performance direction:
-...
-
 Rules:
-- Rewrite the user's node prompt into that professional shot. Do not replace their beat with a generic idle shot.
+- Preserve the user's event. Expand what is already implied by the script, but do not invent a different incident.
+- Write direct, decisive filmmaking prose like a director describing the finished moving image. The format is a container, not a prose template.
 - English for action, camera, light, performance. Chinese is allowed ONLY (1) inside <d> for spoken words, and (2) 图N plus 「source names」 in the picture roster.
-- In action prose, use the actual names from the roster (English romanization if given, otherwise the name next to 图N). Do not anonymize them as "the man (S1)" if you know who 图1 and 图2 are.
+- In action prose, use stable romanized names plus (S1), (S2), etc. Keep the same S-number throughout. Do not anonymize a known character as “the man.”
 - Spoken lines already extracted below are the ONLY dialogue. If the list is empty, write No dialogue. No lips moving. NEVER invent speech from 场记, timestamps, style, or picture roster. Never put 无 or director notes inside a d tag.
 - MUST COPY the picture roster block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder 图1/图2/图3.
-- Timed beats like [00:00.000–00:01.200] are picture timing, not speech.
 - Do not write subject_definitions, summary, retention_analysis.
 - Do not show grids, four-view sheets, storyboards, collage, captions, subtitles, or labels on screen.
-- Last timed beat MUST end with: The action develops continuously and finishes naturally within ${lastBeat} seconds.
-- overall_soundscape: English ambience and physical action sounds only. No quoted Chinese. No narrator and no music.
+- End the visual description once with: The complete action develops continuously and finishes naturally within ${durationText(resolved)} seconds.
+- overall_soundscape must follow the visible chronology and name the exact synchronized sounds of each action. English ambience and physical sounds only; spoken words are represented by their d tags and should not be quoted again. No music.
 - non_diegetic_music is always N/A.
-
-Suggested duration coverage for this ${durationText(resolved)}s clip:
-${plan}`
+Before returning JSON, silently reject and rewrite your draft if it contains generic time slots, repeated static-camera instructions, camera contradictions, a reference identity shown in the wrong physical form, unmotivated close-ups, idle posing, or sound effects unrelated to visible actions.`
         },
         {
           role: 'user',
           content: `Style: ${resolved.aesthetic || 'Cinematic'}
 Duration: ${durationText(resolved)}s
 Aspect: ${resolved.aspectRatio || '16:9'} (${String(resolved.aspectRatio || '16:9') === '9:16' ? 'vertical portrait, taller than wide' : String(resolved.aspectRatio || '16:9') === '1:1' ? 'square' : 'horizontal landscape, wider than tall'})
-Camera family (written as a natural English action): ${camera}
+Camera preference (override it when the event needs a motivated reframe or cut): ${camera}
 Scene / light: ${[englishOrOmit(resolved.sceneLighting), englishOrOmit(resolved.sceneAnchor), englishOrOmit(resolved.sceneDescription)].filter(Boolean).join(' / ') || 'from director notes'}
-On-screen people (match 图N; use these names in the action, do not anonymize them):
+Available character identity references (do not assume every one is a living body in this beat; infer the actual visible form from the scene):
 ${(resolved.onScreenNames || []).map((name, i) => `S${i + 1} = ${name}`).join('\n') || onScreenEnglish(resolved).join(', ') || '(from director notes)'}
 MUST COPY into the prompt as 图N：「中文名」 / <Picture N> mapping (identity/location lock, not first frames):
 ${pictureRoster(resolved) || 'no extra pictures'}
@@ -1259,16 +1275,17 @@ Voice mode: ${cueLines.length ? resolved.voiceMode || 'dialogue' : 'none — no 
 Spoken lines already extracted (quotes / 台词 / 口播栏 only; director notes are NOT speech):
 ${cueLines.length ? cueLines.map((line, i) => `${i + 1}. ${line}`).join('\n') : '(none — write No dialogue. No lips moving.)'}
 Sound notes: ${englishOrOmit(resolved.audioDescription) || '(from the node text)'}
-NODE PROMPT TO REWRITE (source of truth — action AND any real dialogue; 场记/时长/画风 are picture, not speech):
+NODE MATERIAL TO DIRECT (source of truth for event, props, blocking and continuity; 场记/时长/画风 are not speech):
 ${source || '(perform the beat in this location)'}`
         }
       ],
       jsonMode: true,
-      temperature: 0.3,
-      maxTokens: 3600,
+      temperature: 0.62,
+      maxTokens: 4800,
+      timeoutMs: 240_000,
       signal: resolved.signal
     })
-    const parsed = JSON.parse(stripJsonFence(resp.content)) as {
+    let parsed = JSON.parse(stripJsonFence(resp.content)) as {
       detailed_description?: string
       integrated_multimodal_description?: string
       overall_soundscape?: string
@@ -1280,9 +1297,47 @@ ${source || '(perform the beat in this location)'}`
         extractField(desc, 'detailed_description') ||
         desc
     }
-    const sound = String(parsed.overall_soundscape || '').trim()
-    if (!desc || isH3FillTemplate(desc) || /Play the following director notes/i.test(desc)) {
-      return composeH3VideoPrompt(resolved)
+    let sound = String(parsed.overall_soundscape || '').trim()
+    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc)) {
+      const repair = await callLLM({
+        messages: [
+          {
+            role: 'system',
+            content: `Rewrite a rejected shot-video prompt as JSON only: {"integrated_multimodal_description":"...","overall_soundscape":"..."}.
+The rejected draft was lifeless because it used a reusable timing template, repeated static-camera instructions, or failed to preserve the actual event.
+Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue. End once with the full ${durationText(resolved)}-second completion sentence.`
+          },
+          {
+            role: 'user',
+            content: `Reference roster (copy verbatim):
+${pictureRoster(resolved) || 'no extra pictures'}
+
+Trusted dialogue:
+${cueLines.length ? cueLines.join('\n') : '(none; no dialogue and no lips moving)'}
+
+Original scene material:
+${source}
+
+Rejected draft (diagnose it silently; do not imitate its structure):
+${desc || '(empty)'}`
+          }
+        ],
+        jsonMode: true,
+        temperature: 0.72,
+        maxTokens: 4800,
+        timeoutMs: 240_000,
+        signal: resolved.signal
+      })
+      parsed = JSON.parse(stripJsonFence(repair.content)) as {
+        detailed_description?: string
+        integrated_multimodal_description?: string
+        overall_soundscape?: string
+      }
+      desc = String(parsed.integrated_multimodal_description || parsed.detailed_description || '').trim()
+      sound = String(parsed.overall_soundscape || '').trim()
+    }
+    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc)) {
+      throw new Error('模型两次返回了机械模板稿，已阻止这份低质量提示词进入视频生成。')
     }
     // 台词以入口 cueLines / voiceover 为准；禁止因模型乱写 <d> 就强行改成 dialogue
     const trusted = spokenLinesForPrompt(resolved)
@@ -1297,13 +1352,19 @@ ${source || '(perform the beat in this location)'}`
     }
     const shaped = applyDialogue(desc, resolvedWithSpeech)
     const spoken = trusted.join(' ')
-    return assembleOfficial(
+    const assembled = assembleOfficial(
       shaped,
       sound || defaultSoundscape(resolvedWithSpeech, spoken),
       'N/A',
       resolvedWithSpeech
     )
-  } catch {
-    return composeH3VideoPrompt(resolved)
+    if (isLifelessH3Prompt(assembled)) {
+      throw new Error('提示词存在重复静态运镜或机械时间槽，已阻止提交。')
+    }
+    return assembled
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    const reason = error instanceof Error ? error.message : String(error || '')
+    throw new Error(`没有生成可用的电影化镜头稿：${reason || '请重试'}`)
   }
 }

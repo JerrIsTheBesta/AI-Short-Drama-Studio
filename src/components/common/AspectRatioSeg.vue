@@ -4,17 +4,20 @@ import { useProjectStore } from '@/stores'
 import { ASPECT_PRESETS } from '@/utils/aspect'
 import type { AspectRatio } from '@/types'
 
-defineProps<{
+const props = defineProps<{
   compact?: boolean
+  modelValue?: AspectRatio
 }>()
+const emit = defineEmits<{ 'update:modelValue': [value: AspectRatio] }>()
 
 const project = useProjectStore()
-const current = computed(() => project.current?.settings.aspectRatio ?? '16:9')
+const current = computed(() => props.modelValue ?? project.current?.settings.aspectRatio ?? '16:9')
 
 function pick(ar: AspectRatio) {
   if (!project.current) return
-  if (project.current.settings.aspectRatio === ar) return
-  project.setAspectRatio(ar)
+  if (current.value === ar) return
+  if (props.modelValue !== undefined) emit('update:modelValue', ar)
+  else project.setAspectRatio(ar)
 }
 </script>
 
@@ -47,7 +50,7 @@ function pick(ar: AspectRatio) {
         <small>{{ a.value }}</small>
       </button>
     </div>
-    <p class="ar-hint">默认跟创建项目时选的一样。改了只影响之后新生成的分镜图和视频。</p>
+    <p class="ar-hint">节点可独立设置；项目比例只作为新节点的默认值。</p>
   </div>
 </template>
 

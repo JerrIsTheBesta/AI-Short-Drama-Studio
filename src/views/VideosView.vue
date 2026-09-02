@@ -2,28 +2,12 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import {
-  composeVideoPrompt,
-  buildH3ImageSlots,
-  spokenTextOnly,
-  DIGITAL_HUMAN_VISUAL_LOCK,
-  DIGITAL_HUMAN_AESTHETIC,
-  DIGITAL_HUMAN_AUDIO_DESCRIPTION,
-  DIGITAL_HUMAN_SPEAKER_HINT,
-  DIGITAL_HUMAN_SPEAKER_NAME,
-  DIGITAL_HUMAN_SCENE_NAME,
-  DIGITAL_HUMAN_SCENE_DESCRIPTION,
-  DIGITAL_HUMAN_SCENE_ANCHOR,
-  DIGITAL_HUMAN_IMAGE_ASSIGNMENT
-} from '@/services/ai'
-import { collectShotVideoEntries, packVideoRefEntries, sceneForShot, subjectsForShot } from '@/utils/consistency'
 import { stillModeForShot, shotMissingStill } from '@/utils/videoStill'
 import { applyShotVideoModel } from '@/services/canvas/videoModel'
-import { resolveShotPlace } from '@/utils/shotPlace'
 import { generateShotVideo, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
-import { effectiveShotAudioMode, editableVideoPrompt, resolveH3VoiceMode, synthesizeVideoPerformance } from '@/utils/shot'
+import { effectiveShotAudioMode } from '@/utils/shot'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -176,7 +160,7 @@ async function loadHistory() {
 }
 
 function updateVideoPrompt(shot: Shot, value: string) {
-  project.updateShot(shot.id, { videoPrompt: value })
+  project.setShotVideoPrompt(shot.id, value)
 }
 
 async function resetVideoPrompt(shot: Shot) {
@@ -212,63 +196,7 @@ function changeAudioMode(shot: Shot, mode: NonNullable<Shot['audioMode']>) {
 }
 
 function composedPrompt(shot: Shot) {
-  if (shot.compiledVideoPrompt?.trim()) return shot.compiledVideoPrompt
-  if (isDigitalHuman.value) {
-    const spoken = spokenTextOnly(shot.voiceover || '')
-    return composeVideoPrompt({
-      prompt: DIGITAL_HUMAN_VISUAL_LOCK,
-      aesthetic: DIGITAL_HUMAN_AESTHETIC,
-      audioDescription: DIGITAL_HUMAN_AUDIO_DESCRIPTION,
-      voiceover: spoken,
-      voiceMode: spoken ? 'dialogue' : 'none',
-      speakerHint: DIGITAL_HUMAN_SPEAKER_HINT,
-      speakerName: DIGITAL_HUMAN_SPEAKER_NAME,
-      onScreenNames: [DIGITAL_HUMAN_SPEAKER_NAME],
-      sceneName: DIGITAL_HUMAN_SCENE_NAME,
-      sceneDescription: DIGITAL_HUMAN_SCENE_DESCRIPTION,
-      sceneAnchor: DIGITAL_HUMAN_SCENE_ANCHOR,
-      shotTitle: 'Locked single-person talking head',
-      imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
-      duration: shot.duration,
-      width: width.value,
-      height: height.value,
-      aspectRatio: aspectRatio.value,
-      cameraMovement: 'static',
-      mode: 'I2VA'
-    })
-  }
-  const promptStyle = getVideoPromptStyle()
-  const spoken = spokenTextOnly(shot.voiceover || '')
-  const packed = project.current
-    ? packVideoRefEntries(collectShotVideoEntries(shot, project.current))
-    : []
-  const imageSlots = buildH3ImageSlots(packed)
-  const onScreenNames = project.current ? subjectsForShot(shot, project.current).map((item) => item.name) : []
-  const speaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
-  const scene = project.current ? sceneForShot(shot, project.current) : undefined
-  const place = resolveShotPlace(shot, scene)
-  return composeVideoPrompt({
-    prompt: editableVideoPrompt(shot) || synthesizeVideoPerformance(shot),
-    aesthetic: aesthetic.value,
-    audioDescription: shot.audioDescription,
-    voiceover: spoken,
-    voiceMode: spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none',
-    speakerHint: shot.speakerHint,
-    speakerName: speaker,
-    onScreenNames,
-    sceneName: place.name,
-    sceneLighting: place.lighting,
-    shotTitle: shot.title,
-    imageAssignments: imageSlots.map((slot) => slot.job),
-    imageSlots,
-    duration: shot.duration,
-    width: width.value,
-    height: height.value,
-    aspectRatio: aspectRatio.value,
-    cameraMovement: shot.cameraMovement,
-    promptStyle,
-    mode: 'R2VA'
-  })
+  return shot.compiledVideoPrompt ?? ''
 }
 
 function toggleExpanded(id: string) {
@@ -515,7 +443,7 @@ function next() {
 
         <div class="shot-prompt">
           <div class="prompt-bar">
-            <div class="prompt-label">视频内容表现</div>
+            <div class="prompt-label">实际提交给视频模型的提示词</div>
             <div class="prompt-tools">
               <button class="reset-btn" :disabled="optimizing.has(shot.id)" @click="optimizeVideoPrompt(shot)">
                 {{ optimizing.has(shot.id) ? '优化中…' : '优化提示词' }}
@@ -529,7 +457,7 @@ function next() {
           <textarea
             class="prompt-edit"
             rows="5"
-            :value="editableVideoPrompt(shot)"
+            :value="shot.compiledVideoPrompt ?? ''"
             :placeholder="videoPromptPlaceholder"
             @input="updateVideoPrompt(shot, ($event.target as HTMLTextAreaElement).value)"
           />

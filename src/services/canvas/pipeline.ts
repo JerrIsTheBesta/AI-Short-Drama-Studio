@@ -131,7 +131,7 @@ export function isContinueRequest(text: string) {
   return (
     /^(继续|下一步|接着做|往下|往下做|可以往下|可以|好的|好|要|嗯|行|开始|开始做|帮我做|做一下)([，,。!！ ]*)$/.test(
       t
-    ) || /继续(往下|做|吧)|接着(做|往下)|下一步|往下做/.test(t)
+    ) || /^(继续往下|继续做|继续吧|接着做|接着往下|下一步|往下做)([，,。!！ ]*)$/.test(t)
   )
 }
 
@@ -246,6 +246,9 @@ export const TOOL_LABEL: Record<string, string> = {
   generate_audio: '生成口播',
   generate_all_audio: '补齐口播',
   sync_canvas: '同步画布',
+  create_image_node: '创建图片节点',
+  create_video_node: '创建视频节点',
+  update_node: '修改生成节点',
   run_node: '生成节点',
   focus_node: '定位画布节点'
 }

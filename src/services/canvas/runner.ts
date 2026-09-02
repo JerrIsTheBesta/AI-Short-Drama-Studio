@@ -8,14 +8,13 @@ import {
   storyboardToShots,
   applyAestheticToScript,
   isPlayReady,
-  composeVideoPrompt,
   buildH3ImageSlots,
   spokenTextOnly,
   compileH3OfficialPrompt,
   extractSpokenFromNotes,
   spokenCueLines,
   ensurePictureIdentity,
-  isMessyH3Prompt,
+  compiledH3PromptNeedsRebuild,
   enrichVideoPerformance,
   reviewImageQuality,
   reviewVideoQuality,
@@ -55,6 +54,7 @@ import { emitCanvasActivity } from './canvasBridge'
 import { extractStageLabel, extractStageNoun, nextExtractStage, type ExtractStage } from './pipeline'
 import { friendlyAiError } from '@/services/ai/abort'
 import { lookFromScript, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
+import { aspectToSize } from '@/utils/aspect'
 import {
   boardSendPrompt,
   scenePropSendPrompt,
@@ -63,8 +63,7 @@ import {
   defaultShotImagePrompt,
   subjectSendPrompt,
   videoSendPrompt,
-  shotDirectorBrief,
-  fillEmptyGeneratePrompt
+  shotDirectorBrief
 } from '@/utils/nodePrompt'
 import { playTitleOf, topicFromBrief } from '@/utils/storyBrief'
 import { isNodeRunning, mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jobs'
@@ -72,7 +71,7 @@ import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
 import { toDigitalHumanWav } from '@/services/ffmpeg'
-import type { CanvasNode, ID, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
+import type { AspectRatio, CanvasNode, ID, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
 import {
   isH3VideoFamily,
   normalizeH3GenMode,
@@ -94,17 +93,38 @@ function evenPx(n: number) {
   return v % 2 === 0 ? v : v + 1
 }
 
-function imageGenSize(kind: 'shot' | 'sheet' | 'scene') {
+function imageGenSize(kind: 'shot' | 'sheet' | 'scene', aspectRatio?: AspectRatio) {
   const project = useProjectStore()
   const hd = Boolean(pendingRun.hd)
   if (kind === 'sheet') {
     return hd ? { width: 2560, height: 1440 } : { width: 1792, height: 1024 }
   }
-  const w = project.current?.settings.width ?? 1280
-  const h = project.current?.settings.height ?? 720
+  const base = aspectRatio
+    ? aspectToSize(aspectRatio)
+    : {
+        width: project.current?.settings.width ?? 1280,
+        height: project.current?.settings.height ?? 720
+      }
+  const w = base.width
+  const h = base.height
   if (!hd) return { width: w, height: h }
   const scale = Math.max(1, 2048 / Math.max(w, h))
   return { width: evenPx(w * scale), height: evenPx(h * scale) }
+}
+
+function canvasNodeAspect(node: CanvasNode | undefined, fallback: AspectRatio): AspectRatio {
+  return node?.data.aspectRatio ?? fallback
+}
+
+function shotNodeAspect(
+  project: NonNullable<ReturnType<typeof useProjectStore>['current']>,
+  shotId: string,
+  type: 'shotBoard' | 'shotImage' | 'shotVideo'
+): AspectRatio {
+  return canvasNodeAspect(
+    project.canvas?.nodes.find((node) => node.type === type && node.data.shotId === shotId),
+    project.settings.aspectRatio
+  )
 }
 
 function ensureNotCancelled(signal?: AbortSignal) {
@@ -437,14 +457,15 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
     project.updateShot(shot.id, { boardPrompt: prompt })
   }
   onProgress?.(blobs.length ? `画故事看板（${blobs.length} 张参考）...` : '画故事看板...')
-  const size = imageGenSize('shot')
+  const aspectRatio = shotNodeAspect(project.current, shot.id, 'shotBoard')
+  const size = imageGenSize('shot', aspectRatio)
   const result = await generateImage(
     {
       prompt,
       style,
       width: size.width,
       height: size.height,
-      aspectRatio: project.current.settings.aspectRatio,
+      aspectRatio,
       referenceImages: blobs.length ? blobs : undefined,
       referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -516,14 +537,15 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
     project.updateShot(shot.id, { imagePrompt: prompt })
   }
   onProgress?.(blobs.length ? `画四宫格关键帧（${blobs.length} 张人物/场景参考）...` : '画四宫格关键帧...')
-  const size = imageGenSize('shot')
+  const aspectRatio = shotNodeAspect(project.current, shot.id, 'shotImage')
+  const size = imageGenSize('shot', aspectRatio)
   const result = await generateImage(
     {
       prompt,
       style,
       width: size.width,
       height: size.height,
-      aspectRatio: project.current.settings.aspectRatio,
+      aspectRatio,
       referenceImages: blobs.length ? blobs : undefined,
       referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -600,6 +622,8 @@ async function regenerateDigitalHumanShot(
   if (!p || p.pipelineMode !== 'smart-speech' || flow?.mode !== 'digital-human') {
     throw new Error('当前不是数字人口播项目')
   }
+  const aspectRatio = shotNodeAspect(p, shot.id, 'shotVideo')
+  const videoSize = aspectToSize(aspectRatio)
   const referenceId = flow.imageAssetId
   if (!referenceId) {
     throw new Error('数字人口播人物参考图已丢失，已阻止随机生成人物。请重新上传人物图后再生成。')
@@ -665,9 +689,9 @@ async function regenerateDigitalHumanShot(
       shotTitle: 'Locked single-person talking head',
       imageAssignments: [DIGITAL_HUMAN_IMAGE_ASSIGNMENT],
       duration: Math.min(15, Math.max(5, Math.ceil(shot.duration))),
-      width: p.settings.width,
-      height: p.settings.height,
-      aspectRatio: p.settings.aspectRatio,
+      width: videoSize.width,
+      height: videoSize.height,
+      aspectRatio,
       cameraMovement: 'static',
       audioBlob: speechBlob,
       audioSync: true,
@@ -737,16 +761,6 @@ function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
   return videoModel !== 'wan-prime' && normalizeH3GenMode(shot.h3GenMode) === 'fl2va'
 }
 
-export function seedEmptyShotVideoPrompts() {
-  const project = useProjectStore()
-  const p = project.current
-  if (!p) return
-  for (const shot of p.shots) {
-    const patch = fillEmptyGeneratePrompt('shotVideo', p, shot)
-    if (patch) project.updateShot(shot.id, patch)
-  }
-}
-
 export function rebindShotScenes() {
   const project = useProjectStore()
   const p = project.current
@@ -765,11 +779,11 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const project = useProjectStore()
   const assets = useAssetsStore()
   if (!project.current) throw new Error('没有打开的项目')
-  const promptPatch = fillEmptyGeneratePrompt('shotVideo', project.current, shot)
-  if (promptPatch) {
-    project.updateShot(shot.id, promptPatch)
-    shot = refreshShot(shot.id)
+  if (!(shot.compiledVideoPrompt || '').trim()) {
+    throw new Error('图生视频提示词为空。请自己填写，或主动点击“优化提示词 / 按分镜重铺”；系统不会自动回填。')
   }
+  const aspectRatio = shotNodeAspect(project.current, shot.id, 'shotVideo')
+  const videoSize = aspectToSize(aspectRatio)
   if (
     project.current.pipelineMode === 'smart-speech' &&
     project.current.speechWorkflow?.mode === 'digital-human'
@@ -813,9 +827,9 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
         sceneLighting: place.lighting,
         shotTitle: shot.title,
         duration: clampVideoDuration(shot.duration, videoModel),
-        width: project.current.settings.width,
-        height: project.current.settings.height,
-        aspectRatio: project.current.settings.aspectRatio,
+        width: videoSize.width,
+        height: videoSize.height,
+        aspectRatio,
         cameraMovement: shot.cameraMovement,
         promptStyle,
         videoModel: 'h3',
@@ -913,20 +927,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const hasKeyframeFrame = packed.some((entry) => entry.kind === 'keyframe')
   const h3Mode = hasKeyframeFrame || hasIdentityRefs || packed.length > 1 ? 'R2VA' : 'I2VA'
   shot = refreshShot(shot.id)
-  let officialPrompt = ensurePictureIdentity(videoSendPrompt(shot, project.current), {
-    prompt: '',
-    imageSlots,
-    duration: shot.duration
-  })
-  if (isMessyH3Prompt(officialPrompt)) {
-    onProgress?.('场记不能当台词，正在重写成镜头提示词…')
-    officialPrompt = await optimizeShotVideoPrompt(shot, signal)
-    officialPrompt = ensurePictureIdentity(officialPrompt, {
-      prompt: '',
-      imageSlots,
-      duration: shot.duration
-    })
-  }
+  const officialPrompt = videoSendPrompt(shot, project.current)
   onProgress?.('使用节点上的完整提示词出视频…')
   const slotNames = packed.map((entry, index) =>
     entry.kind === 'character'
@@ -959,9 +960,9 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       imageAssignments,
       imageSlots,
       duration: clampVideoDuration(shot.duration, videoModel),
-      width: project.current.settings.width,
-      height: project.current.settings.height,
-      aspectRatio: project.current.settings.aspectRatio,
+      width: videoSize.width,
+      height: videoSize.height,
+      aspectRatio,
       cameraMovement: shot.cameraMovement,
       promptStyle,
       videoModel,
@@ -982,28 +983,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
   const asset = await assets.add(result.blob, 'video', 'ai-generated', {
     filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
-    prompt: composeVideoPrompt({
-      prompt: officialPrompt,
-      aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
-      audioDescription: shot.audioDescription,
-      voiceover: spoken,
-      voiceMode,
-      speakerHint: shot.speakerHint,
-      speakerName: visibleSpeaker,
-      onScreenNames,
-      sceneName: place.name,
-      sceneLighting: place.lighting,
-      shotTitle: shot.title,
-      imageAssignments,
-      imageSlots,
-      duration: shot.duration,
-      width: project.current.settings.width,
-      height: project.current.settings.height,
-      aspectRatio: project.current.settings.aspectRatio,
-      cameraMovement: shot.cameraMovement,
-      promptStyle,
-      mode: h3Mode
-    }),
+    prompt: result.prompt,
     projectId: project.current.id,
     shotId: shot.id
   })
@@ -1042,6 +1022,8 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   if (!project.current) throw new Error('没有打开的项目')
   shot = refreshShot(shot.id)
   const p = project.current
+  const aspectRatio = shotNodeAspect(p, shot.id, 'shotVideo')
+  const videoSize = aspectToSize(aspectRatio)
   const packed = packVideoRefEntries(collectShotVideoEntries(shot, p))
   const imageSlots = buildH3ImageSlots(packed)
   const cast = subjectsForShot(shot, p)
@@ -1049,12 +1031,13 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   const place = resolveShotPlace(shot, scene)
   const onScreenNames = cast.map((item) => item.name)
   const nodeText = (shot.compiledVideoPrompt || '').trim()
+  const usableNodeText = nodeText && !compiledH3PromptNeedsRebuild(nodeText) ? nodeText : ''
   const performance = (shot.videoPrompt || '').trim()
   const brief = shotDirectorBrief(shot, p)
   const source = [
-    nodeText ? `【节点当前提示词，改写以此为准；图1图2图3身份以系统映射为准】\n${nodeText}` : '',
-    performance && performance !== nodeText ? `【本镜场记，不是台词】\n${performance}` : '',
-    brief && !nodeText.includes(brief) ? `【分镜字段，不是台词】\n${brief}` : '',
+    performance ? `【本镜场记，剧情与动作以此为准，不是台词】\n${performance}` : '',
+    brief ? `【分镜字段与可见画面，补足具体道具、空间和动作】\n${brief}` : '',
+    usableNodeText ? `【用户保留的已有成片稿，只吸收其中独有的有效细节】\n${usableNodeText}` : '',
     shot.voiceover?.trim() ? `【口播栏，只有这里和引号里的原词才是台词】\n${shot.voiceover.trim()}` : ''
   ]
     .filter(Boolean)
@@ -1064,7 +1047,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     shot.voiceover || '',
     performance.replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, ''),
     // 旧稿里的引号对白可以保留，但去掉整段场记式中文
-    nodeText
+    usableNodeText
       .replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, '')
       .replace(/Reference pictures[\s\S]*?(?=\[Shot\s*\d+\]|Camera language|$)/i, '')
   ]
@@ -1104,9 +1087,9 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     imageAssignments: imageSlots.map((slot) => slot.job),
     imageSlots,
     duration: shot.duration,
-    width: p.settings.width,
-    height: p.settings.height,
-    aspectRatio: p.settings.aspectRatio,
+    width: videoSize.width,
+    height: videoSize.height,
+    aspectRatio,
     cameraMovement: shot.cameraMovement,
     shotSize: shot.shotSize,
     blocking: shot.blocking,
@@ -1120,7 +1103,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   }),
     { prompt: '', imageSlots, duration: shot.duration }
   )
-  project.updateShot(shot.id, { compiledVideoPrompt: compiled })
+  project.setShotVideoPrompt(shot.id, compiled)
   await project.save()
   return compiled
 }
@@ -1391,7 +1374,8 @@ export async function runExtractStoryboard(
   let finalStagePersisted = false
   const persistStage = async (
     done: ExtractStage,
-    partial: import('@/services/ai/storyboard').StoryboardResult
+    partial: import('@/services/ai/storyboard').StoryboardResult,
+    meta?: { partial?: boolean; completed?: number; total?: number }
   ) => {
     if (!project.current) return
     if (done === 'subjects') {
@@ -1404,14 +1388,13 @@ export async function runExtractStoryboard(
         project.setScript(script)
       }
     } else {
-      finalStagePersisted = true
+      finalStagePersisted = !meta?.partial
       const stageShots = storyboardToShots(partial)
       if (project.current.pipelineMode === 'remake') {
         for (const shot of stageShots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
       }
       project.setShots(mergeShotAssets(stageShots, project.current.shots))
       rebindShotScenes()
-      seedEmptyShotVideoPrompts()
     }
     project.setCanvas(rebuildCanvasGraph(project.current, true))
     const landed =
@@ -1419,7 +1402,9 @@ export async function runExtractStoryboard(
         ? `✓ 人物已上画布（${project.current.subjects?.length || 0} 个），本步完成`
         : done === 'scenes'
           ? `✓ 场景已上画布（${project.current.scenes?.length || 0} 个），本步完成`
-          : `✓ 分镜已上画布（${project.current.shots.length} 镜），本步完成`
+          : meta?.partial
+            ? `✓ 分镜小组 ${meta.completed || 0}/${meta.total || 0} 已上画布（累计 ${project.current.shots.length} 镜）`
+            : `✓ 分镜已上画布（${project.current.shots.length} 镜），本步完成`
     onProgress?.(landed)
     await project.save()
   }
@@ -1451,7 +1436,6 @@ export async function runExtractStoryboard(
     }
     project.setShots(mergeShotAssets(shots, project.current.shots))
     rebindShotScenes()
-    seedEmptyShotVideoPrompts()
   }
   if (project.current.script) {
     project.setScript({
@@ -1688,7 +1672,6 @@ export async function runVideoRemake(
     project.setSubjects(analysis.result.subjects ?? [])
     project.setScenes(analysis.result.scenes ?? [])
     rebindShotScenes()
-    seedEmptyShotVideoPrompts()
     project.setScript({
       ...project.current.script,
       topic: analysis.topic || topic,
@@ -1751,8 +1734,8 @@ export async function generateFreeformImage(
   if (!p) throw new Error('没有打开的项目')
   const node = p.canvas?.nodes.find((n) => n.id === nodeId)
   if (!node) throw new Error('找不到节点')
-  const prompt = node.data.prompt?.trim()
-  if (!prompt) throw new Error('请先写提示词')
+  const prompt = node.data.prompt ?? ''
+  if (!prompt.trim()) throw new Error('请先写提示词')
   onProgress?.('准备参考图...')
   const library = useLibraryStore()
   const blobs: Blob[] = []
@@ -1761,14 +1744,15 @@ export async function generateFreeformImage(
     if (b) blobs.push(b)
   }
   const look = lookFromScript(p.script)
-  const size = { width: p.settings.width, height: p.settings.height }
+  const aspectRatio = canvasNodeAspect(node, p.settings.aspectRatio)
+  const size = imageGenSize('shot', aspectRatio)
   onProgress?.('正在出图...')
   const result = await generateImage({
     prompt,
     style: look.style,
     width: size.width,
     height: size.height,
-    aspectRatio: p.settings.aspectRatio,
+    aspectRatio,
     referenceImages: blobs.length ? blobs : undefined,
     model: imageModelForProject(p.pipelineMode),
     signal
@@ -1796,8 +1780,8 @@ export async function generateFreeformVideo(
   if (!p) throw new Error('没有打开的项目')
   const node = p.canvas?.nodes.find((n) => n.id === nodeId)
   if (!node) throw new Error('找不到节点')
-  const prompt = node.data.prompt?.trim()
-  if (!prompt) throw new Error('请先写提示词')
+  const prompt = node.data.prompt ?? ''
+  if (!prompt.trim()) throw new Error('请先写提示词')
   const ids = resolvedCanvasReferenceAssetIds(p, node)
   const videoModel = normalizeVideoGenModel(node.data.videoModel)
   const useFl2va = isH3VideoFamily(videoModel) && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
@@ -1827,6 +1811,8 @@ export async function generateFreeformVideo(
   }
   if (p.folderPath) setActiveProjectDir(p.folderPath)
   const duration = clampVideoDuration(node.data.duration, videoModel, 8)
+  const aspectRatio = canvasNodeAspect(node, p.settings.aspectRatio)
+  const videoSize = aspectToSize(aspectRatio)
   const slotEntries = canvasReferenceSlotEntries(p, node)
   const imageSlots = buildH3ImageSlots(
     slotEntries.length
@@ -1834,16 +1820,8 @@ export async function generateFreeformVideo(
       : blobs.map((_, i) => ({ kind: 'extra' as const, name: `reference ${i + 1}` }))
   )
   onProgress?.(`正在出视频（${blobs.length} 张参考图）...`)
-  let sendPrompt = ensurePictureIdentity(prompt, {
-    prompt,
-    imageSlots,
-    duration
-  })
-  if (isMessyH3Prompt(sendPrompt)) {
-    onProgress?.('场记不能当台词，正在重写成镜头提示词…')
-    sendPrompt = await optimizeFreeformVideoPrompt(nodeId, signal)
-    sendPrompt = ensurePictureIdentity(sendPrompt, { prompt: sendPrompt, imageSlots, duration })
-  }
+  // 自由图生视频节点以输入框为唯一真源。生成按钮不得优化、清洗或回写提示词。
+  const sendPrompt = prompt
   const result = await generateVideo(
     {
       prompt: sendPrompt,
@@ -1852,9 +1830,9 @@ export async function generateFreeformVideo(
       referenceImages: blobs.slice(1, videoMaxRefImages(videoModel)),
       imageSlots,
       duration,
-      width: p.settings.width,
-      height: p.settings.height,
-      aspectRatio: p.settings.aspectRatio,
+      width: videoSize.width,
+      height: videoSize.height,
+      aspectRatio,
       voiceMode: 'none',
       promptStyle: 'scene-narrative',
       videoModel,
@@ -1872,7 +1850,7 @@ export async function generateFreeformVideo(
   )
   const asset = await assets.add(result.blob, 'video', 'ai-generated', {
     filename: `${node.data.label || '视频'}.mp4`,
-    prompt,
+    prompt: result.prompt,
     projectId: p.id
   })
   project.patchCanvasNode(nodeId, { outputAssetId: asset.id, videoTaskId: undefined })
@@ -1891,6 +1869,8 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
   const source = (node.data.prompt || '').trim()
   if (!source) throw new Error('请先写提示词')
   const videoModel = normalizeVideoGenModel(node.data.videoModel)
+  const aspectRatio = canvasNodeAspect(node, p.settings.aspectRatio)
+  const videoSize = aspectToSize(aspectRatio)
   const slotEntries = canvasReferenceSlotEntries(p, node)
   const imageSlots = buildH3ImageSlots(
     slotEntries.length
@@ -1910,9 +1890,9 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
     imageAssignments: imageSlots.map((slot) => slot.job),
     imageSlots,
     duration: clampVideoDuration(node.data.duration, videoModel, 8),
-    width: p.settings.width,
-    height: p.settings.height,
-    aspectRatio: p.settings.aspectRatio,
+    width: videoSize.width,
+    height: videoSize.height,
+    aspectRatio,
     cameraMovement: 'static',
     promptStyle: getVideoPromptStyle(),
     mode: 'R2VA',
@@ -1921,7 +1901,7 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
   }),
     { prompt: '', imageSlots, duration: clampVideoDuration(node.data.duration, videoModel, 8) }
   )
-  project.patchCanvasNode(nodeId, { prompt: compiled })
+  project.setCanvasNodePrompt(nodeId, compiled)
   await project.save()
   return compiled
 }

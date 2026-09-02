@@ -33,7 +33,7 @@ import {
 import { VISUAL_STYLE_LABEL } from '@/utils/visualStyle'
 import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
-import { normalizeH3GenMode, normalizeVideoGenModel, normalizeVideoResolution, videoAllows1080p, videoMaxSeconds, videoMinSeconds, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VideoResolution, type VisualStyle } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel, normalizeVideoResolution, videoAllows1080p, videoMaxSeconds, videoMinSeconds, type AspectRatio, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VideoResolution, type VisualStyle } from '@/types'
 
 const props = defineProps<{
   node: CanvasNode | null
@@ -57,7 +57,7 @@ function persistShotVideoPrompt() {
   const v = videoPromptBox.value?.value
   if (v == null) return
   if (v !== (shot.value.compiledVideoPrompt ?? '')) {
-    project.updateShot(shot.value.id, { compiledVideoPrompt: v })
+    project.setShotVideoPrompt(shot.value.id, v)
   }
 }
 
@@ -227,6 +227,27 @@ const showAspect = computed(() => {
     t === 'videoGen'
   )
 })
+const nodeAspectRatio = computed({
+  get: () => props.node?.data.aspectRatio ?? project.current?.settings.aspectRatio ?? '16:9',
+  set: (v: AspectRatio) => {
+    const node = props.node
+    if (!node) return
+    if (node.type === 'script') {
+      project.setAspectRatio(v)
+      return
+    }
+    project.patchCanvasNode(node.id, {
+      aspectRatio: v,
+      ...(node.type === 'imageGen' || node.type === 'videoGen'
+        ? { outputAssetId: undefined, videoTaskId: undefined }
+        : {})
+    })
+    if (node.type === 'shotVideo' && shot.value) project.invalidateShotAssets(shot.value.id, 'video')
+    else if ((node.type === 'shotImage' || node.type === 'shotBoard') && shot.value) {
+      project.invalidateShotAssets(shot.value.id, 'image')
+    }
+  }
+})
 
 const videoModel = computed({
   get: () => normalizeVideoGenModel(props.node?.data.videoModel),
@@ -300,7 +321,7 @@ const previewAspect = computed(() => {
   if (props.node?.type === 'subject' || props.node?.type === 'sceneProps' || props.node?.type === 'scene') {
     return cssAspectRatio('16:9')
   }
-  return cssAspectRatio(project.current?.settings.aspectRatio)
+  return cssAspectRatio(nodeAspectRatio.value)
 })
 
 const kindLabel = computed(() => {
@@ -346,11 +367,17 @@ const historyIds = computed(() => {
 })
 
 const videoPromptPlaceholder = computed(() =>
-  '拆分镜后会自动填入发给视频模型的全文。空着点开或生成时会按分镜补上，改完原样发送。'
+  '这里完全由你编辑。清空后不会回填；可自己填写，或主动点“优化提示词 / 按分镜重铺”。'
 )
 
 watch(
-  () => [props.node?.id, props.node?.type, subject.value?.id, scene.value?.id, shot.value?.id],
+  [
+    () => props.node?.id,
+    () => props.node?.type,
+    () => subject.value?.id,
+    () => scene.value?.id,
+    () => shot.value?.id
+  ],
   () => {
     const p = project.current
     const node = props.node
@@ -370,9 +397,6 @@ watch(
       if (patch) project.updateShot(shot.value.id, patch)
     } else if (t === 'shotImage' && shot.value) {
       const patch = fillEmptyGeneratePrompt('shotImage', p, shot.value)
-      if (patch) project.updateShot(shot.value.id, patch)
-    } else if (t === 'shotVideo' && shot.value) {
-      const patch = fillEmptyGeneratePrompt('shotVideo', p, shot.value)
       if (patch) project.updateShot(shot.value.id, patch)
     }
   },
@@ -647,7 +671,7 @@ async function optimizeVideoPrompt() {
       </p>
       <p v-else-if="gateBlocked" class="hint">{{ PLAY_GATE_MSG }}</p>
 
-      <AspectRatioSeg v-if="showAspect" />
+      <AspectRatioSeg v-if="showAspect" v-model="nodeAspectRatio" />
 
       <div v-if="preview && (node.type === 'shotVideo' || node.type === 'final')" class="prev prev-video">
         <div class="prev-frame" :style="{ aspectRatio: previewAspect }">
@@ -862,7 +886,7 @@ async function optimizeVideoPrompt() {
           rows="16"
           :value="shot.compiledVideoPrompt ?? ''"
           :placeholder="videoPromptPlaceholder"
-          @input="project.updateShot(shot.id, { compiledVideoPrompt: ($event.target as HTMLTextAreaElement).value })"
+          @input="project.setShotVideoPrompt(shot.id, ($event.target as HTMLTextAreaElement).value)"
           @paste="onVideoPromptPaste"
           @blur="persistShotVideoPrompt"
         />
@@ -931,7 +955,7 @@ async function optimizeVideoPrompt() {
           rows="12"
           :value="node.data.prompt ?? ''"
           placeholder="写视频提示词，描述动作、镜头和声音。"
-          @input="project.patchCanvasNode(node.id, { prompt: ($event.target as HTMLTextAreaElement).value })"
+          @input="project.setCanvasNodePrompt(node.id, ($event.target as HTMLTextAreaElement).value)"
         />
       </template>
       <div v-if="node.type === 'imageGen' || node.type === 'videoGen'" class="insp-refs">

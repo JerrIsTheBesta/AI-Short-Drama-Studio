@@ -1014,8 +1014,10 @@ function inferH3Mode(input: VideoGenInput): 'I2VA' | 'T2VA' | 'R2VA' {
 }
 
 function buildPrompt(input: VideoGenInput): string {
+  // promptAsIs 是不可绕过的用户契约：任何模式都必须逐字发送输入框内容。
+  if (input.promptAsIs) return input.prompt
   const raw =
-    input.videoModel === 'wan-prime' || input.promptAsIs
+    input.videoModel === 'wan-prime'
       ? input.prompt
       : composeH3VideoPrompt({
           prompt: input.prompt,

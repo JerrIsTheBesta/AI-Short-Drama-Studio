@@ -21,12 +21,30 @@ export interface ReplanInput {
   attempt: number
 }
 
+export interface ContinueAgentInput {
+  completed: AgentToolAction[]
+  results: AgentToolResult[]
+  round: number
+}
+
+export interface ContinueAgentPlan {
+  actions: unknown[]
+  say?: string
+  done?: boolean
+}
+
 export interface AgentLoopOptions {
   request: string
   autonomy: AgentAutonomy
   signal?: AbortSignal
   onEvent: (event: AgentEvent) => void
   replan?: (input: ReplanInput) => Promise<unknown[]>
+  /**
+   * A real agent must observe the canvas again after tools have changed it.
+   * This callback lets the planner inspect the fresh project state and either
+   * schedule another small batch or explicitly declare the request complete.
+   */
+  continue?: (input: ContinueAgentInput) => Promise<ContinueAgentPlan>
 }
 
 function dedupe(actions: AgentToolAction[]) {
@@ -63,9 +81,49 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
   const dependencyAttempts = new Map<string, number>()
   const failureFingerprints = new Map<string, number>()
   const recoveringSteps = new Set<string>()
+  let continuationRound = 0
+  let finalSay = ''
+  let scheduledCalls = estimate.calls
+  let scheduledSeconds = estimate.seconds
+  const maxContinuationRounds = options.autonomy === 'autopilot' ? 7 : options.autonomy === 'gated' ? 4 : 0
 
   try {
-    while (actions.length) {
+    while (true) {
+      if (!actions.length) {
+        if (!options.continue || continuationRound >= maxContinuationRounds) break
+        continuationRound++
+        options.onEvent({ kind: 'think', label: `重新查看画布，检查任务是否完成（${continuationRound}/${maxContinuationRounds}）…` })
+        const next = await options.continue({
+          completed: [...completed],
+          results: [...results],
+          round: continuationRound
+        })
+        if (next.say?.trim()) finalSay = next.say.trim()
+        if (next.done || !next.actions?.length) break
+
+        const nextActions = dedupe(next.actions.map(validateToolAction)).sort(
+          (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
+        )
+        if (!nextActions.length) break
+        const nextEstimate = estimateToolActions(nextActions)
+        if (budget > 0 && scheduledCalls + nextEstimate.calls > budget) {
+          throw new Error(
+            `继续执行预计累计需要 ${scheduledCalls + nextEstimate.calls} 次生成调用，超过当前单次预算 ${budget}。已完成结果会保留。`
+          )
+        }
+        scheduledCalls += nextEstimate.calls
+        scheduledSeconds += nextEstimate.seconds
+        await patchAgentTask(task.id, {
+          estimatedCalls: scheduledCalls,
+          estimatedSeconds: scheduledSeconds
+        })
+        options.onEvent({
+          kind: 'log',
+          label: `根据最新画布继续 ${nextActions.length} 步：${nextActions.map((item) => TOOL_LABEL[item.tool] || item.tool).join('、')}`
+        })
+        actions = nextActions
+        continue
+      }
       if (options.signal?.aborted) throw new AgentToolError('任务已取消', 'agent', 'cancelled')
       const action = actions.shift()!
       const stepKey = `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || ''}`
@@ -206,7 +264,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
       }
     }
     await patchAgentTask(task.id, { status: 'success', finishedAt: Date.now(), currentStep: undefined })
-    return { results, graph, stopped: false }
+    return { results, graph, stopped: false, finalSay }
   } catch (error: any) {
     await patchAgentTask(task.id, {
       status: options.signal?.aborted ? 'cancelled' : 'failed',
