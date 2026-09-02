@@ -11,7 +11,8 @@
     "build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs",
     "electron:build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/pack-electron.mjs",
     "preview": "vite preview --host",
-    "type-check": "vue-tsc --noEmit"
+    "type-check": "vue-tsc --noEmit",
+    "diagnose:storyboard": "node scripts/diagnose-storyboard-llm.mjs"
   },
   "build": {
     "appId": "com.aicuts.desktop",

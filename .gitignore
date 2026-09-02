@@ -16,6 +16,7 @@ dist-ssr
 .cache
 coverage
 output
+diagnostics
 *.zip
 
 # FFmpeg 核心（大文件，让用户自己下）
