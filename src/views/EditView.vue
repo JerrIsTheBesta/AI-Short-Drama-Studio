@@ -11,6 +11,7 @@ import TimelineView from '@/components/timeline/TimelineView.vue'
 import type { Shot, TimelineClip, TransitionType } from '@/types'
 import { buildTimelineFromShots } from '@/utils/timeline'
 import { isDigitalHumanSpeechProject } from '@/utils/shot'
+import { runCanvasNode } from '@/services/canvas/runner'
 
 const router = useRouter()
 const project = useProjectStore()
@@ -22,12 +23,15 @@ const previewingUrl = ref<string | null>(null)
 const previewBlob = ref<Blob | null>(null)
 const previewing_ = ref(false)
 const merging = ref(false)
+const mergeProgress = ref('')
 
 onMounted(async () => {
   if (!project.current) return
-  // 如果时间线为空，根据分镜自动生成
+  // 第一次进入按分镜顺序铺满；之后保留用户顺序，只补上新生成的视频。
   if (project.current.timeline.length === 0 && project.current.shots.length > 0) {
     autoBuildTimeline()
+  } else {
+    appendMissingShots()
   }
 })
 
@@ -80,11 +84,38 @@ function addShotToTimeline(shot: Shot) {
 }
 
 function addAllShots() {
-  for (const s of shots.value) {
+  for (const s of [...shots.value].sort((a, b) => a.index - b.index)) {
     if (!timeline.value.find((c) => c.shotId === s.id)) {
       addShotToTimeline(s)
     }
   }
+}
+
+function appendMissingShots() {
+  if (!project.current) return
+  const missing = [...shots.value]
+    .filter((shot) => (shot.videoAssetId || shot.imageAssetId) && !timeline.value.some((clip) => clip.shotId === shot.id))
+    .sort((a, b) => a.index - b.index)
+  if (!missing.length) return
+  let cursor = timeline.value.reduce((max, clip) => Math.max(max, clip.startTime + clip.duration), 0)
+  const additions: TimelineClip[] = missing.map((shot) => {
+    const clip: TimelineClip = {
+      id: 'tc_' + shot.id,
+      shotId: shot.id,
+      startTime: cursor,
+      duration: shot.duration,
+      sourceIn: 0,
+      transitionIn: project.current!.settings.defaultTransition,
+      transitionDuration: 0.5,
+      speed: 1,
+      volume: 1,
+      enabled: true
+    }
+    cursor += clip.duration
+    return clip
+  })
+  project.setTimeline([...timeline.value, ...additions])
+  toast.info(`已补入 ${additions.length} 个新生成的视频片段`)
 }
 
 function updateClip(id: string, patch: Partial<TimelineClip>) {
@@ -106,6 +137,25 @@ function recalculateStarts() {
     return next
   })
   project.setTimeline(updated)
+}
+
+function reorderClip(fromId: string, toId: string) {
+  if (!project.current || fromId === toId) return
+  const ordered = [...timeline.value]
+  const from = ordered.findIndex((clip) => clip.id === fromId)
+  const to = ordered.findIndex((clip) => clip.id === toId)
+  if (from < 0 || to < 0) return
+  const [moved] = ordered.splice(from, 1)
+  ordered.splice(to, 0, moved)
+  let cursor = 0
+  project.setTimeline(
+    ordered.map((clip) => {
+      const next = { ...clip, startTime: cursor }
+      cursor += clip.duration
+      return next
+    })
+  )
+  selectedClipId.value = moved.id
 }
 
 const totalDuration = computed(() =>
@@ -148,6 +198,38 @@ async function preview() {
     toast.error('预览失败：' + e.message)
   } finally {
     merging.value = false
+  }
+}
+
+async function confirmMerge() {
+  if (!project.current || merging.value) return
+  if (!timeline.value.some((clip) => clip.enabled)) {
+    toast.warn('时间线上没有启用的视频片段')
+    return
+  }
+  const node = project.current.canvas?.nodes.find((item) => item.type === 'export' || item.type === 'final')
+  if (!node) {
+    toast.error('找不到合成节点，请返回画布重建流程')
+    return
+  }
+  merging.value = true
+  mergeProgress.value = '准备正式合成…'
+  try {
+    await runCanvasNode(node.id, (_id, message) => {
+      mergeProgress.value = message
+    })
+    const assetId = project.current?.finalVideoAssetId
+    if (assetId) {
+      if (previewingUrl.value) URL.revokeObjectURL(previewingUrl.value)
+      previewingUrl.value = (await assets.getUrl(assetId)) || null
+      previewing_.value = Boolean(previewingUrl.value)
+    }
+    toast.success('正式视频已合成，可以预览或返回画布查看')
+  } catch (e: any) {
+    toast.error(`合成失败：${e?.message || String(e)}`)
+  } finally {
+    merging.value = false
+    mergeProgress.value = ''
   }
 }
 
@@ -202,7 +284,10 @@ function next() {
         >
           预览
         </GradientButton>
-        <GradientButton icon="→" @click="next">下一步：字幕</GradientButton>
+        <GradientButton type="secondary" icon="→" @click="next">字幕设置</GradientButton>
+        <GradientButton icon="✓" :loading="merging" :disabled="merging" @click="confirmMerge">
+          {{ merging ? (mergeProgress || '合成中…') : '确认并正式合成' }}
+        </GradientButton>
       </div>
     </header>
 
@@ -250,6 +335,7 @@ function next() {
             @select="selectedClipId = $event"
             @update="updateClip"
             @remove="removeClip"
+            @reorder="reorderClip"
           />
         </GlassCard>
 

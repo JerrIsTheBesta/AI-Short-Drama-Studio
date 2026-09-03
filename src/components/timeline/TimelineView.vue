@@ -13,9 +13,11 @@ const emit = defineEmits<{
   select: [id: string]
   update: [id: string, patch: Partial<TimelineClip>]
   remove: [id: string]
+  reorder: [fromId: string, toId: string]
 }>()
 
 const PX_PER_SECOND = 60
+const draggingId = ref<string | null>(null)
 
 const totalWidth = computed(() =>
   Math.max(800, props.totalDuration * PX_PER_SECOND + 100)
@@ -76,6 +78,20 @@ function startResize(clip: TimelineClip, evt: MouseEvent) {
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)
 }
+
+function startDrag(clip: TimelineClip, evt: DragEvent) {
+  draggingId.value = clip.id
+  if (evt.dataTransfer) {
+    evt.dataTransfer.effectAllowed = 'move'
+    evt.dataTransfer.setData('text/plain', clip.id)
+  }
+}
+
+function dropOn(clip: TimelineClip, evt: DragEvent) {
+  const fromId = draggingId.value || evt.dataTransfer?.getData('text/plain') || ''
+  draggingId.value = null
+  if (fromId && fromId !== clip.id) emit('reorder', fromId, clip.id)
+}
 </script>
 
 <template>
@@ -88,7 +104,7 @@ function startResize(clip: TimelineClip, evt: MouseEvent) {
         <span class="tl-label">片段</span>
         <span class="tl-value">{{ clips.length }}</span>
       </div>
-      <div class="tl-tip">提示：拖动片段右边缘可调时长，点击片段编辑属性</div>
+      <div class="tl-tip">拖动片段可换顺序；拖动右边缘可调时长</div>
     </div>
 
     <div class="timeline-scroll">
@@ -110,6 +126,7 @@ function startResize(clip: TimelineClip, evt: MouseEvent) {
             v-for="clip in clips"
             :key="clip.id"
             class="clip"
+            draggable="true"
             :class="{
               active: clip.id === selectedId,
               disabled: !clip.enabled
@@ -119,8 +136,13 @@ function startResize(clip: TimelineClip, evt: MouseEvent) {
               width: clipWidth(clip) + 'px'
             }"
             @click="emit('select', clip.id)"
+            @dragstart="startDrag(clip, $event)"
+            @dragend="draggingId = null"
+            @dragover.prevent
+            @drop.prevent="dropOn(clip, $event)"
           >
             <div class="clip-head">
+              <span class="clip-drag" title="拖动调整顺序">⠿</span>
               <span class="clip-num">#{{ shotOf(clip)?.index ?? '?' }}</span>
               <span class="clip-title">{{ shotOf(clip)?.title ?? '?' }}</span>
               <button
@@ -281,6 +303,13 @@ function startResize(clip: TimelineClip, evt: MouseEvent) {
   background: rgba(0, 0, 0, 0.2);
   font-size: 10px;
   border-bottom: 1px solid var(--color-border);
+}
+.clip-drag {
+  color: var(--color-text-3);
+  cursor: grab;
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 .clip-num {
   background: var(--color-accent);

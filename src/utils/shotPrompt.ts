@@ -54,7 +54,7 @@ export const SCENE_NARRATIVE_SPEC = `用导演给演员和摄影说戏的口吻�
 
 再按因果写清：开场身体状态 → 什么声音/目光/道具触发变化 → 手脚和身体如何完成动作 → 道具与环境产生什么可见结果 → 最后停在什么状态。必须使用本镜真实道具和空间细节，不能把动作缩成情绪摘要。表情必须跟正在发生的事挂钩。
 
-摄影不是另贴一句“固定/推近”：写明镜头从哪里、什么景别起幅，为什么随某个动作移动或改变焦点，移动中逐步揭示什么，最后落在哪里。动作较多时可按实际节奏写 2–3 个时间段；安静的一镜到底则连续写，不要机械三段式。大场面、走位、揭示与冲击必须允许拉远、跟拍、升降、摇移或切镜，不能一律固定近景。
+按本镜总时长写 2–5 个连续时间段，从 0 秒覆盖到最后一秒。时间段按剧情拍点分，不要机械等分。每段都写清当前谁在做什么、谁在说什么、其他人物站在哪里并看向谁、表情因什么发生变化，以及摄影机如何跟随或保持。摄影不是另贴一句“固定/推近”：写明镜头从哪里、什么景别起幅，为什么随某个动作移动或改变焦点，移动中逐步揭示什么，最后落在哪里。大场面、走位、揭示与冲击必须允许拉远、跟拍、升降、摇移或切镜，不能一律固定近景。
 
 写出与画面同步的声音节点，以及光、雨、雾、灰尘、火焰、衣料、桌面物件如何被动作影响。有台词只写口播原词；成年旁白是画外音，画面里的人闭嘴。剧本写了不拍的必须遵守。
 
@@ -71,7 +71,7 @@ export function videoPerformanceSpec(style: VideoPromptStyle = 'scene-narrative'
 }
 
 export function videoPromptJsonHint(_style: VideoPromptStyle = 'scene-narrative'): string {
-  return '<中文220-650字的可执行镜头。写起幅景别与机位、人物前后站位和视线、触发事件、连续动作与道具结果、由动作驱动的运镜及落幅、同步声音和环境反应。动作多时可分2-3个实际时间段，禁止机械三段模板。>'
+  return '<中文220-650字的可执行时间轴。从0秒到本镜结束分2-5段，每段写当前行动者、动作与表情、说话人和原词、其他人物占位与视线、一个合理运镜及落点、同步声音和环境反应。按剧情拍点分段，禁止机械等分和套话。>'
 }
 
 /** 写给编剧 / 质检 / 出视频：默认按当前主流的场景叙事 */
@@ -130,7 +130,7 @@ const ENV_RE =
   /门|桌|地|光|风|窗|墙|衣|树|水|灯|屋|院|街|天|雾|雨|烟|火|锅|盘|碗|杯|台|椅|梨|包|产品|案|桥|石|帘|影|尘|叶|草|田/
 
 const TEMPLATE_RE =
-  /禁止呆脸空眼|衣摆、光和空气里的东西跟着动|把这件事做起来：|表情往前走：眼神一转|0\s*[–\-~]\s*\d+(?:\.\d+)?秒|人物看向场景里的人或物，不要看镜头/
+  /禁止呆脸空眼|衣摆、光和空气里的东西跟着动|把这件事做起来：|表情往前走：眼神一转|人物看向场景里的人或物，不要看镜头/
 
 const ENSEMBLE_LAYER_RE =
   /近处|近景里|身前|身后|稍远|前景|后景|侧对|侧身|侧过|四分之三|过肩|回头|扭头/
@@ -148,8 +148,11 @@ export function lacksEnsembleBlocking(text: string, names: string[] = []): boole
 export function isVideoPerformanceTemplate(text: string): boolean {
   const t = (text || '').trim()
   if (!t) return false
-  const timed = (t.match(/\d+(?:\.\d+)?\s*[–\-~]\s*\d+(?:\.\d+)?秒/g) || []).length
-  return timed >= 2 || TEMPLATE_RE.test(t)
+  return TEMPLATE_RE.test(t)
+}
+
+export function timedBeatCount(text: string): number {
+  return ((text || '').match(/\d+(?:\.\d+)?\s*(?:秒|s)?\s*[–\-~到至]\s*\d+(?:\.\d+)?\s*(?:秒|s)/gi) || []).length
 }
 
 /** continuity 常写成「上一镜末态 → 本镜变化 → 下一镜初态」；出视频只演中间这一截。 */
@@ -186,6 +189,7 @@ export function isVideoPerformanceThin(text: string): boolean {
   const t = (text || '').trim()
   if (t.length < 120) return true
   if (isVideoPerformanceTemplate(t)) return true
+  if (timedBeatCount(t) < 2) return true
   return !(BODY_RE.test(t) || FACE_RE.test(t))
 }
 
@@ -194,6 +198,7 @@ export function videoPerformanceIssue(text: string, names?: string[]): string | 
   if (!t) return '缺少视频内容表现'
   if (isVideoPerformanceTemplate(t)) return '视频内容表现是套话，没有写出每个人站哪、看谁'
   if (t.length < 120) return '视频内容表现过短，必须写清触发、连续动作、道具结果、运镜落点和同步声音'
+  if (timedBeatCount(t) < 2) return '视频内容表现缺少从0秒到镜头结束的分段时间轴，无法明确每一拍谁在做什么、谁在说什么'
   if (lacksEnsembleBlocking(t, names)) {
     return '多人同框却没写谁在近处、谁在后面、各自看谁，会拍成合影看镜头'
   }
@@ -222,7 +227,7 @@ function storedVideoPrompt(shot: Shot): string {
   return (shot.videoPrompt || '').trim()
 }
 
-/** 从分镜场记写出「这一镜发生了什么」，绝不回退成配图静帧词，也不按秒填空。 */
+/** 从分镜场记写出「这一镜发生了什么」，绝不回退成配图静帧词。 */
 export function synthesizeVideoPerformance(shot: Shot): string {
   const secs = clampShotSeconds(shot.duration)
   const happening =
@@ -238,26 +243,25 @@ export function synthesizeVideoPerformance(shot: Shot): string {
     ? ''
     : spokenRaw
   const movement = normalizeCameraMovement(shot.cameraMovement)
+  const firstEnd = Number((secs * 0.3).toFixed(1))
+  const secondEnd = Number((secs * 0.75).toFixed(1))
   const bits = [
-    `${happening.replace(/[。；;]+$/, '')}。`,
-    look
-      ? `每个人写清看向谁：${look.replace(/^看/, '')}。身体侧对或四分之三侧面，不要正面看镜头。`
-      : '每个人写清站在近处还是后面、身体朝哪、眼睛看谁。禁止合影看镜头。'
+    `${formatBeatRangeCn(0, firstEnd)}：起幅先交代人物前后站位和当前身体状态。${look ? `视线：${look.replace(/^看/, '')}。` : '每个人看向场景里的行动对象，不朝镜头。'}`,
+    `${formatBeatRangeCn(firstEnd, secondEnd)}：${happening.replace(/[。；;]+$/, '')}。动作连续发生，人物的眼神、眉眼和呼吸随触发事件变化。`
   ]
   if ((shot.blocking || '').trim() && happening !== (shot.blocking || '').trim()) {
-    bits.push(`站位：${(shot.blocking || '').trim()}。`)
+    bits[0] += `站位：${(shot.blocking || '').trim()}。`
   }
   bits.push(cameraStoryCn(movement))
   if (spoken) {
-    bits.push(
+    bits[1] +=
       speaker
         ? `${speaker}开口说「${spoken}」。旁边的人闭嘴，侧头或回头看他，脸上要有反应。`
         : `有人开口说「${spoken}」。旁边的人闭嘴，看向说话者或他指的东西。`
-    )
   } else {
-    bits.push('无对白。')
+    bits[1] += '无对白。'
   }
-  bits.push(`约${secs}秒，一镜到底，不要跳切。`)
+  bits.push(`${formatBeatRangeCn(secondEnd, secs)}：${cameraStoryCn(movement)}动作完成后停在明确的结果状态，其他人物保持与行动者的视线关系。`)
   return bits.join('')
 }
 

@@ -1091,21 +1091,6 @@ function dialogueCuesForPrompt(input: H3PromptInput): DialogueCue[] {
   })
 }
 
-function spokenCharacterCount(lines: string[]): number {
-  return lines.reduce((sum, line) => sum + (line.match(/[\u3400-\u9fffA-Za-z0-9]/g)?.length || 0), 0)
-}
-
-/** 明显塞不进时不要产出必坏的视频。阈值留有余量，仍允许短促、偏快的对白。 */
-function assertDialogueFitsDuration(lines: string[], duration: number): void {
-  const count = spokenCharacterCount(lines)
-  const seconds = Math.max(1, Number(duration) || 5)
-  const capacity = Math.floor(seconds * 5.5)
-  if (count > capacity) {
-    const estimated = Math.ceil(count / 4.5)
-    throw new Error(`对白约需 ${estimated} 秒，但当前镜头只有 ${seconds.toFixed(1)} 秒。请拆成至少 ${Math.ceil(estimated / seconds)} 个视频节点，避免多人抢口型。`)
-  }
-}
-
 function dialogueTurnIssue(desc: string, expected: DialogueCue[]): string {
   if (!expected.length) return ''
   const tags = [...String(desc || '').matchAll(/<d>\s*\[[^\]]*\]\s*([\s\S]*?)<\/d>/gi)]
@@ -1115,13 +1100,6 @@ function dialogueTurnIssue(desc: string, expected: DialogueCue[]): string {
     const lead = desc.slice(Math.max(0, index - 260), index)
     if (!/\(S\d+\)[^.\n]{0,180}\b(?:says?|asks?|shouts?|replies?|exclaims?|yells?|whispers?)\b[^.\n]{0,120}[:，,]?\s*$/i.test(lead)) {
       return `第 ${i + 1} 句台词没有紧邻的唯一说话人 (S#) 和说话动作`
-    }
-    const after = desc.slice((tags[i].index || 0) + tags[i][0].length, (tags[i].index || 0) + tags[i][0].length + 420)
-    const around = `${lead} ${after}`
-    const closesSpeaker = /(?:closes?|keeps?|remain\w*)[^.]{0,100}(?:lips|mouth)[^.]{0,80}(?:closed|still)|(?:lips|mouth)[^.]{0,80}(?:remain\w*|stay\w*)[^.]{0,40}closed|does not mouth/i.test(after)
-    const locksListeners = /(?:all|every)[^.]{0,60}(?:other|listener)[^.]{0,100}(?:lips|mouth)[^.]{0,60}closed|(?:other|listening)[^.]{0,80}(?:character|person|subject)[^.]{0,100}(?:does not mouth|keeps?[^.]{0,30}(?:lips|mouth)[^.]{0,30}closed)/i.test(around)
-    if (!closesSpeaker || !locksListeners) {
-      return `第 ${i + 1} 句之后没有明确“说话者闭嘴、其他角色不跟口型”`
     }
   }
   return ''
@@ -1268,7 +1246,6 @@ export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<str
 
   const cueLines = spokenLinesForPrompt(resolved)
   const dialogueCues = dialogueCuesForPrompt(resolved)
-  assertDialogueFitsDuration(cueLines, resolved.duration)
   const camera = CAMERA_EN[normalizeCameraMovement(resolved.cameraMovement)]
   try {
     const resp = await callLLM({
@@ -1298,10 +1275,19 @@ Never omit 图1/图2/图3 when those pictures exist. These images are identity/l
 
 6) Treat each reference character according to the state described in the scene: living body, carved statue, portrait, reflection, shadow, off-screen voice, hidden presence, or absent identity reference. A character reference does NOT prove that a full living person is physically present. Do not duplicate a referenced identity as both a person and a prop unless the action explicitly shows a transformation.
 
-7) Dialogue ONLY inside <d>. Dialogue is a sequence of mutually exclusive speaking turns. Use this form when someone speaks on screen:
+7) Dialogue ONLY inside <d>. Dialogue is a sequence of mutually exclusive speaking turns. For two or more lines, build a concise but cinematic chronological timeline. Each time range must contain: (a) framing or one motivated camera move, (b) the active character's concrete body action, eyeline and readable facial change, (c) the listening character's position and nonverbal reaction, and (d) the line when present. Use this form when someone speaks on screen:
 <d>[Chinese, spoken on screen by EnglishName, delivery and accurate lip synchronization] 原词</d>
 Delivery stays in the bracket. The tag contains ONLY the words a mouth actually says. Never dump 场记, timestamps, style, 图1, Camera language, or performance notes into <d>.
-Immediately before EVERY d tag, name exactly one speaker with a stable (S#) and a speech verb. Immediately after EVERY d tag, state that this speaker closes their mouth, and that every other visible character keeps their lips completely closed throughout that line and reacts only with eyes, brows, breath, posture or hands. Never let speaking intervals overlap. Never use a bare d tag. Nobody else mouths those words.
+Immediately before EVERY d tag, name exactly one speaker with a stable (S#) and a speech verb. Give each speaker a non-overlapping time range and keep the listener's reaction short and physical. Never use a bare d tag. Do not repeat long lip-lock warnings after every line; one concise instruction that only the named speaker talks in each range is enough. Do not reject or split a clip merely because its dialogue is fast when the user's timing explicitly fits it.
+
+Timeline writing standard:
+- Use the user's timing when supplied; otherwise divide the full duration according to action and dialogue, never into generic equal thirds.
+- Write 2–4 filmable sentences per time range. This is richer than an outline but shorter and clearer than a screenplay paragraph.
+- Preserve spatial blocking throughout: who is foreground/background, left/right, seated/standing, and exactly whom each person looks at. Nobody looks into the camera unless the story explicitly demands it.
+- Expressions must evolve from a visible trigger: eyes refocus, brows tighten or release, jaw sets, breath catches, a hand hesitates, weight shifts. Avoid abstract emotion labels without behavior.
+- Use at most one primary camera move per range. Motivate it through a hand movement, eyeline, reveal or emotional turn; state where it starts and where it lands. Keep screen direction and axis continuous unless an explicit cut is needed.
+- Mention only story-relevant wardrobe, props, light and environmental motion. Do not repeat complete character-sheet descriptions in every beat.
+- Every range must advance the event. No idle posing, no generic “clothes and air move,” and no slideshow-like sequence of reference images.
 
 Rules:
 - Preserve the user's event. Expand what is already implied by the script, but do not invent a different incident.
@@ -1367,7 +1353,9 @@ ${source || '(perform the beat in this location)'}`
 The rejected draft was lifeless because it used a reusable timing template, repeated static-camera instructions, or failed to preserve the actual event.
 Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue.
 
-Dialogue is strict turn-taking. Immediately before every <d>, identify exactly one speaker by stable (S#) plus says/asks/replies/shouts/exclaims. Immediately after it, say that speaker closes their mouth and all other visible characters keep their lips completely closed during that line, reacting only nonverbally. Speaking turns never overlap and bare <d> tags are forbidden. End once with the full ${durationText(resolved)}-second completion sentence.`
+Dialogue is strict but concise turn-taking. Give every line a non-overlapping time range; immediately before every <d>, identify exactly one speaker by stable (S#) plus says/asks/replies/shouts/exclaims. In each range only that named speaker talks while the listener reacts physically. Bare <d> tags are forbidden. Do not bloat the prompt with repeated lip-lock warnings, and do not split the clip merely because the delivery is fast.
+
+Rebuild the prompt as a concise cinematic timeline, not a four-line outline and not a dense screenplay paragraph. For every range write 2–4 filmable sentences covering framing or one motivated camera move, active body action and eyeline, a trigger-based facial change, listener blocking/reaction, and dialogue when present. Preserve foreground/background and left/right positions, keep the camera axis continuous, prevent anyone from staring into the lens, and use only story-relevant props, light and environmental motion. Every range must visibly advance the event. End once with the full ${durationText(resolved)}-second completion sentence.`
           },
           {
             role: 'user',

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { runCanvasNode, optimizeShotVideoPrompt } from '@/services/canvas/runner'
@@ -56,6 +57,7 @@ const props = defineProps<{
 const type = computed<CanvasNodeType>(() => props.data.nodeType || 'script')
 
 const project = useProjectStore()
+const router = useRouter()
 const assets = useAssetsStore()
 const library = useLibraryStore()
 const settings = useSettingsStore()
@@ -443,6 +445,11 @@ async function generateThis(ev?: Event, hd = false) {
   if (generating.value || gateBlocked.value || toolBusy.value) return
   if ((type.value === 'export' || type.value === 'final') && !canBuildExport(project.current)) {
     toast.warn('还没有可导出的视频或图片，请先生成分镜视频')
+    return
+  }
+  if (type.value === 'export' || type.value === 'final') {
+    dismissPanel()
+    await router.push('/edit')
     return
   }
   persistShotVideoPrompt()

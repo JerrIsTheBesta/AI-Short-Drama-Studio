@@ -2,7 +2,8 @@ import type { Project, TimelineClip } from '@/types'
 
 /** 按分镜顺序从已有视频/图片构建时间线 */
 export function buildTimelineFromShots(project: Project): TimelineClip[] {
-  const clips: TimelineClip[] = project.shots
+  const clips: TimelineClip[] = [...project.shots]
+    .sort((a, b) => a.index - b.index)
     .filter((s) => s.videoAssetId || s.imageAssetId)
     .map((s) => ({
       id: 'tc_' + s.id,
