@@ -4,7 +4,7 @@
 
 import { exportVideo, parseSRT, buildCuesFromClips, probeMedia, trimTimelineBySpeech } from '@/services/ffmpeg'
 import { useAssetsStore, useProjectStore } from '@/stores'
-import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
+import { canBuildExport, ensureTimelineFromShots, timelineClipAssetId } from '@/utils/timeline'
 import { effectiveShotAudioMode, isDigitalHumanSpeechProject, needsExternalTts } from '@/utils/shot'
 
 export async function generateFinalCut(onProgress?: (msg: string) => void) {
@@ -31,14 +31,13 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
   for (const clip of timeline) {
     if (mediaMap.has(clip.shotId)) continue
     const shot = p.shots.find((s) => s.id === clip.shotId)
-    if (!shot) continue
-    const assetId = shot.videoAssetId || shot.imageAssetId
+    const assetId = timelineClipAssetId(p, clip)
     if (!assetId) continue
     const blob = await assets.getBlob(assetId)
     if (!blob) continue
     mediaMap.set(clip.shotId, {
       blob,
-      kind: shot.videoAssetId ? 'video' : 'image'
+      kind: (assets.getMeta(assetId)?.kind || (shot?.videoAssetId ? 'video' : 'image')) as 'video' | 'image'
     })
   }
   if (mediaMap.size === 0) throw new Error('没有可用的分镜素材')
@@ -56,7 +55,7 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
     voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
   }
 
-  const captionCues = (() => {
+  const baseCaptionCues = (() => {
     if (digitalHuman) {
       return buildCuesFromClips(
         working.map((c) => {
@@ -82,6 +81,22 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
       })
     ).filter((c) => c.text.trim())
   })()
+  const captionCues = [
+    ...baseCaptionCues,
+    ...(p.textOverlays || []).map((item, index) => ({
+      id: baseCaptionCues.length + index + 1,
+      start: item.startTime,
+      end: item.startTime + item.duration,
+      text: item.text,
+      style: {
+        fontFamily: item.fontFamily,
+        fontSizeRatio: item.fontSizeRatio,
+        color: item.color,
+        position: item.position,
+        bold: item.bold
+      }
+    }))
+  ].sort((a, b) => a.start - b.start)
 
   let bgmBlob: Blob | undefined
   if (p.pipelineMode !== 'smart-speech' && p.bgmAssetId) {
@@ -142,6 +157,9 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
     captionHighlightScale: p.settings.captionHighlightScale,
     bgm: bgmBlob,
     bgmVolume: p.settings.bgmVolume,
+    bgmStartTime: p.bgmClip?.startTime,
+    bgmSourceIn: p.bgmClip?.sourceIn,
+    bgmDuration: p.bgmClip?.duration,
     originalVolume: isSpeech ? 1 : p.settings.originalVolume ?? 0.55,
     keepAmbientAudio: keepAmbient,
     sourceAudioMap,

@@ -22,13 +22,16 @@ export interface ExportInput {
   fps: number
   captionStyle: CaptionStyle
   burnCaptions?: boolean
-  captionCues?: SubtitleCue[]
+  captionCues?: Array<SubtitleCue & { style?: Partial<CaptionStyle> }>
   captionBg?: boolean
   captionHighlight?: boolean
   captionHighlightColor?: string
   captionHighlightScale?: number
   bgm?: Blob
   bgmVolume?: number
+  bgmStartTime?: number
+  bgmSourceIn?: number
+  bgmDuration?: number
   /** 分镜原片环境音音量（0=静音，建议 0.35–0.7） */
   originalVolume?: number
   /** 分镜口播 TTS（shotId → 音频 blob），叠到对应片段上 */
@@ -212,7 +215,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
     log(`✓ concat 完成 → ${concatName}`)
 
     let finalName = concatName
-    const captionCues = (
+    const captionCues: Array<SubtitleCue & { style?: Partial<CaptionStyle> }> = (
       input.captionCues && input.captionCues.length > 0
         ? input.captionCues
         : cues
@@ -247,7 +250,11 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
       input.onProgress?.('铺整片背景音乐...')
       const speechVol = 1
       const bgmVol = input.bgmVolume ?? 0.22
-      const fadeOut = Math.max(0, totalDur - 1.2)
+      const bgmStart = Math.max(0, input.bgmStartTime || 0)
+      const bgmSourceIn = Math.max(0, input.bgmSourceIn || 0)
+      const bgmDuration = Math.max(0.1, Math.min(input.bgmDuration || totalDur, totalDur - bgmStart))
+      const fadeOut = Math.max(0, bgmDuration - 1.2)
+      const delay = Math.round(bgmStart * 1000)
       await safeExec(
         ffmpeg,
         [
@@ -258,7 +265,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
           '-i',
           bgmName,
           '-filter_complex',
-          `[0:a]volume=${speechVol}[a0];[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${bgmVol},afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut.toFixed(2)}:d=1.2[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[a]`,
+          `[0:a]volume=${speechVol}[a0];[1:a]atrim=start=${bgmSourceIn.toFixed(3)}:duration=${bgmDuration.toFixed(3)},asetpts=PTS-STARTPTS,aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${bgmVol},afade=t=in:st=0:d=${Math.min(0.6, bgmDuration / 3).toFixed(2)},afade=t=out:st=${fadeOut.toFixed(2)}:d=${Math.min(1.2, bgmDuration).toFixed(2)},adelay=${delay}|${delay}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[a]`,
           '-map',
           '0:v:0',
           '-map',
@@ -339,7 +346,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
 async function burnCaptionsOverlay(
   ffmpeg: Parameters<typeof writeFile>[0],
   videoName: string,
-  cues: SubtitleCue[],
+  cues: Array<SubtitleCue & { style?: Partial<CaptionStyle> }>,
   style: CaptionStyle,
   width: number,
   height: number,
@@ -358,7 +365,8 @@ async function burnCaptionsOverlay(
     const text = cues[i].text.trim()
     if (!text) continue
     onProgress?.(`绘制字幕 ${layers.length + 1}/${cues.length}...`)
-    const png = await renderCaptionPng(text, style, width, height, captionBg, highlight)
+    const cueStyle = { ...style, ...(cues[i].style || {}) }
+    const png = await renderCaptionPng(text, cueStyle, width, height, captionBg, highlight)
     if (!png.size) continue
     const file = `cap_${i}.png`
     await writeFile(ffmpeg, file, png)

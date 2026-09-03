@@ -48,7 +48,7 @@ const routes: RouteRecordRaw[] = [
     path: '/edit',
     name: 'edit',
     component: () => import('@/views/EditView.vue'),
-    meta: { step: 'edit', label: '5 · 剪辑' }
+    meta: { step: 'edit', label: '5 · 视频剪辑' }
   },
   {
     path: '/caption',
@@ -109,7 +109,7 @@ export const workflowSteps = [
   { id: 'storyboard', label: '分镜', icon: '🎬', route: '/storyboard', desc: 'AI 拆解镜头' },
   { id: 'image', label: 'AI 配图', icon: '🎨', route: '/images', desc: '生成关键帧' },
   { id: 'video', label: 'AI 视频', icon: '🎥', route: '/videos', desc: '图生视频片段' },
-  { id: 'edit', label: '剪辑', icon: '✂️', route: '/edit', desc: '时间线编排' },
+  { id: 'edit', label: '视频剪辑', icon: '✂️', route: '/edit', desc: '时间线编排' },
   { id: 'caption', label: '字幕', icon: '💬', route: '/caption', desc: '台词配音与字幕' },
   { id: 'export', label: '导出', icon: '🚀', route: '/export', desc: '一键合成视频' },
   { id: 'drafts', label: '资源库', icon: '📦', route: '/drafts', desc: '全部图片/视频产物' }

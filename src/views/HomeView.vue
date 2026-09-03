@@ -270,16 +270,41 @@ function deleteProject(id: string) {
   toast.success('项目已删除')
 }
 
-async function openLocalFolder() {
+async function openProjectFolder(projectId?: string) {
   if (!isDesktop()) return
-  const dir = await desktop().pickDirectory()
-  if (!dir) return
-  await project.openFromFolder(dir)
-  if (!project.current) {
-    toast.error('这个文件夹里没有 project.json')
+  const target = projectId
+    ? project.allProjects.find((item) => item.id === projectId)
+    : project.current
+  const dir = target?.folderPath
+  if (!dir) {
+    toast.warn(target ? '这个旧项目没有本地目录记录' : '请先创建或打开一个项目')
     return
   }
-  router.push('/studio')
+  const error = await desktop().openPath(dir)
+  if (error) toast.error(`无法打开项目目录：${error}`)
+}
+
+async function openQuickEditor() {
+  if (!project.current) {
+    const now = new Date()
+    const label = `${now.getMonth() + 1}-${now.getDate()} ${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    const p = await project.createNamed(`自由剪辑 ${label}`)
+    p.pipelineMode = 'img2video'
+    p.playApproved = true
+    p.script = {
+      id: 's_' + Date.now().toString(36),
+      topic: '自由剪辑',
+      content: '',
+      keywords: [],
+      style: 'cinematic',
+      aspectRatio: '16:9',
+      shotDuration: 5,
+      createdAt: Date.now()
+    }
+    project.setScript(p.script)
+    await project.save()
+  }
+  await router.push('/edit')
 }
 
 function fmtDate(ts: number) {
@@ -450,14 +475,24 @@ async function moveSelectedLibrary() {
           桌面端无限画布 + 智能体：人设、分镜、配图、视频都在一张图上连起来。资源存在本地文件夹。
         </p>
         <div class="hero-actions">
+          <GradientButton size="lg" icon="✂" type="secondary" @click="openQuickEditor">
+            视频剪辑
+          </GradientButton>
           <GradientButton size="lg" icon="◉" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
             智能口播
           </GradientButton>
           <GradientButton size="lg" icon="✨" @click="showCreateModal = true">
             创建新项目
           </GradientButton>
-          <GradientButton v-if="isDesktop()" size="lg" type="ghost" @click="openLocalFolder">
-            打开本地文件夹
+          <GradientButton
+            v-if="isDesktop()"
+            size="lg"
+            type="ghost"
+            :disabled="!project.current?.folderPath"
+            :title="project.current?.folderPath || '请先创建或打开一个项目'"
+            @click="openProjectFolder()"
+          >
+            打开当前项目目录
           </GradientButton>
           <GradientButton size="lg" type="ghost" @click="router.push('/settings')">
             ⚙ 接入 AI 能力
@@ -577,6 +612,15 @@ async function moveSelectedLibrary() {
             <div class="proj-bottom">
               <span class="proj-date">{{ fmtDate(p.updatedAt) }}</span>
               <div class="proj-actions" @click.stop>
+                <button
+                  v-if="isDesktop()"
+                  class="proj-folder"
+                  :disabled="!p.folderPath"
+                  :title="p.folderPath ? '打开项目目录' : '该项目没有本地目录记录'"
+                  @click="openProjectFolder(p.id)"
+                >
+                  📁
+                </button>
                 <button
                   class="proj-del"
                   title="删除"
@@ -1114,6 +1158,21 @@ async function moveSelectedLibrary() {
 .proj-del:hover {
   opacity: 1;
   background: rgba(239, 68, 68, 0.15);
+}
+.proj-folder {
+  font-size: 13px;
+  opacity: 0.55;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: all var(--duration-fast);
+}
+.proj-folder:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--grad-primary-soft);
+}
+.proj-folder:disabled {
+  opacity: 0.2;
+  cursor: not-allowed;
 }
 
 .modal-mask {

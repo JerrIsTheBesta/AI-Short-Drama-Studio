@@ -462,6 +462,7 @@ export const useProjectStore = defineStore('project', () => {
   function setBgm(assetId: string | undefined, prompt?: string) {
     if (!current.value) return
     current.value.bgmAssetId = assetId
+    if (!assetId) current.value.bgmClip = undefined
     if (prompt !== undefined) current.value.bgmPrompt = prompt
     touch()
   }
@@ -542,6 +543,19 @@ export const useProjectStore = defineStore('project', () => {
     const node = current.value?.canvas?.nodes.find((n) => n.id === id)
     if (!node) return
     node.data = { ...node.data, ...data }
+    touch()
+  }
+
+  function setBgmClip(clip: Project['bgmClip']) {
+    if (!current.value) return
+    current.value.bgmClip = clip
+    current.value.bgmAssetId = clip?.assetId
+    touch()
+  }
+
+  function setTextOverlays(items: NonNullable<Project['textOverlays']>) {
+    if (!current.value) return
+    current.value.textOverlays = items
     touch()
   }
 
@@ -805,6 +819,8 @@ export const useProjectStore = defineStore('project', () => {
     setSettings,
     setCaptionSrt,
     setBgm,
+    setBgmClip,
+    setTextOverlays,
     setFinalVideo,
     setAgentState,
     patchAgentState,

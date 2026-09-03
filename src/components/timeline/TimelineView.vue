@@ -7,6 +7,7 @@ const props = defineProps<{
   shots: Shot[]
   totalDuration: number
   selectedId: string | null
+  playhead?: number
 }>()
 
 const emit = defineEmits<{
@@ -14,6 +15,7 @@ const emit = defineEmits<{
   update: [id: string, patch: Partial<TimelineClip>]
   remove: [id: string]
   reorder: [fromId: string, toId: string]
+  seek: [seconds: number]
 }>()
 
 const PX_PER_SECOND = 60
@@ -92,6 +94,32 @@ function dropOn(clip: TimelineClip, evt: DragEvent) {
   draggingId.value = null
   if (fromId && fromId !== clip.id) emit('reorder', fromId, clip.id)
 }
+
+function seekFromPointer(evt: MouseEvent) {
+  const el = evt.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  const seconds = Math.max(0, Math.min(props.totalDuration, (evt.clientX - rect.left) / PX_PER_SECOND))
+  emit('seek', Number(seconds.toFixed(3)))
+}
+
+function startPlayheadDrag(evt: MouseEvent) {
+  evt.preventDefault()
+  evt.stopPropagation()
+  const content = (evt.currentTarget as HTMLElement).parentElement
+  if (!content) return
+  const move = (e: MouseEvent) => {
+    const rect = content.getBoundingClientRect()
+    const seconds = Math.max(0, Math.min(props.totalDuration, (e.clientX - rect.left) / PX_PER_SECOND))
+    emit('seek', Number(seconds.toFixed(3)))
+  }
+  const up = () => {
+    document.removeEventListener('mousemove', move)
+    document.removeEventListener('mouseup', up)
+  }
+  document.addEventListener('mousemove', move)
+  document.addEventListener('mouseup', up)
+  move(evt)
+}
 </script>
 
 <template>
@@ -108,7 +136,7 @@ function dropOn(clip: TimelineClip, evt: DragEvent) {
     </div>
 
     <div class="timeline-scroll">
-      <div class="timeline-content" :style="{ width: totalWidth + 'px' }">
+      <div class="timeline-content" :style="{ width: totalWidth + 'px' }" @click="seekFromPointer">
         <div class="ruler">
           <div
             v-for="t in ruler"
@@ -119,6 +147,16 @@ function dropOn(clip: TimelineClip, evt: DragEvent) {
           >
             <span v-if="t.major" class="tick-label">{{ t.sec }}s</span>
           </div>
+        </div>
+
+        <div
+          class="playhead"
+          :style="{ left: Math.max(0, Math.min(totalDuration, playhead || 0)) * PX_PER_SECOND + 'px' }"
+          title="拖动播放头定位"
+          @mousedown="startPlayheadDrag"
+        >
+          <span class="playhead-cap" />
+          <span class="playhead-line" />
         </div>
 
         <div class="track">
@@ -143,8 +181,8 @@ function dropOn(clip: TimelineClip, evt: DragEvent) {
           >
             <div class="clip-head">
               <span class="clip-drag" title="拖动调整顺序">⠿</span>
-              <span class="clip-num">#{{ shotOf(clip)?.index ?? '?' }}</span>
-              <span class="clip-title">{{ shotOf(clip)?.title ?? '?' }}</span>
+              <span class="clip-num">#{{ shotOf(clip) ? (shotOf(clip)!.index + 1) : (clips.findIndex(c => c.id === clip.id) + 1) }}</span>
+              <span class="clip-title">{{ shotOf(clip)?.title || clip.label || '视频素材' }}</span>
               <button
                 class="clip-remove"
                 @click.stop="emit('remove', clip.id)"
@@ -303,6 +341,34 @@ function dropOn(clip: TimelineClip, evt: DragEvent) {
   background: rgba(0, 0, 0, 0.2);
   font-size: 10px;
   border-bottom: 1px solid var(--color-border);
+}
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  width: 14px;
+  transform: translateX(-7px);
+  cursor: ew-resize;
+}
+.playhead-cap {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px 3px 6px 6px;
+  background: #ff4d67;
+  box-shadow: 0 1px 5px rgba(255, 77, 103, 0.45);
+}
+.playhead-line {
+  position: absolute;
+  top: 8px;
+  bottom: 0;
+  left: 6px;
+  width: 2px;
+  background: #ff4d67;
+  box-shadow: 0 0 4px rgba(255, 77, 103, 0.35);
 }
 .clip-drag {
   color: var(--color-text-3);

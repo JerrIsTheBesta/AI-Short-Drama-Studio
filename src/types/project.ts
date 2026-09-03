@@ -327,6 +327,10 @@ export type TransitionType =
 export interface TimelineClip {
   id: ID
   shotId: ID
+  /** 自由剪辑片段可直接引用视频/图片资产，不要求先创建分镜。 */
+  assetId?: ID
+  /** 自由剪辑时间线上显示的素材名称。 */
+  label?: string
   /** 在时间线上的起始时间（秒） */
   startTime: number
   /** 时长（秒） */
@@ -342,6 +346,26 @@ export interface TimelineClip {
   /** 音量 0-1 */
   volume: number
   enabled: boolean
+}
+
+export interface AudioTimelineClip {
+  assetId: ID
+  startTime: number
+  sourceIn: number
+  duration: number
+  volume: number
+}
+
+export interface TextOverlay {
+  id: ID
+  text: string
+  startTime: number
+  duration: number
+  fontFamily: string
+  fontSizeRatio: number
+  color: string
+  position: 'top' | 'center' | 'bottom'
+  bold: boolean
 }
 
 /** 整片锁定的主体（人物 / 动物 / 关键物体），先出多角度人设图再配分镜 */
@@ -426,6 +450,10 @@ export interface Project {
   captionSrt?: string
   /** 整片背景音乐（资源库音频 ID） */
   bgmAssetId?: ID
+  /** 简易剪辑器中的音乐轨片段。 */
+  bgmClip?: AudioTimelineClip
+  /** 简易剪辑器中可独立设置样式和时段的文字块。 */
+  textOverlays?: TextOverlay[]
   /** 生成 BGM 用的提示词 */
   bgmPrompt?: string
   /** 画布/导出合成的最终视频 */

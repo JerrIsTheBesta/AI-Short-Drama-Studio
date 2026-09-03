@@ -7,7 +7,7 @@ import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import ProgressRing from '@/components/common/ProgressRing.vue'
-import { canBuildExport, ensureTimelineFromShots } from '@/utils/timeline'
+import { canBuildExport, ensureTimelineFromShots, timelineClipAssetId } from '@/utils/timeline'
 import { effectiveShotAudioMode, isDigitalHumanSpeechProject, needsExternalTts } from '@/utils/shot'
 
 const router = useRouter()
@@ -92,14 +92,13 @@ async function doExport() {
     for (const clip of timeline.value) {
       if (mediaMap.has(clip.shotId)) continue
       const shot = shots.value.find((s) => s.id === clip.shotId)
-      if (!shot) continue
-      const assetId = shot.videoAssetId || shot.imageAssetId
+      const assetId = project.current ? timelineClipAssetId(project.current, clip) : undefined
       if (!assetId) continue
       const blob = await assets.getBlob(assetId)
       if (!blob) continue
       mediaMap.set(clip.shotId, {
         blob,
-        kind: shot.videoAssetId ? 'video' : 'image'
+        kind: (assets.getMeta(assetId)?.kind || (shot?.videoAssetId ? 'video' : 'image')) as 'video' | 'image'
       })
     }
 
@@ -131,7 +130,7 @@ async function doExport() {
       voiceoverMap.set(clip.shotId, shot?.voiceover ?? '')
     }
 
-    const captionCues = (() => {
+    const baseCaptionCues = (() => {
       if (isDigitalHuman.value) {
         return buildCuesFromClips(
           workingTimeline.map((c) => ({
@@ -151,6 +150,22 @@ async function doExport() {
         }))
       ).filter((c) => c.text.trim())
     })()
+    const captionCues = [
+      ...baseCaptionCues,
+      ...(project.current.textOverlays || []).map((item, index) => ({
+        id: baseCaptionCues.length + index + 1,
+        start: item.startTime,
+        end: item.startTime + item.duration,
+        text: item.text,
+        style: {
+          fontFamily: item.fontFamily,
+          fontSizeRatio: item.fontSizeRatio,
+          color: item.color,
+          position: item.position,
+          bold: item.bold
+        }
+      }))
+    ].sort((a, b) => a.start - b.start)
 
     if (burnCaptions.value && captionCues.length === 0) {
       toast.warn('没有字幕文本：请到「字幕」页填写，或在分镜里写口播。将导出无字幕视频。')
@@ -226,6 +241,9 @@ async function doExport() {
       captionHighlightScale: project.current.settings.captionHighlightScale,
       bgm: bgmBlob,
       bgmVolume: project.current.settings.bgmVolume,
+      bgmStartTime: project.current.bgmClip?.startTime,
+      bgmSourceIn: project.current.bgmClip?.sourceIn,
+      bgmDuration: project.current.bgmClip?.duration,
       originalVolume: isSpeech.value ? 1 : ambientVolume.value,
       keepAmbientAudio: isSpeech.value ? true : keepAmbientAudio.value,
       sourceAudioMap,

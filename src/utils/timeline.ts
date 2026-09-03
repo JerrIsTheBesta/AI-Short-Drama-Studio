@@ -1,5 +1,11 @@
 import type { Project, TimelineClip } from '@/types'
 
+export function timelineClipAssetId(project: Project, clip: TimelineClip): string | undefined {
+  if (clip.assetId) return clip.assetId
+  const shot = project.shots.find((item) => item.id === clip.shotId)
+  return shot?.videoAssetId || shot?.imageAssetId
+}
+
 /** 按分镜顺序从已有视频/图片构建时间线 */
 export function buildTimelineFromShots(project: Project): TimelineClip[] {
   const clips: TimelineClip[] = [...project.shots]
