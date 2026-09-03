@@ -1072,6 +1072,61 @@ function isGenericActionDump(desc: string): boolean {
   )
 }
 
+type DialogueCue = { text: string; speaker?: string }
+
+/** 保留“谁说哪句”。旧逻辑只保留台词文字，多角色时模型无法建立独占口型。 */
+function dialogueCuesForPrompt(input: H3PromptInput): DialogueCue[] {
+  const wanted = spokenLinesForPrompt(input)
+  const raw = `${input.voiceover || ''}\n${input.prompt || ''}`
+  return wanted.map((text) => {
+    const escaped = escapeRegExp(text)
+    const tagged = raw.match(
+      new RegExp(`(?:「([^」]{1,24})」|([\\u3400-\\u9fffA-Za-z][\\u3400-\\u9fffA-Za-z0-9 _-]{0,23}))\\s*(?:说|说道|问|喊|叫|答|says?y?|asks?|shouts?|replies?)?\\s*[：:]?\\s*(?:<d>\\s*\\[[^\\]]*\\]\\s*)?${escaped}`, 'i')
+    )
+    const line = raw.match(
+      new RegExp(`(?:^|\\n)\\s*(?:「([^」]{1,24})」|([\\u3400-\\u9fffA-Za-z][\\u3400-\\u9fffA-Za-z0-9 _-]{0,23}))\\s*[：:]\\s*${escaped}`, 'im')
+    )
+    const speaker = String(tagged?.[1] || tagged?.[2] || line?.[1] || line?.[2] || '').trim()
+    return { text, speaker: speaker || undefined }
+  })
+}
+
+function spokenCharacterCount(lines: string[]): number {
+  return lines.reduce((sum, line) => sum + (line.match(/[\u3400-\u9fffA-Za-z0-9]/g)?.length || 0), 0)
+}
+
+/** 明显塞不进时不要产出必坏的视频。阈值留有余量，仍允许短促、偏快的对白。 */
+function assertDialogueFitsDuration(lines: string[], duration: number): void {
+  const count = spokenCharacterCount(lines)
+  const seconds = Math.max(1, Number(duration) || 5)
+  const capacity = Math.floor(seconds * 5.5)
+  if (count > capacity) {
+    const estimated = Math.ceil(count / 4.5)
+    throw new Error(`对白约需 ${estimated} 秒，但当前镜头只有 ${seconds.toFixed(1)} 秒。请拆成至少 ${Math.ceil(estimated / seconds)} 个视频节点，避免多人抢口型。`)
+  }
+}
+
+function dialogueTurnIssue(desc: string, expected: DialogueCue[]): string {
+  if (!expected.length) return ''
+  const tags = [...String(desc || '').matchAll(/<d>\s*\[[^\]]*\]\s*([\s\S]*?)<\/d>/gi)]
+  if (tags.length !== expected.length) return `台词标签数量应为 ${expected.length}，实际为 ${tags.length}`
+  for (let i = 0; i < tags.length; i += 1) {
+    const index = tags[i].index || 0
+    const lead = desc.slice(Math.max(0, index - 260), index)
+    if (!/\(S\d+\)[^.\n]{0,180}\b(?:says?|asks?|shouts?|replies?|exclaims?|yells?|whispers?)\b[^.\n]{0,120}[:，,]?\s*$/i.test(lead)) {
+      return `第 ${i + 1} 句台词没有紧邻的唯一说话人 (S#) 和说话动作`
+    }
+    const after = desc.slice((tags[i].index || 0) + tags[i][0].length, (tags[i].index || 0) + tags[i][0].length + 420)
+    const around = `${lead} ${after}`
+    const closesSpeaker = /(?:closes?|keeps?|remain\w*)[^.]{0,100}(?:lips|mouth)[^.]{0,80}(?:closed|still)|(?:lips|mouth)[^.]{0,80}(?:remain\w*|stay\w*)[^.]{0,40}closed|does not mouth/i.test(after)
+    const locksListeners = /(?:all|every)[^.]{0,60}(?:other|listener)[^.]{0,100}(?:lips|mouth)[^.]{0,60}closed|(?:other|listening)[^.]{0,80}(?:character|person|subject)[^.]{0,100}(?:does not mouth|keeps?[^.]{0,30}(?:lips|mouth)[^.]{0,30}closed)/i.test(around)
+    if (!closesSpeaker || !locksListeners) {
+      return `第 ${i + 1} 句之后没有明确“说话者闭嘴、其他角色不跟口型”`
+    }
+  }
+  return ''
+}
+
 /** 识别旧版“按模板填词”的无生机成片稿。 */
 export function isLifelessH3Prompt(text: string | undefined): boolean {
   const t = String(text || '')
@@ -1212,6 +1267,8 @@ export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<str
   }
 
   const cueLines = spokenLinesForPrompt(resolved)
+  const dialogueCues = dialogueCuesForPrompt(resolved)
+  assertDialogueFitsDuration(cueLines, resolved.duration)
   const camera = CAMERA_EN[normalizeCameraMovement(resolved.cameraMovement)]
   try {
     const resp = await callLLM({
@@ -1241,10 +1298,10 @@ Never omit 图1/图2/图3 when those pictures exist. These images are identity/l
 
 6) Treat each reference character according to the state described in the scene: living body, carved statue, portrait, reflection, shadow, off-screen voice, hidden presence, or absent identity reference. A character reference does NOT prove that a full living person is physically present. Do not duplicate a referenced identity as both a person and a prop unless the action explicitly shows a transformation.
 
-7) Dialogue ONLY inside <d>. Use this form when someone speaks on screen:
+7) Dialogue ONLY inside <d>. Dialogue is a sequence of mutually exclusive speaking turns. Use this form when someone speaks on screen:
 <d>[Chinese, spoken on screen by EnglishName, delivery and accurate lip synchronization] 原词</d>
 Delivery stays in the bracket. The tag contains ONLY the words a mouth actually says. Never dump 场记, timestamps, style, 图1, Camera language, or performance notes into <d>.
-Nobody else mouths those words. If a character does not speak, their lips remain completely closed.
+Immediately before EVERY d tag, name exactly one speaker with a stable (S#) and a speech verb. Immediately after EVERY d tag, state that this speaker closes their mouth, and that every other visible character keeps their lips completely closed throughout that line and reacts only with eyes, brows, breath, posture or hands. Never let speaking intervals overlap. Never use a bare d tag. Nobody else mouths those words.
 
 Rules:
 - Preserve the user's event. Expand what is already implied by the script, but do not invent a different incident.
@@ -1274,6 +1331,8 @@ ${pictureRoster(resolved) || 'no extra pictures'}
 Voice mode: ${cueLines.length ? resolved.voiceMode || 'dialogue' : 'none — no trusted spoken lines; do NOT invent dialogue'}
 Spoken lines already extracted (quotes / 台词 / 口播栏 only; director notes are NOT speech):
 ${cueLines.length ? cueLines.map((line, i) => `${i + 1}. ${line}`).join('\n') : '(none — write No dialogue. No lips moving.)'}
+Dialogue ownership recovered from the source (each item is one exclusive turn; preserve this order):
+${dialogueCues.length ? dialogueCues.map((cue, i) => `${i + 1}. speaker=${cue.speaker || 'infer from the immediately surrounding action; never leave unassigned'} | words=${cue.text}`).join('\n') : '(none)'}
 Sound notes: ${englishOrOmit(resolved.audioDescription) || '(from the node text)'}
 NODE MATERIAL TO DIRECT (source of truth for event, props, blocking and continuity; 场记/时长/画风 are not speech):
 ${source || '(perform the beat in this location)'}`
@@ -1298,14 +1357,17 @@ ${source || '(perform the beat in this location)'}`
         desc
     }
     let sound = String(parsed.overall_soundscape || '').trim()
-    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc)) {
+    const firstDialogueIssue = dialogueTurnIssue(desc, dialogueCues)
+    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc) || firstDialogueIssue) {
       const repair = await callLLM({
         messages: [
           {
             role: 'system',
             content: `Rewrite a rejected shot-video prompt as JSON only: {"integrated_multimodal_description":"...","overall_soundscape":"..."}.
 The rejected draft was lifeless because it used a reusable timing template, repeated static-camera instructions, or failed to preserve the actual event.
-Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue. End once with the full ${durationText(resolved)}-second completion sentence.`
+Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue.
+
+Dialogue is strict turn-taking. Immediately before every <d>, identify exactly one speaker by stable (S#) plus says/asks/replies/shouts/exclaims. Immediately after it, say that speaker closes their mouth and all other visible characters keep their lips completely closed during that line, reacting only nonverbally. Speaking turns never overlap and bare <d> tags are forbidden. End once with the full ${durationText(resolved)}-second completion sentence.`
           },
           {
             role: 'user',
@@ -1314,6 +1376,12 @@ ${pictureRoster(resolved) || 'no extra pictures'}
 
 Trusted dialogue:
 ${cueLines.length ? cueLines.join('\n') : '(none; no dialogue and no lips moving)'}
+
+Required dialogue ownership and order:
+${dialogueCues.length ? dialogueCues.map((cue, i) => `${i + 1}. speaker=${cue.speaker || 'infer from source context'} | words=${cue.text}`).join('\n') : '(none)'}
+
+Rejected-draft dialogue defect:
+${firstDialogueIssue || '(none; repair the visual-action defect)'}
 
 Original scene material:
 ${source}
@@ -1338,6 +1406,10 @@ ${desc || '(empty)'}`
     }
     if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc)) {
       throw new Error('模型两次返回了机械模板稿，已阻止这份低质量提示词进入视频生成。')
+    }
+    const finalDialogueIssue = dialogueTurnIssue(desc, dialogueCues)
+    if (finalDialogueIssue) {
+      throw new Error(`对白调度仍不合格：${finalDialogueIssue}。已阻止多人同时说话的提示词进入视频生成。`)
     }
     // 台词以入口 cueLines / voiceover 为准；禁止因模型乱写 <d> 就强行改成 dialogue
     const trusted = spokenLinesForPrompt(resolved)
