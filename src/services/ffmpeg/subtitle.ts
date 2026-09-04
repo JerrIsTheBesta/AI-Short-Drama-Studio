@@ -356,20 +356,20 @@ export async function renderCaptionPng(
   const blockWidth = Math.max(...lines.map(measureLine))
 
   let midY: number
-  switch (style.position) {
-    case 'top':
-      midY = height * 0.1 + blockHeight / 2
-      break
-    case 'center':
-      midY = height / 2
-      break
-    default:
-      midY = height - height * 0.1 - blockHeight / 2
+  if (style.yRatio != null) {
+    midY = Math.max(blockHeight / 2, Math.min(height - blockHeight / 2, height * style.yRatio))
+  } else {
+    switch (style.position) {
+      case 'top': midY = height * 0.1 + blockHeight / 2; break
+      case 'center': midY = height / 2; break
+      default: midY = height - height * 0.1 - blockHeight / 2
+    }
   }
+  const midX = width * Math.max(0.07, Math.min(0.93, style.xRatio ?? 0.5))
 
   if (captionBg && style.bgOpacity > 0) {
     ctx.fillStyle = hexToRgba(style.bgColor || '#000000', style.bgOpacity)
-    const x = (width - blockWidth) / 2 - padX
+    const x = midX - blockWidth / 2 - padX
     const y = midY - blockHeight / 2 - padY
     const w = blockWidth + padX * 2
     const h = blockHeight + padY * 2
@@ -393,7 +393,7 @@ export async function renderCaptionPng(
       ctx.font = fontFor(run.highlighted)
       return ctx.measureText(run.text).width
     })
-    let x = (width - runWidths.reduce((sum, value) => sum + value, 0)) / 2
+    let x = midX - runWidths.reduce((sum, value) => sum + value, 0) / 2
     ctx.textAlign = 'left'
     runs.forEach((run, runIndex) => {
       ctx.font = fontFor(run.highlighted)

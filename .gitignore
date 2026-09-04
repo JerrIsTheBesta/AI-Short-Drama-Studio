@@ -12,7 +12,15 @@ dist-ssr
 .idea
 *.log
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+.npmrc
 .cache
 coverage
 output

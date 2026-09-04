@@ -162,6 +162,8 @@ async function doExport() {
           fontSizeRatio: item.fontSizeRatio,
           color: item.color,
           position: item.position,
+          xRatio: item.xRatio,
+          yRatio: item.yRatio,
           bold: item.bold
         }
       }))

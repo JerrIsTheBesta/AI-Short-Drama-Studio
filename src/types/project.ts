@@ -279,6 +279,9 @@ export interface CaptionStyle {
   bgOpacity: number
   /** 位置：bottom / center / top */
   position: 'top' | 'center' | 'bottom'
+  /** 自由定位中心点（相对画面宽高，0–1）。 */
+  xRatio?: number
+  yRatio?: number
   /** 是否加粗 */
   bold: boolean
 }
@@ -365,6 +368,9 @@ export interface TextOverlay {
   fontSizeRatio: number
   color: string
   position: 'top' | 'center' | 'bottom'
+  /** 文字块中心点在画面中的相对坐标（0–1）。 */
+  xRatio?: number
+  yRatio?: number
   bold: boolean
 }
 

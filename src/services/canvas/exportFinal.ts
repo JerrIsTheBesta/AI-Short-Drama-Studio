@@ -93,6 +93,8 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
         fontSizeRatio: item.fontSizeRatio,
         color: item.color,
         position: item.position,
+        xRatio: item.xRatio,
+        yRatio: item.yRatio,
         bold: item.bold
       }
     }))

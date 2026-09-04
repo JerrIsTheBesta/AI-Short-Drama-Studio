@@ -306,6 +306,8 @@ function addTextOverlay() {
     fontSizeRatio: project.current.settings.captionStyle.fontSizeRatio || 0.05,
     color: project.current.settings.captionStyle.color || '#ffffff',
     position: project.current.settings.captionStyle.position || 'bottom',
+    xRatio: 0.5,
+    yRatio: 0.82,
     bold: project.current.settings.captionStyle.bold ?? true
   }
   project.setTextOverlays([...textOverlays.value, item])
@@ -315,6 +317,43 @@ function addTextOverlay() {
 function updateTextOverlay(patch: Partial<TextOverlay>) {
   if (!selectedText.value) return
   project.setTextOverlays(textOverlays.value.map((item) => item.id === selectedText.value!.id ? { ...item, ...patch } : item))
+}
+
+function textOverlayStyle(item: TextOverlay) {
+  const fallbackY = item.position === 'top' ? 0.15 : item.position === 'center' ? 0.5 : 0.85
+  return {
+    left: `${(item.xRatio ?? 0.5) * 100}%`,
+    top: `${(item.yRatio ?? fallbackY) * 100}%`,
+    color: item.color,
+    fontFamily: item.fontFamily,
+    fontSize: `${Math.max(16, item.fontSizeRatio * 520)}px`,
+    fontWeight: item.bold ? '700' : '400'
+  }
+}
+
+function startTextDrag(event: PointerEvent, item: TextOverlay) {
+  const frame = (event.currentTarget as HTMLElement).parentElement
+  if (!frame) return
+  event.preventDefault()
+  selectedTextId.value = item.id
+  const move = (next: PointerEvent) => {
+    const rect = frame.getBoundingClientRect()
+    const xRatio = Math.max(0.07, Math.min(0.93, (next.clientX - rect.left) / rect.width))
+    const yRatio = Math.max(0.07, Math.min(0.93, (next.clientY - rect.top) / rect.height))
+    project.setTextOverlays(textOverlays.value.map((text) => text.id === item.id ? { ...text, xRatio, yRatio } : text))
+  }
+  const stop = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', stop)
+    window.removeEventListener('pointercancel', stop)
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', stop)
+  window.addEventListener('pointercancel', stop)
+}
+
+function setTextPositionPreset(position: TextOverlay['position']) {
+  updateTextOverlay({ position, xRatio: 0.5, yRatio: position === 'top' ? 0.15 : position === 'center' ? 0.5 : 0.85 })
 }
 
 function removeTextOverlay(id: string) {
@@ -585,8 +624,9 @@ function next() {
               v-for="text in activeTexts"
               :key="text.id"
               class="player-text-overlay"
-              :class="`at-${text.position}`"
-              :style="{ color: text.color, fontFamily: text.fontFamily, fontSize: `${Math.max(16, text.fontSizeRatio * 520)}px`, fontWeight: text.bold ? '700' : '400' }"
+              :class="{ selected: selectedTextId === text.id }"
+              :style="textOverlayStyle(text)"
+              @pointerdown.stop="startTextDrag($event, text)"
             >
               {{ text.text }}
             </div>
@@ -861,7 +901,7 @@ function next() {
               <label class="prop-field"><span>开始（秒）</span><input class="prop-input" type="number" min="0" step="0.1" :value="selectedText.startTime" @change="updateTextOverlay({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
               <label class="prop-field"><span>长度（秒）</span><input class="prop-input" type="number" min="0.5" step="0.1" :value="selectedText.duration" @change="updateTextOverlay({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
             </div>
-            <label class="prop-field"><span>位置</span><select class="prop-input" :value="selectedText.position" @change="updateTextOverlay({ position: ($event.target as HTMLSelectElement).value as TextOverlay['position'] })"><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label>
+            <label class="prop-field"><span>位置预设（也可直接在画面拖动）</span><select class="prop-input" :value="selectedText.position" @change="setTextPositionPreset(($event.target as HTMLSelectElement).value as TextOverlay['position'])"><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label>
             <label class="subtitle-toggle"><input type="checkbox" :checked="selectedText.bold" @change="updateTextOverlay({ bold: ($event.target as HTMLInputElement).checked })" />加粗</label>
             <button type="button" class="remove-text-button" @click="removeTextOverlay(selectedText.id)">删除这段文字</button>
           </template>
@@ -975,18 +1015,21 @@ function next() {
 }
 .player-text-overlay {
   position: absolute;
-  left: 7%;
-  right: 7%;
+  width: 86%;
+  transform: translate(-50%, -50%);
   z-index: 2;
   text-align: center;
   line-height: 1.25;
   white-space: pre-wrap;
-  pointer-events: none;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
   text-shadow: 0 2px 4px #000, 0 0 2px #000;
 }
-.player-text-overlay.at-top { top: 9%; }
-.player-text-overlay.at-center { top: 50%; transform: translateY(-50%); }
-.player-text-overlay.at-bottom { bottom: 9%; }
+.player-text-overlay.selected {
+  outline: 1px dashed rgba(255, 255, 255, 0.85);
+  outline-offset: 5px;
+}
 
 .editor-tracks {
   margin-top: 10px;
