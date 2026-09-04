@@ -1,5 +1,11 @@
 # 剧流 Studio
 
+**AI短剧生成 · AI短剧工作台 · AI视频生成 · AI Short Drama Generator · AI Video Workflow Studio**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
+[![Electron](https://img.shields.io/badge/Electron-Desktop-47848f.svg)](https://www.electronjs.org/)
+
 剧流 Studio 是一款本地优先、模型可自由接入的 AI 视频创作与剪辑工作台。它把剧本、人物设定、场景、分镜、参考图、视频、对白、音乐和最终合成放进同一个可视化项目，也可以不使用 AI，直接导入本地素材完成基础视频剪辑。
 
 ![剧流 Studio 无限画布工作流：智能体、剧本、人物、场景、分镜、视频与合成节点](docs/images/studio-workflow-overview.png)
@@ -138,8 +144,8 @@
 ### 1. 获取代码
 
 ```bash
-git clone <repository-url>
-cd ai-cut
+git clone https://github.com/JerrIsTheBesta/AI-Short-Drama-Studio.git
+cd AI-Short-Drama-Studio
 ```
 
 ### 2. 安装依赖
