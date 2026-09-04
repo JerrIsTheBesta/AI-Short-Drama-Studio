@@ -16,6 +16,7 @@ Vite 的 `VITE_*` 变量属于前端构建变量。若构建时填入真实 Key�
 ```bash
 git status --short
 git ls-files ".env*" "*.pem" "*.key" "*.p12" "*.pfx"
+npm run security:check
 npm run build
 ```
 

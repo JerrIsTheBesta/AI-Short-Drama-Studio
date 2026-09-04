@@ -8,8 +8,9 @@
   "scripts": {
     "dev": "vite",
     "web": "vite --mode web",
-    "build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs",
-    "electron:build": "vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/pack-electron.mjs",
+    "security:check": "node scripts/assert-source-clean.mjs",
+    "build": "node scripts/assert-source-clean.mjs && vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs",
+    "electron:build": "node scripts/assert-source-clean.mjs && vue-tsc --noEmit && vite build && node scripts/assert-pack-clean.mjs && node scripts/pack-electron.mjs",
     "preview": "vite preview --host",
     "type-check": "vue-tsc --noEmit",
     "diagnose:storyboard": "node scripts/diagnose-storyboard-llm.mjs"

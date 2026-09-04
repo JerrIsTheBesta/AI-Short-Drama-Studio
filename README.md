@@ -60,6 +60,9 @@ Copy-Item .env.example .env
 # 类型检查
 npm run type-check
 
+# 检查 Git 跟踪源码中的疑似硬编码凭据
+npm run security:check
+
 # Web 生产构建，同时检查 dist 是否混入本机密钥
 npm run build
 
