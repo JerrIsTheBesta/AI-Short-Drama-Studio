@@ -3,7 +3,9 @@ import { computed, ref } from 'vue'
 import { useProjectStore, useSettingsStore, uniqueProfileName } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
 import EndpointForm from '@/components/settings/EndpointForm.vue'
+import AdapterFields from '@/components/settings/AdapterFields.vue'
 import ProfileLibrary from '@/components/settings/ProfileLibrary.vue'
+import type { AdapterConfig } from '@/services/ai/adapters'
 import { type VideoStillMode } from '@/types/canvas'
 import { syncH3ShotStillModes } from '@/services/canvas/videoModel'
 import {
@@ -122,6 +124,17 @@ function patchVideoStillMode(mode: VideoStillMode) {
   settings.patchVideo({ stillMode: mode })
   syncH3ShotStillModes(mode)
 }
+
+function patchAdapter(
+  kind: 'llm' | 'vision' | 'image' | 'tts' | 'video',
+  patch: { adapter?: AdapterConfig; workflowId?: string }
+) {
+  if (kind === 'llm') settings.patchLlm({ adapter: patch.adapter })
+  else if (kind === 'vision') settings.patchVision({ adapter: patch.adapter })
+  else if (kind === 'image') settings.patchImage({ adapter: patch.adapter })
+  else if (kind === 'tts') settings.patchTts({ adapter: patch.adapter })
+  else settings.patchVideo({ adapter: patch.adapter, workflowId: patch.workflowId })
+}
 </script>
 
 <template>
@@ -156,6 +169,11 @@ function patchVideoStillMode(mode: VideoStillMode) {
         @add-model="settings.addModel('llm', $event)"
         @remove-model="settings.removeModel('llm', $event)"
       />
+      <AdapterFields
+        kind="llm"
+        :adapter="settings.config.llm.adapter"
+        @patch="patchAdapter('llm', $event)"
+      />
     </template>
 
     <template v-else-if="module === 'vision'">
@@ -188,6 +206,11 @@ function patchVideoStillMode(mode: VideoStillMode) {
         @add-model="settings.addModel('vision', $event)"
         @remove-model="settings.removeModel('vision', $event)"
       />
+      <AdapterFields
+        kind="vision"
+        :adapter="settings.config.vision.adapter"
+        @patch="patchAdapter('vision', $event)"
+      />
     </template>
 
     <template v-else-if="module === 'image'">
@@ -219,6 +242,11 @@ function patchVideoStillMode(mode: VideoStillMode) {
         @patch="settings.patchImage($event)"
         @add-model="settings.addModel('image', $event)"
         @remove-model="settings.removeModel('image', $event)"
+      />
+      <AdapterFields
+        kind="image"
+        :adapter="settings.config.image.adapter"
+        @patch="patchAdapter('image', $event)"
       />
     </template>
 
@@ -257,6 +285,11 @@ function patchVideoStillMode(mode: VideoStillMode) {
           <option v-for="v in TTS_VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
         </select>
       </EndpointForm>
+      <AdapterFields
+        kind="tts"
+        :adapter="settings.config.tts.adapter"
+        @patch="patchAdapter('tts', $event)"
+      />
     </template>
 
     <template v-else-if="module === 'video'">
@@ -350,6 +383,11 @@ function patchVideoStillMode(mode: VideoStillMode) {
             {{ showVideoKey ? '隐藏' : '显示' }}
           </button>
         </div>
+        <AdapterFields
+          kind="video"
+          :adapter="settings.config.video.adapter"
+          @patch="patchAdapter('video', $event)"
+        />
       </section>
     </template>
   </div>

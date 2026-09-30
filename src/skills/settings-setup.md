@@ -30,3 +30,24 @@ triggers: 配置,接入,API Key,视觉,生图,配音,视频,TTS,文档
 - 自建 ComfyUI 示例：baseUrl=http://127.0.0.1:8188，adapter.type=comfyui-prompt，workflowTemplate 填完整提交 JSON。
 - 自定义生图若路径不是 /images/generations：adapter.type=http-custom，并指定 path 与 resultJsonPath。
 - 可用 test_connection 做廉价连通探测（/models 或 /system_stats）。不要管理 AutoDL 实例开关机。
+
+
+## ComfyUI workflowTemplate
+
+用户从 Comfy「Save (API Format)」导出的 JSON 可直接粘贴。提交体形状通常是：
+
+```json
+{
+  "prompt": {
+    "3": { "class_type": "KSampler", "inputs": { "...": "..." } }
+  },
+  "client_id": "ai-cut"
+}
+```
+
+占位符（字符串内替换，需出现在你的模板里才生效）：
+- `{{prompt}}` 用户/节点提示词
+- `{{image}}` 参考图 data URI（若工作流需要）
+- `{{negative}}` 负向提示
+
+**不要**在没有对应用户模型与节点图时编造「可直接跑」的假工作流。缺模板时让用户去「设置 → 视频/生图 → 适配器」粘贴。

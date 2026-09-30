@@ -26,6 +26,12 @@ export interface AdapterConfig {
   path?: string
   /** 轮询路径模板，可用 {id}，如 /history/{id} */
   pollPath?: string
+  /** pollPath 别名（设置页 / 文档常用） */
+  pollUrl?: string
+  /** 从提交响应取任务 id 的路径，如 data.id */
+  taskIdJsonPath?: string
+  /** 轮询响应里取状态或中间结果的路径 */
+  pollJsonPath?: string
   /** 从 JSON 取结果 URL 的点分路径，如 data.0.url */
   resultJsonPath?: string
   /** 鉴权头名，默认 Authorization */
@@ -243,8 +249,67 @@ function joinUrl(baseUrl: string, path?: string) {
   return `${base}/${String(path).replace(/^\//, '')}`
 }
 
-/** 自定义 HTTP 生图：POST JSON，从 resultJsonPath 或启发式取 URL/b64 */
-export async function httpCustomImageGenerate(opts: {
+function resolvePollTemplate(adapter?: AdapterConfig) {
+  return (adapter?.pollUrl || adapter?.pollPath || '').trim()
+}
+
+function extractTaskId(data: any, adapter?: AdapterConfig): string {
+  const fromPath = adapter?.taskIdJsonPath
+    ? getByJsonPath(data, adapter.taskIdJsonPath)
+    : undefined
+  const raw =
+    fromPath ??
+    data?.id ??
+    data?.task_id ??
+    data?.taskId ??
+    data?.request_id ??
+    getByJsonPath(data, 'data.id') ??
+    getByJsonPath(data, 'data.task_id') ??
+    getByJsonPath(data, 'output.task_id')
+  return String(raw || '').trim()
+}
+
+async function mediaFromValue(
+  picked: unknown,
+  signal?: AbortSignal,
+  fallbackMime = 'application/octet-stream'
+): Promise<{ blob: Blob; mimeType: string } | null> {
+  if (typeof picked !== 'string' || !picked.trim()) return null
+  const value = picked.trim()
+  if (value.startsWith('data:')) {
+    const m = value.match(/^data:([^;]+);base64,(.+)$/i)
+    if (!m) throw new Error('data URI 无法解析')
+    const bin = atob(m[2].replace(/\s/g, ''))
+    const arr = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+    return { blob: new Blob([arr], { type: m[1] }), mimeType: m[1] }
+  }
+  if (/^https?:\/\//i.test(value)) {
+    const r = await fetch(value, { signal })
+    if (!r.ok) throw new Error(`下载结果失败 ${r.status}`)
+    const blob = await r.blob()
+    return { blob, mimeType: blob.type || fallbackMime }
+  }
+  if (/^[A-Za-z0-9+/=\s]+$/.test(value) && value.length > 256) {
+    const raw = value.replace(/\s/g, '')
+    const bin = atob(raw)
+    const arr = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+    const mime =
+      arr[0] === 0x89 && arr[1] === 0x50
+        ? 'image/png'
+        : arr[0] === 0xff && arr[1] === 0xd8
+          ? 'image/jpeg'
+          : arr[4] === 0x66 && arr[5] === 0x74 && arr[6] === 0x79 && arr[7] === 0x70
+            ? 'video/mp4'
+            : fallbackMime
+    return { blob: new Blob([arr], { type: mime }), mimeType: mime }
+  }
+  return null
+}
+
+/** 自定义 HTTP：POST JSON；可选 pollUrl/{id} 轮询；从 resultJsonPath 取媒体 */
+export async function httpCustomMediaGenerate(opts: {
   baseUrl: string
   apiKey: string
   model: string
@@ -252,9 +317,15 @@ export async function httpCustomImageGenerate(opts: {
   adapter?: AdapterConfig
   extraBody?: Record<string, unknown>
   signal?: AbortSignal
+  kind?: 'image' | 'video'
+  onProgress?: (msg: string) => void
 }): Promise<{ blob: Blob; mimeType: string }> {
   const adapter = opts.adapter || {}
-  const path = adapter.path || '/images/generations'
+  const kind = opts.kind || 'image'
+  const fallbackMime = kind === 'video' ? 'video/mp4' : 'image/png'
+  const path =
+    adapter.path ||
+    (kind === 'video' ? '/v1/videos/generations' : '/images/generations')
   const url = joinUrl(opts.baseUrl, path)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -267,54 +338,89 @@ export async function httpCustomImageGenerate(opts: {
     prompt: opts.prompt,
     ...(opts.extraBody || {})
   }
+  opts.onProgress?.('提交自定义接口…')
   const res = await providerHttp(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
     signal: opts.signal,
-    timeoutMs: 180_000
+    timeoutMs: kind === 'video' ? 180_000 : 180_000
   })
   if (!res.ok) {
-    throw new Error(`[image] 自定义接口失败 ${res.status} ${await res.text()}`)
+    throw new Error(`[${kind}] 自定义接口失败 ${res.status} ${await res.text()}`)
   }
-  const data = await res.json()
+  let data = await res.json()
+
+  const pollTpl = resolvePollTemplate(adapter)
+  if (pollTpl) {
+    const taskId = extractTaskId(data, adapter)
+    if (!taskId) {
+      throw new Error(
+        `[${kind}] 已配置轮询但提交响应里没有任务 ID。请设置 adapter.taskIdJsonPath。片段：${JSON.stringify(data).slice(0, 240)}`
+      )
+    }
+    const started = Date.now()
+    const timeoutMs = kind === 'video' ? 15 * 60_000 : 6 * 60_000
+    while (Date.now() - started < timeoutMs) {
+      if (opts.signal?.aborted) throw new Error('已取消')
+      await new Promise((r) => setTimeout(r, 1500))
+      const pollUrl = /^https?:\/\//i.test(pollTpl)
+        ? pollTpl.replace(/\{id\}/g, encodeURIComponent(taskId))
+        : joinUrl(opts.baseUrl, pollTpl.replace(/\{id\}/g, encodeURIComponent(taskId)))
+      opts.onProgress?.('轮询任务状态…')
+      const poll = await providerHttp(pollUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          ...buildAuthHeader(opts.apiKey, adapter),
+          ...(adapter.headers || {})
+        },
+        signal: opts.signal,
+        timeoutMs: 60_000
+      })
+      if (!poll.ok) continue
+      data = await poll.json()
+      const statusRaw = adapter.pollJsonPath
+        ? getByJsonPath(data, adapter.pollJsonPath)
+        : data?.status || data?.state || getByJsonPath(data, 'data.status')
+      const status = String(statusRaw || '').toLowerCase()
+      if (/fail|error|cancel/.test(status)) {
+        throw new Error(`[${kind}] 任务失败：${JSON.stringify(statusRaw).slice(0, 200)}`)
+      }
+      const picked =
+        (adapter.resultJsonPath ? getByJsonPath(data, adapter.resultJsonPath) : undefined) ??
+        findFirstMediaUrl(data)
+      const media = await mediaFromValue(picked, opts.signal, fallbackMime)
+      if (media) return media
+    }
+    throw new Error(`[${kind}] 自定义接口轮询超时`)
+  }
+
   const picked =
     (adapter.resultJsonPath ? getByJsonPath(data, adapter.resultJsonPath) : undefined) ??
     getByJsonPath(data, 'data.0.b64_json') ??
     getByJsonPath(data, 'data.0.url') ??
     findFirstMediaUrl(data)
-
-  if (typeof picked === 'string' && picked.startsWith('data:')) {
-    const m = picked.match(/^data:([^;]+);base64,(.+)$/i)
-    if (!m) throw new Error('[image] data URI 无法解析')
-    const bin = atob(m[2].replace(/\s/g, ''))
-    const arr = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
-    return { blob: new Blob([arr], { type: m[1] }), mimeType: m[1] }
-  }
-  if (typeof picked === 'string' && /^[A-Za-z0-9+/=\s]+$/.test(picked) && picked.length > 256 && !/^https?:/i.test(picked)) {
-    const raw = picked.replace(/\s/g, '')
-    const bin = atob(raw)
-    const arr = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
-    const mime =
-      arr[0] === 0x89 && arr[1] === 0x50
-        ? 'image/png'
-        : arr[0] === 0xff && arr[1] === 0xd8
-          ? 'image/jpeg'
-          : 'image/png'
-    return { blob: new Blob([arr], { type: mime }), mimeType: mime }
-  }
-  if (typeof picked === 'string' && /^https?:\/\//i.test(picked)) {
-    const r = await fetch(picked, { signal: opts.signal })
-    if (!r.ok) throw new Error(`[image] 下载结果失败 ${r.status}`)
-    const blob = await r.blob()
-    return { blob, mimeType: blob.type || 'image/png' }
-  }
+  const media = await mediaFromValue(picked, opts.signal, fallbackMime)
+  if (media) return media
   throw new Error(
-    `[image] 自定义接口未解析到图片。可在 adapter.resultJsonPath 指定路径。片段：${JSON.stringify(data).slice(0, 240)}`
+    `[${kind}] 自定义接口未解析到媒体。请设置 adapter.resultJsonPath。片段：${JSON.stringify(data).slice(0, 240)}`
   )
 }
+
+export async function httpCustomImageGenerate(opts: {
+  baseUrl: string
+  apiKey: string
+  model: string
+  prompt: string
+  adapter?: AdapterConfig
+  extraBody?: Record<string, unknown>
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+}): Promise<{ blob: Blob; mimeType: string }> {
+  return httpCustomMediaGenerate({ ...opts, kind: 'image' })
+}
+
 
 function fillWorkflowTemplate(
   template: string,
@@ -325,27 +431,6 @@ function fillWorkflowTemplate(
     raw = raw.split(`{{${k}}}`).join(v.replace(/\\/g, '\\\\').replace(/"/g, '\\"'))
   }
   return JSON.parse(raw)
-}
-
-function defaultComfyImageWorkflow(prompt: string, imageDataUrl?: string) {
-  // 极简占位：用户应在 adapter.workflowTemplate 提供真实工作流
-  const nodes: Record<string, unknown> = {
-    '1': {
-      class_type: 'CLIPTextEncode',
-      inputs: { text: prompt, clip: ['4', 1] }
-    },
-    '4': {
-      class_type: 'CheckpointLoaderSimple',
-      inputs: { ckpt_name: 'model.safetensors' }
-    }
-  }
-  if (imageDataUrl) {
-    nodes['10'] = {
-      class_type: 'LoadImage',
-      inputs: { image: imageDataUrl }
-    }
-  }
-  return { prompt: nodes }
 }
 
 /** 原生 ComfyUI：POST /prompt，轮询 /history/{id}，取 /view */
@@ -375,19 +460,19 @@ export async function comfyPromptGenerate(opts: {
     ...(adapter.headers || {})
   }
 
-  let payload: any
-  if (adapter.workflowTemplate?.trim()) {
-    payload = fillWorkflowTemplate(adapter.workflowTemplate, {
-      prompt: opts.prompt,
-      negative: opts.negative || '',
-      image: opts.imageDataUrl || ''
-    })
-    if (!payload.prompt && !payload.client_id) {
-      // 若模板本身就是 nodes map
-      payload = { prompt: payload }
-    }
-  } else {
-    payload = defaultComfyImageWorkflow(opts.prompt, opts.imageDataUrl)
+  if (!adapter.workflowTemplate?.trim()) {
+    throw new Error(
+      '[comfyui] 缺少 adapter.workflowTemplate。请在设置页「适配器」粘贴 Comfy API 格式工作流 JSON（可用 {{prompt}} / {{image}} 占位）。应用不会提供假装可用的默认工作流。'
+    )
+  }
+  let payload: any = fillWorkflowTemplate(adapter.workflowTemplate, {
+    prompt: opts.prompt,
+    negative: opts.negative || '',
+    image: opts.imageDataUrl || ''
+  })
+  if (!payload.prompt && !payload.client_id) {
+    // 若模板本身就是 nodes map
+    payload = { prompt: payload }
   }
   if (!payload.client_id) {
     payload.client_id = `ai-cut-${Date.now().toString(36)}`
@@ -526,37 +611,64 @@ export async function testEndpointConnection(
 
   try {
     if (kind === 'llm' || kind === 'vision') {
-      const url = `${base}/models`
-      const headers = {
-        Accept: 'application/json',
-        ...buildAuthHeader(ep.apiKey || '', ep.adapter)
+      const auth = buildAuthHeader(ep.apiKey || '', ep.adapter)
+      const authValue = Object.values(auth)[0] || ''
+      const modelsUrl = `${base}/models`
+      // 1) 先试 /models（浏览器或本机无 CORS 时）
+      try {
+        const r = await fetch(modelsUrl, {
+          headers: { Accept: 'application/json', ...auth },
+          signal: timeoutSignal(12_000)
+        })
+        if (r.ok) return { ok: true, detail: `连通正常（GET ${modelsUrl} → ${r.status}）` }
+        if (r.status === 401 || r.status === 403) {
+          return { ok: false, detail: `地址可达但鉴权失败（${r.status}）` }
+        }
+      } catch {
+        /* CORS / 网络：桌面端改走 llmFetch */
       }
-      let res: ProxyHttpResult
+      // 2) 桌面端：主进程 llmFetch 先 GET /models，失败再极小 chat/completions
       if (isDesktop()) {
-        // llmFetch 限制必须是 chat/completions；models 用普通 fetch / autodl 通道不适用
+        const api = desktop()
+        if (typeof api.llmFetch !== 'function') {
+          return { ok: false, detail: '桌面端缺少 llmFetch，请重启应用' }
+        }
         try {
-          const r = await fetch(url, { headers, signal: timeoutSignal(15_000) })
-          res = {
-            ok: r.ok,
-            status: r.status,
-            text: () => r.text(),
-            json: () => r.json()
+          const modelsRes = await api.llmFetch({
+            url: modelsUrl,
+            authorization: String(authValue || ''),
+            body: '',
+            timeoutMs: 15_000
+          })
+          if (modelsRes.ok) {
+            return { ok: true, detail: `连通正常（GET /models → ${modelsRes.status}，经桌面通道探测 /models）` }
+          }
+        } catch {
+          /* 旧主进程可能仍只允许 chat/completions，继续下面探测 */
+        }
+        const chatUrl = `${base}/chat/completions`
+        try {
+          const res = await api.llmFetch({
+            url: chatUrl,
+            authorization: String(authValue || ''),
+            body: JSON.stringify({
+              model: ep.model || 'gpt-4o-mini',
+              messages: [{ role: 'user', content: 'ping' }],
+              max_tokens: 1,
+              temperature: 0
+            }),
+            timeoutMs: 25_000
+          })
+          if (res.ok) return { ok: true, detail: `连通正常（POST chat/completions → ${res.status}，经桌面通道）` }
+          return {
+            ok: false,
+            detail: `chat/completions 返回 ${res.status} ${String(res.text || '').slice(0, 160)}`
           }
         } catch (e: any) {
-          // 桌面端 CORS 时退化为 chat/completions 空探测不可行；报网络错误
-          return { ok: false, detail: `探测 /models 失败：${e?.message || e}` }
-        }
-      } else {
-        const r = await fetch(url, { headers, signal: timeoutSignal(15_000) })
-        res = {
-          ok: r.ok,
-          status: r.status,
-          text: () => r.text(),
-          json: () => r.json()
+          return { ok: false, detail: `桌面通道探测失败：${e?.message || e}` }
         }
       }
-      if (!res.ok) return { ok: false, detail: `/models 返回 ${res.status} ${await res.text().then((t) => t.slice(0, 160))}` }
-      return { ok: true, detail: `连通正常（GET ${url} → ${res.status}）` }
+      return { ok: false, detail: `无法访问 ${modelsUrl}（可能被 CORS 拦截）。桌面端请用安装版以走主进程通道。` }
     }
 
     if (kind === 'image') {
@@ -698,6 +810,9 @@ export function normalizeAdapterInput(raw: unknown): AdapterConfig | undefined {
   if (allowed.includes(type)) adapter.type = type
   if (o.path != null) adapter.path = String(o.path)
   if (o.pollPath != null) adapter.pollPath = String(o.pollPath)
+  if (o.pollUrl != null) adapter.pollUrl = String(o.pollUrl)
+  if (o.taskIdJsonPath != null) adapter.taskIdJsonPath = String(o.taskIdJsonPath)
+  if (o.pollJsonPath != null) adapter.pollJsonPath = String(o.pollJsonPath)
   if (o.resultJsonPath != null) adapter.resultJsonPath = String(o.resultJsonPath)
   if (o.authHeader != null) adapter.authHeader = String(o.authHeader)
   if (o.authPrefix != null) adapter.authPrefix = String(o.authPrefix)

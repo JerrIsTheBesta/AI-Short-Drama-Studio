@@ -121,6 +121,8 @@
 - 接入助手（配置助理）：用户先配置一套可用 LLM，随后可把视觉、图片、视频、TTS、音乐或中转站的 API 文档直接粘贴给助手。助手会解析服务地址、鉴权方式、模型、工作流 ID 和必要参数，并写入对应配置。
 - 配置助理支持通过文档完成其余能力的接入，用户只需检查、补充私人 Key 并保存，不必逐项理解不同厂商的参数格式。
 - 运行时默认真实 API；无 Key 时可浏览界面，生成类操作需先在设置中接入（含自定义 OpenAI 兼容与自建 ComfyUI）。
+- 设置页可为每套接入编辑 adapter（类型、path、pollUrl、resultJsonPath、鉴权头、Comfy workflowTemplate）；自定义 HTTP 视频支持 POST + 可选轮询。
+- 自建 ComfyUI 须粘贴 API 格式工作流到 adapter.workflowTemplate（可用 {{prompt}}/{{image}} 占位）；应用不附带假装可用的默认节点图。
 - TypeScript 类型检查、Vite Web 构建和 Electron Windows 打包。
 
 ## 当前边界

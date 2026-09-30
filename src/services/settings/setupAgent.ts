@@ -230,7 +230,17 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
       : merged.models
     const model = String(action.model || merged.model || models[0] || '').trim()
     if (!baseUrl) return { ok: false, detail: `${name} 还缺接口地址`, kind }
-    const adapter = normalizeAdapterInput(action.adapter)
+    let adapter = normalizeAdapterInput(action.adapter)
+    const pastedWf = String(
+      action.workflowTemplate ||
+        (action.adapter && typeof action.adapter === 'object'
+          ? (action.adapter as Record<string, unknown>).workflowTemplate
+          : '') ||
+        ''
+    ).trim()
+    if (pastedWf && (!adapter || !adapter.workflowTemplate)) {
+      adapter = { ...(adapter || {}), type: adapter?.type || 'comfyui-prompt', workflowTemplate: pastedWf }
+    }
     if (kind === 'video') {
       let workflowId = String(action.workflowId || model || merged.model).trim()
       const isComfyPrompt =
@@ -385,6 +395,35 @@ function labelOf(kind: SetupKind) {
 
 function looksLikePlaceholderKey(key: string) {
   return /^(sk-)?(xxx+|your[_-]?api[_-]?key|changeme|placeholder|<.+>|\{.+\})$/i.test(key.trim())
+}
+
+function extractComfyWorkflowTemplate(text: string): string {
+  const trimmed = text.trim()
+  // 整段就是 JSON
+  if (trimmed.startsWith('{') && trimmed.includes('class_type')) {
+    try {
+      const obj = JSON.parse(trimmed)
+      return JSON.stringify(obj, null, 2)
+    } catch { /* fall through */ }
+  }
+  // 从 markdown/代码块里抠
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence?.[1] && /class_type|"prompt"\s*:/.test(fence[1])) {
+    try {
+      const obj = JSON.parse(fence[1].trim())
+      return JSON.stringify(obj, null, 2)
+    } catch { /* ignore */ }
+  }
+  // 贪婪找最外层大括号
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start >= 0 && end > start && /class_type/.test(text.slice(start, end + 1))) {
+    try {
+      const obj = JSON.parse(text.slice(start, end + 1))
+      return JSON.stringify(obj, null, 2)
+    } catch { /* ignore */ }
+  }
+  return ''
 }
 
 function extractApiKey(text: string) {
@@ -566,9 +605,11 @@ export async function runSetupAgentTurn(
     role: m.role,
     content: m.content
   }))
-  const looksLikeDocs = userText.length > 400 || /https?:\/\//i.test(userText)
+  const comfyTpl = extractComfyWorkflowTemplate(userText)
+  const looksLikeDocs =
+    userText.length > 400 || /https?:\/\//i.test(userText) || Boolean(comfyTpl)
   const userPayload = looksLikeDocs
-    ? `以下是用户贴的接口说明或 API 文档（可能来自中转站或自定义网关）。必须解析并写成 provider=custom 的接入，禁止拒绝，禁止改写成大厂官方地址。文档里有几种能力就写几条 add_profile。\n\n${userText}`
+    ? `以下是用户贴的接口说明、API 文档或 ComfyUI 工作流 JSON（可能来自中转站、自定义网关或本机 Comfy）。必须解析并写成 provider=custom 的接入，禁止拒绝，禁止改写成大厂官方地址。若含 Comfy API 格式 JSON（含 class_type），写入 adapter.type=comfyui-prompt 与 adapter.workflowTemplate。不要编造可运行的默认工作流。文档里有几种能力就写几条 add_profile。\n\n${userText}`
     : userText
   const res = await callLLM({
     messages: [
@@ -590,6 +631,34 @@ export async function runSetupAgentTurn(
       parsed.actions = fallback
       if (/无法|不能|不支持|拒绝|配不了/.test(parsed.say)) {
         parsed.say = '已按你贴的文档写成自定义接入。密钥只留在这台电脑。'
+      }
+    }
+  }
+  if (comfyTpl) {
+    for (const raw of parsed.actions) {
+      if (!raw || typeof raw !== 'object') continue
+      const a = raw as Record<string, unknown>
+      if (a.kind !== 'video' && a.kind !== 'image') continue
+      const ad = (a.adapter && typeof a.adapter === 'object' ? a.adapter : {}) as Record<string, unknown>
+      if (!ad.workflowTemplate) {
+        a.adapter = { ...ad, type: ad.type || 'comfyui-prompt', workflowTemplate: comfyTpl }
+        a.provider = a.provider || 'custom'
+      }
+    }
+    if (!parsed.actions.some((a) => a && typeof a === 'object' && ((a as any).kind === 'video' || (a as any).kind === 'image'))) {
+      parsed.actions.push({
+        tool: 'add_profile',
+        kind: 'video',
+        name: '自建 ComfyUI',
+        provider: 'custom',
+        baseUrl: extractBaseUrls(userText)[0] || 'http://127.0.0.1:8188',
+        apiKey: extractApiKey(userText),
+        model: 'comfyui',
+        workflowId: 'comfyui-local',
+        adapter: { type: 'comfyui-prompt', workflowTemplate: comfyTpl }
+      })
+      if (!parsed.say || /无法|不能|拒绝/.test(parsed.say)) {
+        parsed.say = '已把你粘贴的 Comfy 工作流写入 adapter.workflowTemplate。请确认本机 ComfyUI 已加载对应模型后再出片。'
       }
     }
   }

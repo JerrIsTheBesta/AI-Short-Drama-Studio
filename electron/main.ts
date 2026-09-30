@@ -540,11 +540,14 @@ app.whenReady().then(async () => {
         parsed.protocol === 'http:' && (host === '127.0.0.1' || host === 'localhost')
       if (!localHttp) throw new Error('语言模型地址必须是 HTTPS')
     }
-    if (!parsed.pathname.includes('/chat/completions')) {
-      throw new Error('只允许请求 chat/completions')
+    const isModels = /\/models\/?$/i.test(parsed.pathname)
+    const isChat = parsed.pathname.includes('/chat/completions')
+    if (!isModels && !isChat) {
+      throw new Error('只允许请求 chat/completions 或 /models')
     }
+    const method = isModels ? 'GET' : 'POST'
     const body = String(opts?.body || '')
-    if (body.length > 32 * 1024 * 1024) {
+    if (method === 'POST' && body.length > 32 * 1024 * 1024) {
       throw new Error('语言模型请求过大')
     }
     const timeoutMs = Math.min(540000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
@@ -552,15 +555,15 @@ app.whenReady().then(async () => {
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const headers: Record<string, string> = {
-        Accept: 'application/json',
-        'Content-Type': 'application/json'
+        Accept: 'application/json'
       }
+      if (method === 'POST') headers['Content-Type'] = 'application/json'
       const token = String(opts?.authorization || '').trim()
       if (token) headers.Authorization = token
       const res = await net.fetch(url, {
-        method: 'POST',
+        method,
         headers,
-        body,
+        body: method === 'POST' ? body : undefined,
         signal: controller.signal
       })
       const text = await res.text()

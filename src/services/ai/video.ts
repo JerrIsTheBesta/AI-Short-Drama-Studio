@@ -10,7 +10,7 @@
  */
 
 import { getAIMode } from './client'
-import { comfyPromptGenerate, resolveVideoAdapter } from './adapters'
+import { comfyPromptGenerate, httpCustomMediaGenerate, resolveVideoAdapter } from './adapters'
 import { getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
@@ -1050,6 +1050,35 @@ function buildPrompt(input: VideoGenInput): string {
   return raw
 }
 
+async function realHttpCustomVideo(
+  input: VideoGenInput,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  const cfg = getVideoConfig()
+  if (!cfg.baseUrl) throw new Error('[video] 未配置自定义视频接口地址')
+  const prompt = buildPrompt(input)
+  onProgress?.('自定义 HTTP 出视频…')
+  let imageDataUrl: string | undefined
+  if (input.imageBlob) imageDataUrl = await blobToDataUrl(input.imageBlob)
+  const { blob, mimeType } = await httpCustomMediaGenerate({
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.workflowId || 'video',
+    prompt,
+    adapter: cfg.adapter,
+    extraBody: {
+      ...(imageDataUrl ? { image: imageDataUrl } : {}),
+      duration: input.duration,
+      width: input.width,
+      height: input.height
+    },
+    signal: input.signal,
+    kind: 'video',
+    onProgress
+  })
+  return { blob, mimeType, prompt, duration: input.duration }
+}
+
 async function realComfyNativeVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
@@ -1105,7 +1134,7 @@ export async function generateVideo(
       return await realComfyNativeVideo(input, onProgress)
     }
     if (adapterType === 'http-custom') {
-      throw new Error('[video] http-custom 视频请改用 comfyui-workflow / comfyui-prompt，或使用万相节点')
+      return await realHttpCustomVideo(input, onProgress)
     }
     return await realWorkflowVideo(input, onProgress)
   }
