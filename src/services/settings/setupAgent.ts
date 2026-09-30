@@ -29,6 +29,11 @@ import {
   testEndpointConnection,
   type AdapterConfig
 } from '@/services/ai/adapters'
+import {
+  addComfyUiProfiles,
+  extractComfyMention,
+  normalizeComfyBaseUrl
+} from '@/services/settings/comfyQuickAdd'
 
 export interface SetupMessage {
   role: 'user' | 'assistant'
@@ -97,6 +102,7 @@ const SYSTEM = `${settingsSkillRaw}
 { "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
 { "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
 { "tool": "test_connection", "kind": "llm|vision|image|tts|video", "id": "可选，默认当前套" }
+{ "tool": "add_comfyui", "baseUrl": "http://127.0.0.1:8188", "apiKey": "可选", "kinds": ["image","video"], "test": true }
 
 预设目录（id｜名称｜地址｜默认模型｜常用模型）：
 LLM
@@ -118,7 +124,8 @@ ${catalog(VIDEO_PROVIDERS)}
 - 视频的 model 若没单独给 workflowId，就当作 workflowId。
 - 配音默认音色 longanhuan_v3.6，用户没提音色就用这个。
 - provider 对得上大厂预设、且用户没另给第三方地址时，用预设补全；用户给的 URL 与预设域名不一致时一律当 custom，不要改写成官方地址。
-- 自建 ComfyUI（如 http://127.0.0.1:8188）：kind=video 或 image，provider=custom，adapter.type=comfyui-prompt；有工作流 JSON 就放进 adapter.workflowTemplate。不要编造 AutoDL 实例生命周期。
+- 自建 ComfyUI（如 http://127.0.0.1:8188）：优先用 add_comfyui 一次加生图+视频。用户只说「我的 ComfyUI 在 xxx」或只贴地址时立刻添加，不要追问模型名。
+- 有工作流 JSON 再写入 adapter.workflowTemplate；没有也不要拒绝添加，提醒出片前在设置页适配器粘贴。不要编造 AutoDL 生命周期或假工作流。
 - OpenAI 兼容中转：LLM/视觉用默认；生图若不是 /images/generations，设 adapter.type=http-custom 并填 path、resultJsonPath。
 - 写完接入后，若用户要求「测一下」，调用 test_connection。`
 
@@ -199,6 +206,22 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
   const tool = String(action.tool || '')
   const kind = parseKind(action.kind)
   if (!kind) return { ok: false, detail: '缺少有效的 kind' }
+
+  if (tool === 'add_comfyui') {
+    const baseUrl = normalizeComfyBaseUrl(String(action.baseUrl || ''))
+    if (!baseUrl) return { ok: false, detail: 'add_comfyui 需要 baseUrl' }
+    const kindsRaw = Array.isArray(action.kinds) ? action.kinds.map(String) : ['image', 'video']
+    const kinds = kindsRaw.filter((k): k is 'image' | 'video' => k === 'image' || k === 'video')
+    const result = await addComfyUiProfiles({
+      baseUrl,
+      apiKey: String(action.apiKey || '').trim(),
+      kinds: kinds.length ? kinds : ['image', 'video'],
+      select: true,
+      test: action.test !== false
+    })
+    const opened = result.videoId ? 'video' : result.imageId ? 'image' : undefined
+    return { ok: result.ok, detail: result.notes.join('；'), kind: opened }
+  }
 
   if (tool === 'test_connection') {
     const id = String(action.id || '').trim()
@@ -605,6 +628,46 @@ export async function runSetupAgentTurn(
     role: m.role,
     content: m.content
   }))
+
+  // 快捷：只说 Comfy 地址 → 直接加生图+视频
+  const comfyMention = extractComfyMention(userText)
+  const comfyTplEarly = extractComfyWorkflowTemplate(userText)
+  if (comfyMention && !comfyTplEarly && userText.length < 400) {
+    onProgress?.({ kind: 'step', step: 'comfy-quick', label: 'add_comfyui', status: 'running' })
+    const onlyVideo = /只要视频|仅视频|只加视频/.test(userText)
+    const onlyImage = /只要生图|仅生图|只加生图|只要出图/.test(userText)
+    const kinds: Array<'image' | 'video'> = onlyVideo
+      ? ['video']
+      : onlyImage
+        ? ['image']
+        : ['image', 'video']
+    const result = await addComfyUiProfiles({
+      baseUrl: comfyMention.baseUrl,
+      apiKey: comfyMention.apiKey,
+      kinds,
+      select: true,
+      test: true
+    })
+    onProgress?.({
+      kind: 'step',
+      step: 'comfy-quick',
+      label: 'add_comfyui',
+      status: result.ok ? 'done' : 'fail'
+    })
+    return {
+      reply: result.notes.join('\n'),
+      chips: [
+        { label: '去看生图', text: '__open_image__' },
+        { label: '去看视频', text: '__open_video__' },
+        {
+          label: '粘贴工作流',
+          text: '下面是我的 Comfy API 工作流 JSON，请写入当前 Comfy 接入的 workflowTemplate：\n'
+        }
+      ],
+      opened: result.videoId ? 'video' : result.imageId ? 'image' : undefined
+    }
+  }
+
   const comfyTpl = extractComfyWorkflowTemplate(userText)
   const looksLikeDocs =
     userText.length > 400 || /https?:\/\//i.test(userText) || Boolean(comfyTpl)
@@ -698,6 +761,7 @@ export async function runSetupAgentTurn(
           { label: '配配音', text: '帮我配 TTS 配音' },
           { label: '配视频', text: '帮我配视频生成' },
           { label: '测连通', text: '帮我测试当前接入的连通性' },
+          { label: '加自建 ComfyUI', text: '我的 ComfyUI 在 http://127.0.0.1:8188 ，请直接添加生图和视频接入' },
           { label: '从文档接入', text: '下面是我的 API 文档，请按文档写成自定义接入（可以是中转站）：\n' }
         ]
 

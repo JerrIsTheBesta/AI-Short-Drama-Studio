@@ -51,3 +51,9 @@ triggers: 配置,接入,API Key,视觉,生图,配音,视频,TTS,文档
 - `{{negative}}` 负向提示
 
 **不要**在没有对应用户模型与节点图时编造「可直接跑」的假工作流。缺模板时让用户去「设置 → 视频/生图 → 适配器」粘贴。
+
+## 自建 ComfyUI 快捷接入
+
+用户只需提供地址（如 `http://127.0.0.1:8188`）时：
+- 调用 `add_comfyui`（或设置页「添加自建 ComfyUI」），一次写入生图 + 视频，`adapter.type=comfyui-prompt`。
+- 不要因缺少 workflowTemplate 而拒绝添加；提醒出片前在适配器粘贴 API 格式工作流即可。

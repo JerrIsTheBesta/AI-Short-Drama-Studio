@@ -4,6 +4,7 @@ import { useProjectStore, useSettingsStore, uniqueProfileName } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
 import EndpointForm from '@/components/settings/EndpointForm.vue'
 import AdapterFields from '@/components/settings/AdapterFields.vue'
+import ComfyQuickAdd from '@/components/settings/ComfyQuickAdd.vue'
 import ProfileLibrary from '@/components/settings/ProfileLibrary.vue'
 import type { AdapterConfig } from '@/services/ai/adapters'
 import { type VideoStillMode } from '@/types/canvas'
@@ -214,6 +215,7 @@ function patchAdapter(
     </template>
 
     <template v-else-if="module === 'image'">
+      <ComfyQuickAdd />
       <ProfileLibrary
         title="已保存的生图接入"
         hint="角色设计、场景图、故事看板。保存多套后，出图节点里可以直接切换。"
@@ -293,6 +295,7 @@ function patchAdapter(
     </template>
 
     <template v-else-if="module === 'video'">
+      <ComfyQuickAdd />
       <ProfileLibrary
         title="已保存的视频接入"
         hint="图生视频工作流。多套令牌或工作流可以分开保存，出视频时选用。"
