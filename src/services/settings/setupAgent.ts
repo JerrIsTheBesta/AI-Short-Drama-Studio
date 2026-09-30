@@ -34,6 +34,11 @@ import {
   extractComfyMention,
   normalizeComfyBaseUrl
 } from '@/services/settings/comfyQuickAdd'
+import {
+  discoverComfyWorkflows,
+  fetchComfyUserdataWorkflow,
+  parseComfyWorkflowJson
+} from '@/services/settings/comfyWorkflows'
 
 export interface SetupMessage {
   role: 'user' | 'assistant'
@@ -103,6 +108,8 @@ const SYSTEM = `${settingsSkillRaw}
 { "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
 { "tool": "test_connection", "kind": "llm|vision|image|tts|video", "id": "可选，默认当前套" }
 { "tool": "add_comfyui", "baseUrl": "http://127.0.0.1:8188", "apiKey": "可选", "kinds": ["image","video"], "test": true }
+{ "tool": "list_comfy_workflows", "kind": "image|video", "id": "可选 profile id" }
+{ "tool": "set_workflow_template", "kind": "image|video", "id": "可选", "workflowTemplate": "{...API Format JSON...}", "path": "可选，从 list 结果里的 path 拉取" }
 
 预设目录（id｜名称｜地址｜默认模型｜常用模型）：
 LLM
@@ -206,6 +213,75 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
   const tool = String(action.tool || '')
   const kind = parseKind(action.kind)
   if (!kind) return { ok: false, detail: '缺少有效的 kind' }
+
+  if (tool === 'list_comfy_workflows') {
+    if (kind !== 'image' && kind !== 'video') {
+      return { ok: false, detail: 'list_comfy_workflows 仅支持 image/video', kind: kind || undefined }
+    }
+    const id = String(action.id || '').trim()
+    const ep =
+      kind === 'image'
+        ? id
+          ? settings.config.images.find((p) => p.id === id)
+          : settings.config.image
+        : id
+          ? settings.config.videos.find((p) => p.id === id)
+          : settings.config.video
+    if (!ep?.baseUrl) return { ok: false, detail: '当前没有 Comfy 地址，请先 add_comfyui', kind }
+    const res = await discoverComfyWorkflows({
+      baseUrl: ep.baseUrl,
+      apiKey: ep.apiKey,
+      adapter: ep.adapter
+    })
+    const names = res.workflows.slice(0, 30).map((w) => `- ${w.name} (${w.path})`).join('\n')
+    return {
+      ok: res.reachable,
+      detail: `${res.message}${names ? '\n' + names : ''}`,
+      kind
+    }
+  }
+
+  if (tool === 'set_workflow_template') {
+    if (kind !== 'image' && kind !== 'video') {
+      return { ok: false, detail: 'set_workflow_template 仅支持 image/video', kind: kind || undefined }
+    }
+    const id = String(action.id || '').trim()
+    if (id) {
+      if (kind === 'image') settings.selectImage(id)
+      else settings.selectVideo(id)
+    }
+    const ep = kind === 'image' ? settings.config.image : settings.config.video
+    let template = String(action.workflowTemplate || '').trim()
+    const path = String(action.path || '').trim()
+    if (!template && path) {
+      const fetched = await fetchComfyUserdataWorkflow({
+        baseUrl: ep.baseUrl,
+        path,
+        apiKey: ep.apiKey,
+        adapter: ep.adapter
+      })
+      if (!fetched.ok || !fetched.template) {
+        return { ok: false, detail: fetched.detail, kind }
+      }
+      template = fetched.template
+    }
+    if (!template) {
+      // 尝试从用户最近消息不够，要求字段
+      return { ok: false, detail: '请提供 workflowTemplate JSON，或 path（来自 list_comfy_workflows）', kind }
+    }
+    const parsed = parseComfyWorkflowJson(template)
+    if (!parsed.ok || !parsed.template) return { ok: false, detail: parsed.detail, kind }
+    const adapter = {
+      ...(ep.adapter || {}),
+      type: 'comfyui-prompt' as const,
+      path: ep.adapter?.path || '/prompt',
+      pollPath: ep.adapter?.pollPath || '/history/{id}',
+      workflowTemplate: parsed.template
+    }
+    if (kind === 'image') settings.patchImage({ adapter })
+    else settings.patchVideo({ adapter })
+    return { ok: true, detail: `已写入 ${kind} 的 workflowTemplate（API Format）`, kind }
+  }
 
   if (tool === 'add_comfyui') {
     const baseUrl = normalizeComfyBaseUrl(String(action.baseUrl || ''))
@@ -698,6 +774,20 @@ export async function runSetupAgentTurn(
     }
   }
   if (comfyTpl) {
+    // 若已有 Comfy 接入且模型没给出 actions，直接写入当前生图/视频
+    if (!parsed.actions.length) {
+      parsed.actions.push({
+        tool: 'set_workflow_template',
+        kind: 'video',
+        workflowTemplate: comfyTpl
+      })
+      parsed.actions.push({
+        tool: 'set_workflow_template',
+        kind: 'image',
+        workflowTemplate: comfyTpl
+      })
+      parsed.say = parsed.say || '已把粘贴的 Comfy API 工作流写入当前生图/视频接入。'
+    }
     for (const raw of parsed.actions) {
       if (!raw || typeof raw !== 'object') continue
       const a = raw as Record<string, unknown>
@@ -762,6 +852,7 @@ export async function runSetupAgentTurn(
           { label: '配视频', text: '帮我配视频生成' },
           { label: '测连通', text: '帮我测试当前接入的连通性' },
           { label: '加自建 ComfyUI', text: '我的 ComfyUI 在 http://127.0.0.1:8188 ，请直接添加生图和视频接入' },
+          { label: '列出 Comfy 工作流', text: '帮我列出当前 ComfyUI 上已保存的工作流' },
           { label: '从文档接入', text: '下面是我的 API 文档，请按文档写成自定义接入（可以是中转站）：\n' }
         ]
 

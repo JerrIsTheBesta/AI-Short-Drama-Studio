@@ -471,7 +471,9 @@ app.whenReady().then(async () => {
     const localComfy =
       localHost &&
       (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      (/\/(prompt|history|system_stats|object_info|view|queue|embeddings|interrupt)(\/|$)/i.test(path) ||
+      (/\/(prompt|history|system_stats|object_info|view|queue|embeddings|interrupt|userdata|api\/userdata|v2\/userdata|api\/v2\/userdata|api\/workflows|workflows|api\/system_stats|api\/object_info|api\/prompt|api\/history)(\/|$|\?)/i.test(
+        path
+      ) ||
         path === '/' ||
         path === '')
     return autodl || localComfy

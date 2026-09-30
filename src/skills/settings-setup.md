@@ -57,3 +57,8 @@ triggers: 配置,接入,API Key,视觉,生图,配音,视频,TTS,文档
 用户只需提供地址（如 `http://127.0.0.1:8188`）时：
 - 调用 `add_comfyui`（或设置页「添加自建 ComfyUI」），一次写入生图 + 视频，`adapter.type=comfyui-prompt`。
 - 不要因缺少 workflowTemplate 而拒绝添加；提醒出片前在适配器粘贴 API 格式工作流即可。
+
+## 工作流模板
+
+- `list_comfy_workflows`：探测本机 Comfy `/userdata?dir=workflows`（及兼容路径）；列不出时如实说明，引导粘贴 API Format。
+- `set_workflow_template`：校验并写入 API Format JSON；拒绝界面格式（nodes/links）。

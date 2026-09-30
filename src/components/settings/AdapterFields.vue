@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { AdapterConfig, AdapterType } from '@/services/ai/adapters'
+import ComfyWorkflowPanel from '@/components/settings/ComfyWorkflowPanel.vue'
 
 const props = defineProps<{
   kind: 'llm' | 'vision' | 'image' | 'tts' | 'video'
   adapter?: AdapterConfig
+  /** 当前接入地址，供 Comfy 列举/拉取工作流 */
+  baseUrl?: string
+  apiKey?: string
   /** 视频工作流 ID，与 adapter 并列编辑 */
   workflowId?: string
   showWorkflowId?: boolean
@@ -172,21 +176,13 @@ function onPasteWorkflow(ev: ClipboardEvent) {
       <p class="hint">前缀会直接拼在 Key 前面。AutoDL / 部分网关需要留空（不带 Bearer）。</p>
     </template>
 
-    <template v-if="showComfyTemplate">
-      <label>ComfyUI workflowTemplate</label>
-      <p class="hint">
-        粘贴 Comfy 导出的 API 格式 JSON（或完整 /prompt 请求体）。可用占位
-        <code v-pre>{{prompt}}</code>、<code v-pre>{{image}}</code>、<code v-pre>{{negative}}</code>。
-        未填写时不会假装能出片。
-      </p>
-      <textarea
-        v-model="workflowTemplateModel"
-        rows="10"
-        spellcheck="false"
-        placeholder='{"prompt":{...},"client_id":"ai-cut"}'
-        @paste="onPasteWorkflow"
-      />
-    </template>
+    <ComfyWorkflowPanel
+      v-if="showComfyTemplate"
+      :adapter="adapter"
+      :base-url="baseUrl"
+      :api-key="apiKey"
+      @patch="(a) => emit('patch', { adapter: a })"
+    />
   </section>
 </template>
 

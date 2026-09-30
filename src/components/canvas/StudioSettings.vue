@@ -248,6 +248,8 @@ function patchAdapter(
       <AdapterFields
         kind="image"
         :adapter="settings.config.image.adapter"
+        :base-url="settings.config.image.baseUrl"
+        :api-key="settings.config.image.apiKey"
         @patch="patchAdapter('image', $event)"
       />
     </template>
@@ -389,6 +391,8 @@ function patchAdapter(
         <AdapterFields
           kind="video"
           :adapter="settings.config.video.adapter"
+          :base-url="settings.config.video.baseUrl"
+          :api-key="settings.config.video.apiKey"
           @patch="patchAdapter('video', $event)"
         />
       </section>
