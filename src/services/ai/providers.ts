@@ -19,12 +19,12 @@ function uniq(list: string[]): string[] {
 
 export const CUSTOM_PROVIDER: ProviderPreset = {
   id: 'custom',
-  name: '自定义（OpenAI 兼容）',
-  hint: '自己填 Base URL 和模型名，路径要能接到 /chat/completions',
+  name: '自定义（OpenAI 兼容 / 自建）',
+  hint: '任意 OpenAI 兼容地址，或自建 ComfyUI（如 http://127.0.0.1:8188）。可用接入助手写 adapter。',
   baseUrl: '',
   models: [],
   defaultModel: '',
-  keyPlaceholder: 'sk-…'
+  keyPlaceholder: 'sk-… / Token（本机 Comfy 可留空）'
 }
 
 export const LLM_PROVIDERS: ProviderPreset[] = [

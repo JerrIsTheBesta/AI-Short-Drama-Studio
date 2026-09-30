@@ -6,6 +6,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import TitleBar from '@/components/layout/TitleBar.vue'
 import ToastContainer from '@/components/common/ToastContainer.vue'
 import ImageLightbox from '@/components/common/ImageLightbox.vue'
+import NoticeBanner from '@/components/common/NoticeBanner.vue'
 
 const route = useRoute()
 const project = useProjectStore()
@@ -31,6 +32,7 @@ onMounted(async () => {
 <template>
   <div class="app-root">
     <TitleBar />
+    <NoticeBanner />
     <div class="app-body">
       <ToastContainer />
       <ImageLightbox />

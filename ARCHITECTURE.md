@@ -28,9 +28,8 @@ views/  →  stores/  →  services/  →  external (AI / FFmpeg / IDB)
 
 ## AI 服务切换
 
-`src/services/ai/client.ts` 里的 `getAIMode()` 决定走 mock 还是 real：
-- `mock`：演示模式，零依赖
-- `real`：调真实 API
+`src/services/ai/runtime.ts` 的 `getAIMode()` 当前固定返回 `real`（真实 API）。
+代码里仍保留 mock 实现便于本地开发，但产品默认不会进入演示模式。
 
 每个 AI service 文件结构相同：
 ```

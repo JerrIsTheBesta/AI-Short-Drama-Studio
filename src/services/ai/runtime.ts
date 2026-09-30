@@ -25,7 +25,9 @@ export function getLlmConfig() {
   return {
     baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
     apiKey: s?.apiKey || d.apiKey,
-    model: s?.model || d.model
+    model: s?.model || d.model,
+    adapter: s?.adapter,
+    provider: s?.provider
   }
 }
 
@@ -37,7 +39,9 @@ export function getVisionConfig() {
     baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
     apiKey: s?.apiKey || d.apiKey,
     // 旧视觉配置自动迁移到项目指定的 Qwen3-VL。
-    model: /^(qwen3\.7|qwen-vl-)/i.test(selectedModel) ? 'qwen3-vl-plus' : selectedModel
+    model: /^(qwen3\.7|qwen-vl-)/i.test(selectedModel) ? 'qwen3-vl-plus' : selectedModel,
+    adapter: s?.adapter,
+    provider: s?.provider
   }
 }
 
@@ -47,7 +51,9 @@ export function getImageConfig() {
   return {
     baseUrl: (s?.baseUrl || d.baseUrl).replace(/\/+$/, ''),
     apiKey: s?.apiKey || d.apiKey,
-    model: s?.model || d.model
+    model: s?.model || d.model,
+    adapter: s?.adapter,
+    provider: s?.provider
   }
 }
 
@@ -73,7 +79,9 @@ export function getVideoConfig() {
     baseUrl: migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
     apiKey: s?.apiKey || d.apiKey,
     workflowId: migrateVideoWorkflowId(s?.workflowId || d.workflowId),
-    promptStyle: getVideoPromptStyle()
+    promptStyle: getVideoPromptStyle(),
+    adapter: s?.adapter,
+    provider: s?.provider
   }
 }
 

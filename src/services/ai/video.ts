@@ -10,6 +10,7 @@
  */
 
 import { getAIMode } from './client'
+import { comfyPromptGenerate, resolveVideoAdapter } from './adapters'
 import { getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
@@ -1049,6 +1050,34 @@ function buildPrompt(input: VideoGenInput): string {
   return raw
 }
 
+async function realComfyNativeVideo(
+  input: VideoGenInput,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  const cfg = getVideoConfig()
+  if (!cfg.baseUrl) throw new Error('[video] 未配置自建 ComfyUI 地址')
+  onProgress?.('自建 ComfyUI 出视频…')
+  const prompt = buildPrompt(input)
+  let imageDataUrl: string | undefined
+  if (input.imageBlob) imageDataUrl = await blobToDataUrl(input.imageBlob)
+  if (!cfg.adapter?.workflowTemplate?.trim()) {
+    throw new Error(
+      '[video] 自建 ComfyUI 需要在接入的 adapter.workflowTemplate 里提供完整 /prompt JSON（可用 {{prompt}} / {{image}} 占位）。AutoDL 云端请用 comfyui-workflow 适配器。'
+    )
+  }
+  const { blob, mimeType } = await comfyPromptGenerate({
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    prompt,
+    imageDataUrl,
+    adapter: cfg.adapter,
+    signal: input.signal,
+    kind: 'video',
+    onProgress
+  })
+  return { blob, mimeType, prompt, duration: input.duration }
+}
+
 export async function generateVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
@@ -1069,6 +1098,14 @@ export async function generateVideo(
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
     if (input.videoModel === 'wan-prime') {
       return await realWanVideo(input, onProgress)
+    }
+    const vcfg = getVideoConfig()
+    const adapterType = resolveVideoAdapter(vcfg)
+    if (adapterType === 'comfyui-prompt') {
+      return await realComfyNativeVideo(input, onProgress)
+    }
+    if (adapterType === 'http-custom') {
+      throw new Error('[video] http-custom 视频请改用 comfyui-workflow / comfyui-prompt，或使用万相节点')
     }
     return await realWorkflowVideo(input, onProgress)
   }

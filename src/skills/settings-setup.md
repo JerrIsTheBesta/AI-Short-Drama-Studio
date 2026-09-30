@@ -23,3 +23,10 @@ triggers: 配置,接入,API Key,视觉,生图,配音,视频,TTS,文档
 - 密钥只写进本机设置，不要在回复里完整复述 Key。
 - 给了足够信息就立刻调用工具写入，不要只口头说「已保存」。
 - 写进去之后，画布节点和下拉里就能选到。
+
+
+自建 / 自定义适配器：
+- 支持 adapter.type：openai-compatible、openai-images、http-custom、comfyui-workflow（AutoDL 风格）、comfyui-prompt（自建 ComfyUI /prompt+/history）。
+- 自建 ComfyUI 示例：baseUrl=http://127.0.0.1:8188，adapter.type=comfyui-prompt，workflowTemplate 填完整提交 JSON。
+- 自定义生图若路径不是 /images/generations：adapter.type=http-custom，并指定 path 与 resultJsonPath。
+- 可用 test_connection 做廉价连通探测（/models 或 /system_stats）。不要管理 AutoDL 实例开关机。

@@ -10,6 +10,9 @@ import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/serv
 import { desktop, isDesktop } from '@/services/desktop'
 import { stillModeForVideoModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
+import type { AdapterConfig } from '@/services/ai/adapters'
+
+export type { AdapterConfig }
 
 const STORAGE_KEY = 'ai-cut:settings'
 const SETTINGS_KV_KEY = 'settings'
@@ -29,6 +32,8 @@ export interface ServiceEndpoint {
   models: string[]
   /** 设置页选中的接入方式 id，如 deepseek / dashscope / custom */
   provider?: string
+  /** 自定义适配器：openai-compatible / openai-images / http-custom / comfyui-* */
+  adapter?: AdapterConfig
 }
 
 /** 一套已保存的接入（地址 + Key + 模型列表） */
@@ -63,6 +68,8 @@ export interface VideoEndpoint {
    * 画布是否铺分镜关键帧跟这个走，必须在出视频前定好。
    */
   stillMode: VideoStillMode
+  /** 自定义适配器：comfyui-workflow（AutoDL）/ comfyui-prompt（自建）/ http-custom */
+  adapter?: AdapterConfig
 }
 
 export interface VideoProfile extends VideoEndpoint {
@@ -127,10 +134,21 @@ export function uniqueProfileName(existing: string[], base: string): string {
   return `${base} ${i}`
 }
 
-export function endpointReady(ep?: { baseUrl?: string; apiKey?: string; model?: string; workflowId?: string }) {
+export function endpointReady(ep?: {
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  workflowId?: string
+  adapter?: AdapterConfig
+  provider?: string
+}) {
   if (!ep) return false
-  const hasEndpoint = Boolean(ep.baseUrl?.trim() && ep.apiKey?.trim())
-  const hasModel = Boolean(ep.model?.trim() || ep.workflowId?.trim())
+  const adapterType = ep.adapter?.type
+  const localComfy =
+    adapterType === 'comfyui-prompt' ||
+    (/localhost|127\.0\.0\.1/i.test(ep.baseUrl || '') && ep.provider === 'custom')
+  const hasEndpoint = Boolean(ep.baseUrl?.trim() && (ep.apiKey?.trim() || localComfy))
+  const hasModel = Boolean(ep.model?.trim() || ep.workflowId?.trim() || adapterType === 'comfyui-prompt')
   return hasEndpoint && hasModel
 }
 
@@ -171,7 +189,8 @@ function asEndpoint(ep: ServiceEndpoint): ServiceEndpoint {
     apiKey: ep.apiKey,
     model: ep.model,
     models: uniq(ep.models ?? []),
-    provider: ep.provider
+    provider: ep.provider,
+    adapter: ep.adapter
   }
 }
 
@@ -189,7 +208,8 @@ function asVideo(ep: VideoEndpoint): VideoEndpoint {
     workflowId: (ep.workflowId || '').trim(),
     promptStyle: ep.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
     provider: ep.provider,
-    stillMode: stillModeForVideoModel('h3', ep)
+    stillMode: stillModeForVideoModel('h3', ep),
+    adapter: ep.adapter
   }
 }
 
@@ -659,6 +679,7 @@ export const useSettingsStore = defineStore('settings', () => {
     model: string
     models: string[]
     provider?: string
+    adapter?: AdapterConfig
   }) {
     const profile = profileFromEndpoint(
       {
@@ -666,7 +687,8 @@ export const useSettingsStore = defineStore('settings', () => {
         apiKey: seed.apiKey ?? '',
         model: seed.model,
         models: seed.models,
-        provider: seed.provider
+        provider: seed.provider,
+        adapter: seed.adapter
       },
       seed.name
     )
@@ -718,6 +740,7 @@ export const useSettingsStore = defineStore('settings', () => {
     model: string
     models: string[]
     provider?: string
+    adapter?: AdapterConfig
   }) {
     const profile = profileFromEndpoint(
       {
@@ -725,7 +748,8 @@ export const useSettingsStore = defineStore('settings', () => {
         apiKey: seed.apiKey ?? '',
         model: seed.model,
         models: seed.models,
-        provider: seed.provider
+        provider: seed.provider,
+        adapter: seed.adapter
       },
       seed.name
     )
@@ -777,6 +801,7 @@ export const useSettingsStore = defineStore('settings', () => {
     model: string
     models: string[]
     provider?: string
+    adapter?: AdapterConfig
   }) {
     const profile = profileFromEndpoint(
       {
@@ -784,7 +809,8 @@ export const useSettingsStore = defineStore('settings', () => {
         apiKey: seed.apiKey ?? '',
         model: seed.model,
         models: seed.models,
-        provider: seed.provider
+        provider: seed.provider,
+        adapter: seed.adapter
       },
       seed.name
     )
@@ -836,6 +862,7 @@ export const useSettingsStore = defineStore('settings', () => {
     models: string[]
     provider?: string
     voice?: string
+    adapter?: AdapterConfig
   }) {
     const profile = ttsFromEndpoint(
       {
@@ -844,7 +871,8 @@ export const useSettingsStore = defineStore('settings', () => {
         model: seed.model,
         models: seed.models,
         provider: seed.provider,
-        voice: seed.voice || config.value.tts.voice || 'longanhuan_v3.6'
+        voice: seed.voice || config.value.tts.voice || 'longanhuan_v3.6',
+        adapter: seed.adapter
       },
       seed.name
     )
@@ -896,6 +924,7 @@ export const useSettingsStore = defineStore('settings', () => {
     promptStyle?: VideoPromptStyle
     provider?: string
     stillMode?: VideoStillMode
+    adapter?: AdapterConfig
   }) {
     const profile = videoFromEndpoint(
       {
@@ -904,7 +933,8 @@ export const useSettingsStore = defineStore('settings', () => {
         workflowId: seed.workflowId,
         promptStyle: seed.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
         provider: seed.provider,
-        stillMode: stillModeForVideoModel('h3', seed)
+        stillMode: stillModeForVideoModel('h3', seed),
+        adapter: seed.adapter
       },
       seed.name
     )
@@ -945,6 +975,7 @@ export const useSettingsStore = defineStore('settings', () => {
     model: string
     models: string[]
     provider?: string
+    adapter?: AdapterConfig
   }) {
     const profile = profileFromEndpoint(
       {
@@ -952,7 +983,8 @@ export const useSettingsStore = defineStore('settings', () => {
         apiKey: seed.apiKey ?? '',
         model: seed.model,
         models: seed.models,
-        provider: seed.provider
+        provider: seed.provider,
+        adapter: seed.adapter
       },
       seed.name
     )

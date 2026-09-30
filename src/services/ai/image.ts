@@ -12,6 +12,11 @@
 import { getAIMode } from './client'
 import { getImageConfig } from './runtime'
 import { generateMockImage } from './mock'
+import {
+  httpCustomImageGenerate,
+  comfyPromptGenerate,
+  resolveImageAdapter
+} from './adapters'
 import type { VisualStyle, AspectRatio } from '@/types'
 import { abortableDelay } from './abort'
 
@@ -47,6 +52,42 @@ function imageConfig(modelOverride?: string) {
     ...cfg,
     model: modelOverride?.trim() || cfg.model
   }
+}
+
+async function realCustomOrComfy(input: ImageGenInput): Promise<ImageGenOutput> {
+  const cfg = imageConfig(input.model)
+  const adapterType = resolveImageAdapter(cfg)
+  const prompt = withGptImageQuality(buildPrompt(input, Boolean(input.referenceImages?.length)), cfg.model)
+  if (adapterType === 'http-custom') {
+    log(`→ 自定义 HTTP 生图 · ${cfg.model}`)
+    const { blob, mimeType } = await httpCustomImageGenerate({
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      prompt,
+      adapter: cfg.adapter,
+      signal: input.signal
+    })
+    return { blob, mimeType, prompt: input.prompt }
+  }
+  if (adapterType === 'comfyui-prompt' || adapterType === 'comfyui-workflow') {
+    log(`→ ComfyUI 生图 · ${adapterType}`)
+    let imageDataUrl: string | undefined
+    if (input.referenceImages?.[0]) {
+      imageDataUrl = await blobToDataUri(input.referenceImages[0])
+    }
+    const { blob, mimeType } = await comfyPromptGenerate({
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      prompt,
+      imageDataUrl,
+      adapter: cfg.adapter,
+      signal: input.signal,
+      kind: 'image'
+    })
+    return { blob, mimeType, prompt: input.prompt }
+  }
+  throw new Error(`[image] 未知适配器 ${adapterType}`)
 }
 
 function isSeedreamModel(model: string): boolean {
@@ -377,6 +418,12 @@ export async function generateImage(
   const model = imageConfig(input.model).model
 
   if (getAIMode() === 'real') {
+    const cfg = imageConfig(input.model)
+    const adapterType = resolveImageAdapter(cfg)
+    if (adapterType === 'http-custom' || adapterType === 'comfyui-prompt' || adapterType === 'comfyui-workflow') {
+      onProgress?.(adapterType === 'http-custom' ? '自定义接口出图...' : 'ComfyUI 出图...')
+      return await realCustomOrComfy(input)
+    }
     if (isSeedreamModel(model)) {
       onProgress?.(
         input.referenceImages?.length

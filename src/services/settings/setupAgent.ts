@@ -24,6 +24,11 @@ import {
 } from '@/stores/settings'
 import { stillModeForVideoModel } from '@/types/canvas'
 import settingsSkillRaw from '@/skills/settings-setup.md?raw'
+import {
+  normalizeAdapterInput,
+  testEndpointConnection,
+  type AdapterConfig
+} from '@/services/ai/adapters'
 
 export interface SetupMessage {
   role: 'user' | 'assistant'
@@ -59,17 +64,17 @@ function maskKey(key: string) {
 
 function snapshot() {
   const cfg = useSettingsStore().config
-  const named = (kind: string, list: { id: string; name: string; baseUrl: string; apiKey: string; model: string; models?: string[] }[]) =>
+  const named = (kind: string, list: { id: string; name: string; baseUrl: string; apiKey: string; model: string; models?: string[]; adapter?: AdapterConfig }[]) =>
     list
       .map(
         (p) =>
-          `- [${kind}] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} model=${p.model || '空'} models=${(p.models || []).join(', ') || '无'}`
+          `- [${kind}] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} model=${p.model || '空'} adapter=${p.adapter?.type || '默认'} models=${(p.models || []).join(', ') || '无'}`
       )
       .join('\n')
   const videos = cfg.videos
     .map(
       (p) =>
-        `- [video] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} workflow=${p.workflowId || '空'} style=${p.promptStyle} still=${p.stillMode || 'identity'}`
+        `- [video] ${p.name} (${p.id}) url=${p.baseUrl || '空'} key=${maskKey(p.apiKey)} workflow=${p.workflowId || '空'} adapter=${p.adapter?.type || '默认'} style=${p.promptStyle} still=${p.stillMode || 'identity'}`
     )
     .join('\n')
   return `当前本机配置（Key 已脱敏）：
@@ -87,10 +92,11 @@ const SYSTEM = `${settingsSkillRaw}
 一次最多 8 个 actions。没有把握就 actions 为空，先问。文档已经够写的时候不要空 actions。
 
 可用工具：
-{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe" }
-{ "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选" }
+{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe", "adapter": { "type": "openai-compatible|openai-images|http-custom|comfyui-workflow|comfyui-prompt", "path": "可选", "pollPath": "可选含{id}", "resultJsonPath": "可选", "authHeader": "可选", "authPrefix": "可选，Bearer 或空", "workflowTemplate": "ComfyUI /prompt JSON，可用{{prompt}}{{image}}" } }
+{ "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选", "adapter": "可选，同上" }
 { "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
 { "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
+{ "tool": "test_connection", "kind": "llm|vision|image|tts|video", "id": "可选，默认当前套" }
 
 预设目录（id｜名称｜地址｜默认模型｜常用模型）：
 LLM
@@ -111,7 +117,10 @@ ${catalog(VIDEO_PROVIDERS)}
 - 只有用户没给任何文档、只说「帮我配」时，才从上面的大厂预设里选。
 - 视频的 model 若没单独给 workflowId，就当作 workflowId。
 - 配音默认音色 longanhuan_v3.6，用户没提音色就用这个。
-- provider 对得上大厂预设、且用户没另给第三方地址时，用预设补全；用户给的 URL 与预设域名不一致时一律当 custom，不要改写成官方地址。`
+- provider 对得上大厂预设、且用户没另给第三方地址时，用预设补全；用户给的 URL 与预设域名不一致时一律当 custom，不要改写成官方地址。
+- 自建 ComfyUI（如 http://127.0.0.1:8188）：kind=video 或 image，provider=custom，adapter.type=comfyui-prompt；有工作流 JSON 就放进 adapter.workflowTemplate。不要编造 AutoDL 实例生命周期。
+- OpenAI 兼容中转：LLM/视觉用默认；生图若不是 /images/generations，设 adapter.type=http-custom 并填 path、resultJsonPath。
+- 写完接入后，若用户要求「测一下」，调用 test_connection。`
 
 function providersFor(kind: SetupKind): ProviderPreset[] {
   if (kind === 'llm') return LLM_PROVIDERS
@@ -185,11 +194,31 @@ function nextName(kind: SetupKind, wanted: string) {
   return uniqueProfileName(names, wanted || kind)
 }
 
-function runAction(action: Record<string, unknown>): { ok: boolean; detail: string; kind?: SetupKind } {
+async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean; detail: string; kind?: SetupKind }> {
   const settings = useSettingsStore()
   const tool = String(action.tool || '')
   const kind = parseKind(action.kind)
   if (!kind) return { ok: false, detail: '缺少有效的 kind' }
+
+  if (tool === 'test_connection') {
+    const id = String(action.id || '').trim()
+    let ep: { baseUrl?: string; apiKey?: string; model?: string; workflowId?: string; adapter?: AdapterConfig; provider?: string } | undefined
+    if (kind === 'llm') ep = id ? settings.config.llms.find((p) => p.id === id) : settings.config.llm
+    else if (kind === 'vision') ep = id ? settings.config.visions.find((p) => p.id === id) : settings.config.vision
+    else if (kind === 'image') ep = id ? settings.config.images.find((p) => p.id === id) : settings.config.image
+    else if (kind === 'tts') ep = id ? settings.config.ttsProfiles.find((p) => p.id === id) : settings.config.tts
+    else if (kind === 'video') ep = id ? settings.config.videos.find((p) => p.id === id) : settings.config.video
+    if (!ep) return { ok: false, detail: '找不到要测试的接入', kind }
+    if (id) {
+      if (kind === 'llm') settings.selectLlm(id)
+      else if (kind === 'vision') settings.selectVision(id)
+      else if (kind === 'image') settings.selectImage(id)
+      else if (kind === 'tts') settings.selectTts(id)
+      else if (kind === 'video') settings.selectVideo(id)
+    }
+    const result = await testEndpointConnection(kind, ep)
+    return { ok: result.ok, detail: result.ok ? `连通测试通过：${result.detail}` : `连通测试失败：${result.detail}`, kind }
+  }
 
   if (tool === 'add_profile') {
     const merged = mergePreset(kind, action)
@@ -201,14 +230,22 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
       : merged.models
     const model = String(action.model || merged.model || models[0] || '').trim()
     if (!baseUrl) return { ok: false, detail: `${name} 还缺接口地址`, kind }
+    const adapter = normalizeAdapterInput(action.adapter)
     if (kind === 'video') {
-      const workflowId = String(action.workflowId || model || merged.model).trim()
+      let workflowId = String(action.workflowId || model || merged.model).trim()
+      const isComfyPrompt =
+        adapter?.type === 'comfyui-prompt' ||
+        /localhost|127\.0\.0\.1/i.test(baseUrl)
+      if (!workflowId && isComfyPrompt) workflowId = 'comfyui-local'
       if (!workflowId) return { ok: false, detail: `${name} 还缺工作流 ID`, kind }
       const stillRaw = String(action.stillMode || '').trim()
       const stillMode =
         stillRaw === 'keyframe' || stillRaw === 'storyboard' || stillRaw === 'identity'
           ? stillRaw
           : stillModeForVideoModel('h3', { workflowId, provider: merged.provider, stillMode: stillRaw })
+      const resolvedAdapter =
+        adapter ||
+        (isComfyPrompt ? { type: 'comfyui-prompt' as const } : undefined)
       const id = settings.addVideo({
         name,
         baseUrl,
@@ -216,12 +253,25 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
         workflowId,
         promptStyle: action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
         provider: merged.provider,
-        stillMode
+        stillMode,
+        adapter: resolvedAdapter
       })
       return { ok: true, detail: `已保存视频接入「${name}」(${id})`, kind }
     }
-    if (!model) return { ok: false, detail: `${name} 还缺模型名`, kind }
-    const seed = { name, baseUrl, apiKey, model, models, provider: merged.provider }
+    if (!model && adapter?.type !== 'comfyui-prompt') return { ok: false, detail: `${name} 还缺模型名`, kind }
+    const seed = {
+      name,
+      baseUrl,
+      apiKey,
+      model: model || (adapter?.type === 'comfyui-prompt' ? 'comfyui' : ''),
+      models: models.length ? models : model ? [model] : ['comfyui'],
+      provider: merged.provider,
+      adapter:
+        adapter ||
+        (kind === 'image' && /localhost|127\.0\.0\.1/i.test(baseUrl)
+          ? { type: 'comfyui-prompt' as const }
+          : undefined)
+    }
     if (kind === 'llm') settings.addLlm(seed)
     else if (kind === 'vision') settings.addVision(seed)
     else if (kind === 'image') settings.addImage(seed)
@@ -241,6 +291,10 @@ function runAction(action: Record<string, unknown>): { ok: boolean; detail: stri
     if (action.model) patch.model = String(action.model).trim()
     if (action.provider) patch.provider = String(action.provider).trim()
     if (Array.isArray(action.models)) patch.models = action.models.map(String)
+    if (action.adapter) {
+      const adapter = normalizeAdapterInput(action.adapter)
+      if (adapter) patch.adapter = adapter
+    }
     if (kind === 'tts' && action.voice) patch.voice = String(action.voice)
     if (kind === 'video') {
       if (action.workflowId || action.model) patch.workflowId = String(action.workflowId || action.model).trim()
@@ -351,8 +405,9 @@ function extractBaseUrls(text: string) {
   )
   const unique = [...new Set(urls)].filter((u) => {
     try {
-      const host = new URL(u).host
-      return host.includes('.') && !/example\.com|localhost|127\.0\.0\.1/i.test(host)
+      const host = new URL(u).hostname
+      const local = /^(localhost|127\.0\.0\.1|::1)$/i.test(host)
+      return (host.includes('.') || local) && !/example\.com/i.test(host)
     } catch {
       return false
     }
@@ -393,8 +448,11 @@ function inferKindsFromDocs(text: string, models: string[]): SetupKind[] {
   if (/配音|\btts\b|speech|音色|cosyvoice/.test(t) || models.some((m) => /tts|speech|cosy/i.test(m))) {
     found.add('tts')
   }
-  if (/视频生成|文生视频|video\/generations|hailuo|wan2|kling|runway/.test(t) || models.some((m) => /hailuo|wan|kling|video/i.test(m))) {
+  if (/视频生成|文生视频|video\/generations|hailuo|wan2|kling|runway|comfyui|8188/.test(t) || models.some((m) => /hailuo|wan|kling|video/i.test(m))) {
     found.add('video')
+  }
+  if (/comfyui|system_stats|\/prompt\b/.test(t) && /生图|image|图生/.test(t)) {
+    found.add('image')
   }
   if (/语言模型|对话模型|聊天补全|chat\/completions|\bllm\b/.test(t) || models.some((m) => /gpt|deepseek|qwen|claude|kimi|glm|minimax|doubao/i.test(m))) {
     found.add('llm')
@@ -433,6 +491,15 @@ function actionsFromDocs(text: string): Record<string, unknown>[] {
   for (const kind of kinds) {
     const model = pickModelForKind(kind, models)
     if (!model) continue
+    const local = /localhost|127\.0\.0\.1/i.test(baseUrl) || /comfyui/i.test(text)
+    const adapter =
+      local && (kind === 'video' || kind === 'image')
+        ? { type: 'comfyui-prompt' }
+        : kind === 'image' && /images\/generations|openai/i.test(text)
+          ? { type: 'openai-images' }
+          : kind === 'llm' || kind === 'vision'
+            ? { type: 'openai-compatible' }
+            : undefined
     actions.push({
       tool: 'add_profile',
       kind,
@@ -440,9 +507,10 @@ function actionsFromDocs(text: string): Record<string, unknown>[] {
       provider: 'custom',
       baseUrl,
       apiKey,
-      model,
-      models,
-      workflowId: kind === 'video' ? model : undefined
+      model: model || (local ? 'comfyui' : model),
+      models: models.length ? models : local ? ['comfyui'] : models,
+      workflowId: kind === 'video' ? model || (local ? 'comfyui-local' : undefined) : undefined,
+      adapter
     })
   }
   return actions.slice(0, 8)
@@ -536,7 +604,7 @@ export async function runSetupAgentTurn(
       label,
       status: 'running'
     })
-    const result = runAction(action)
+    const result = await runAction(action)
     notes.push(result.ok ? result.detail : `失败：${result.detail}`)
     if (result.ok && result.kind) opened = result.kind
     onProgress?.({
@@ -560,6 +628,7 @@ export async function runSetupAgentTurn(
           { label: '配生图', text: '帮我配图像生成' },
           { label: '配配音', text: '帮我配 TTS 配音' },
           { label: '配视频', text: '帮我配视频生成' },
+          { label: '测连通', text: '帮我测试当前接入的连通性' },
           { label: '从文档接入', text: '下面是我的 API 文档，请按文档写成自定义接入（可以是中转站）：\n' }
         ]
 

@@ -461,6 +461,22 @@ app.whenReady().then(async () => {
     return shell.openPath(filePath)
   })
 
+  function isAllowedProviderFetch(parsed: URL) {
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname || ''
+    const autodl =
+      (host === 'autodl.art' || host.endsWith('.autodl.art')) &&
+      path.includes('/api/v1/comfyui/')
+    const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1'
+    const localComfy =
+      localHost &&
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (/\/(prompt|history|system_stats|object_info|view|queue|embeddings|interrupt)(\/|$)/i.test(path) ||
+        path === '/' ||
+        path === '')
+    return autodl || localComfy
+  }
+
   ipcMain.handle('desktop:autodlFetch', async (_e, opts?: {
     url?: string
     method?: string
@@ -475,12 +491,8 @@ app.whenReady().then(async () => {
     } catch {
       throw new Error('invalid url')
     }
-    const host = parsed.hostname.toLowerCase()
-    if (parsed.protocol !== 'https:' || (host !== 'autodl.art' && !host.endsWith('.autodl.art'))) {
-      throw new Error('只允许请求 AutoDL')
-    }
-    if (!parsed.pathname.includes('/api/v1/comfyui/')) {
-      throw new Error('只允许请求 AutoDL ComfyUI API')
+    if (!isAllowedProviderFetch(parsed)) {
+      throw new Error('只允许请求 AutoDL ComfyUI 或本机 ComfyUI（localhost）')
     }
     const method = String(opts?.method || 'GET').toUpperCase()
     const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
