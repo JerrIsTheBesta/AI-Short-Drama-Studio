@@ -2,6 +2,12 @@
 
 本文档对应当前开源分支的实际功能。不同 AI 服务的模型权限、计费、输入限制和生成质量由服务商决定。
 
+## 文档导航（给非技术用户）
+
+- [第一次用教程](docs/教程-第一次用.md)：安装、配 LLM、一键 Comfy、粘贴 API 工作流、试连通、出第一张图。
+- [更新说明](更新说明.md)：公告栏、自定义接入、Comfy 一键添加与工作流导入等近期改动。
+- 应用内顶部公告内容来自 [`public/notice.json`](public/notice.json)；改标题/正文/`updatedAt` 后用户会看到新公告。
+
 ## 1. 项目与工作模式
 
 - 普通视频项目：从剧本、人物、场景、分镜到图片、视频和成片的完整流程。
@@ -123,6 +129,8 @@
 - 运行时默认真实 API；无 Key 时可浏览界面，生成类操作需先在设置中接入（含自定义 OpenAI 兼容与自建 ComfyUI）。
 - 设置页可为每套接入编辑 adapter（类型、path、pollUrl、resultJsonPath、鉴权头、Comfy workflowTemplate）；自定义 HTTP 视频支持 POST + 可选轮询。
 - 自建 ComfyUI 须粘贴 API 格式工作流到 adapter.workflowTemplate（可用 {{prompt}}/{{image}} 占位）；应用不附带假装可用的默认节点图。
+- 支持设置页一键添加 ComfyUI（只填 baseUrl）；支持工作流粘贴校验、从文件/URL 导入，以及尝试从本机 `/userdata` 列举（无列表时如实提示）。
+- 提供连通测试；连通成功不代表已配置工作流。面向用户的步骤见 [docs/教程-第一次用.md](docs/教程-第一次用.md)。
 - TypeScript 类型检查、Vite Web 构建和 Electron Windows 打包。
 
 ## 当前边界
