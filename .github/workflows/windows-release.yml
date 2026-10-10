@@ -28,6 +28,14 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 准备 Electron Windows 运行时
+        shell: pwsh
+        run: |
+          node node_modules/electron/install.js
+          if (-not (Test-Path 'node_modules/electron/dist/electron.exe')) {
+            throw 'Electron Windows 运行时下载失败'
+          }
+
       - name: 下载离线 FFmpeg 核心
         run: node scripts/download-ffmpeg-core.cjs --source=jsdelivr
 
