@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from '@/stores'
 import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
 import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
@@ -50,21 +50,6 @@ const running = computed(() => (props.node ? isNodeRunning(props.node.id) : fals
 const continueHint = ref('')
 const pickerOpen = ref(false)
 const optimizingPrompt = ref(false)
-const videoPromptBox = ref<HTMLTextAreaElement | null>(null)
-
-function persistShotVideoPrompt() {
-  if (props.node?.type !== 'shotVideo' || !shot.value) return
-  const v = videoPromptBox.value?.value
-  if (v == null) return
-  if (v !== (shot.value.compiledVideoPrompt ?? '')) {
-    project.setShotVideoPrompt(shot.value.id, v)
-  }
-}
-
-function onVideoPromptPaste() {
-  nextTick(() => persistShotVideoPrompt())
-}
-
 const keepAmbientAudio = computed({
   get: () => project.current?.settings.keepAmbientAudio !== false,
   set: (v: boolean) => project.setSettings({ keepAmbientAudio: v })
@@ -472,7 +457,6 @@ async function downloadFinal() {
 
 async function run() {
   if (!props.node) return
-  persistShotVideoPrompt()
   if (gateBlocked.value) {
     toast.warn(PLAY_GATE_MSG)
     return
@@ -619,7 +603,6 @@ async function resetVideoPrompt() {
 }
 
 async function optimizeVideoPrompt() {
-  persistShotVideoPrompt()
   if (optimizingPrompt.value) return
   optimizingPrompt.value = true
   try {
@@ -882,13 +865,10 @@ async function optimizeVideoPrompt() {
           优化按这个框里的原文改写成 H3 格式。你写的台词会进 &lt;d&gt;，口播栏为空也不会删掉。
         </p>
         <textarea
-          ref="videoPromptBox"
           rows="16"
           :value="shot.compiledVideoPrompt ?? ''"
           :placeholder="videoPromptPlaceholder"
           @input="project.setShotVideoPrompt(shot.id, ($event.target as HTMLTextAreaElement).value)"
-          @paste="onVideoPromptPaste"
-          @blur="persistShotVideoPrompt"
         />
         <label>时长（秒）</label>
         <input
