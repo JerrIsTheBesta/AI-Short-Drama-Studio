@@ -1,0 +1,72 @@
+name: Windows 安装包
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 打包 Windows 安装程序
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 准备 Electron Windows 运行时
+        shell: pwsh
+        run: |
+          node node_modules/electron/install.js
+          if (-not (Test-Path 'node_modules/electron/dist/electron.exe')) {
+            throw 'Electron Windows 运行时下载失败'
+          }
+
+      - name: 下载离线 FFmpeg 核心
+        run: node scripts/download-ffmpeg-core.cjs --source=jsdelivr
+
+      - name: 构建 Windows 安装包
+        run: npm run electron:build
+
+      - name: 查找安装包
+        id: installers
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path release -Recurse -Filter *Setup*.exe
+          if (-not $files) { throw '没有生成 Windows 安装包' }
+          $files | ForEach-Object { Write-Host "安装包：$($_.FullName)" }
+
+      - name: 保存 Actions 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Short-Drama-Studio-Windows-${{ github.ref_name }}
+          path: release/**/*Setup*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $files = @(Get-ChildItem -Path release -Recurse -Filter *Setup*.exe | ForEach-Object { $_.FullName })
+          gh release create $tag @files `
+            --repo '${{ github.repository }}' `
+            --title "剧流 Studio $tag" `
+            --generate-notes
