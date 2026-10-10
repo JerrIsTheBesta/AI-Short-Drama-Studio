@@ -28,6 +28,9 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 下载离线 FFmpeg 核心
+        run: node scripts/download-ffmpeg-core.cjs --source=jsdelivr
+
       - name: 构建 Windows 安装包
         run: npm run electron:build
 
