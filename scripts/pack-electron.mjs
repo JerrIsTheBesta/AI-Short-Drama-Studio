@@ -30,6 +30,7 @@ const child = spawn(
   process.platform === 'win32' ? 'npx.cmd' : 'npx',
   [
     'electron-builder',
+    '--publish=never',
     `--config.electronDist=${electronDist}`,
     `--config.directories.output=${output}`
   ],
