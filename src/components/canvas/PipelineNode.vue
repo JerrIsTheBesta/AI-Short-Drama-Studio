@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
@@ -314,20 +314,6 @@ const genLabel = computed(() => {
 
 const { findNode, removeSelectedNodes } = useVueFlow()
 
-const promptBox = ref<HTMLTextAreaElement | null>(null)
-
-function persistShotVideoPrompt() {
-  if (type.value !== 'shotVideo' || !shot.value) return
-  const v = promptBox.value?.value ?? promptValue.value
-  if (v !== (shot.value.compiledVideoPrompt ?? '')) {
-    project.setShotVideoPrompt(shot.value.id, v)
-  }
-}
-
-function onPromptPaste() {
-  nextTick(() => persistShotVideoPrompt())
-}
-
 watch(assetId, () => loadMedia(), { immediate: true })
 watch(
   // 必须把每一项作为独立 source。若用 getter 每次返回一个新数组，回写提示词后
@@ -342,7 +328,6 @@ watch(
   ([on]) => {
     panelOpen.value = Boolean(on)
     if (!on) {
-      persistShotVideoPrompt()
       moreOpen.value = false
       cropOn.value = false
       trimOn.value = false
@@ -381,7 +366,6 @@ function setShotDuration(raw: number) {
 }
 
 function dismissPanel() {
-  persistShotVideoPrompt()
   moreOpen.value = false
   cropOn.value = false
   trimOn.value = false
@@ -427,7 +411,6 @@ defineExpose({ loadMedia })
 
 async function optimizePrompt(ev?: Event) {
   ev?.stopPropagation()
-  persistShotVideoPrompt()
   if (type.value !== 'shotVideo' || !shot.value || optimizingPrompt.value || generating.value) return
   optimizingPrompt.value = true
   try {
@@ -452,7 +435,6 @@ async function generateThis(ev?: Event, hd = false) {
     await router.push('/edit')
     return
   }
-  persistShotVideoPrompt()
   moreOpen.value = false
   dismissPanel()
   try {
@@ -936,13 +918,10 @@ const cropStyle = computed(() => ({
         </button>
       </div>
       <textarea
-        ref="promptBox"
         rows="12"
         :value="promptValue"
         :placeholder="promptHint"
         @input="promptValue = ($event.target as HTMLTextAreaElement).value"
-        @paste="onPromptPaste"
-        @blur="persistShotVideoPrompt"
       />
       <H3GenModeSelect v-if="isH3VideoNode" v-model="h3GenMode" />
       <FramePairSlots
