@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 export type DesktopAPI = {
   isDesktop: true
   getRoot: () => Promise<string>
+  setRoot: (root: string) => Promise<string>
+  getVersion: () => Promise<string>
   ensureProjectDir: (name: string, id: string) => Promise<string>
   listProjectDirs: () => Promise<string[]>
   readText: (filePath: string) => Promise<string>
@@ -61,6 +63,8 @@ export type DesktopAPI = {
 const api: DesktopAPI = {
   isDesktop: true,
   getRoot: () => ipcRenderer.invoke('desktop:getRoot'),
+  setRoot: (root) => ipcRenderer.invoke('desktop:setRoot', root),
+  getVersion: () => ipcRenderer.invoke('desktop:getVersion'),
   ensureProjectDir: (name, id) => ipcRenderer.invoke('desktop:ensureProjectDir', name, id),
   listProjectDirs: () => ipcRenderer.invoke('desktop:listProjectDirs'),
   readText: (filePath) => ipcRenderer.invoke('desktop:readText', filePath),

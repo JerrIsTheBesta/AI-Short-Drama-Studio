@@ -1,6 +1,8 @@
 export type DesktopAPI = {
   isDesktop: true
   getRoot: () => Promise<string>
+  setRoot: (root: string) => Promise<string>
+  getVersion: () => Promise<string>
   ensureProjectDir: (name: string, id: string) => Promise<string>
   listProjectDirs: () => Promise<string[]>
   readText: (filePath: string) => Promise<string>

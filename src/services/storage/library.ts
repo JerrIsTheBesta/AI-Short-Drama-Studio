@@ -1,6 +1,6 @@
 /**
  * 公共资产库：跨项目共享图片
- * 桌面端：Documents/AI-Cut/_library/
+ * 桌面端：用户所选保存目录/_library/
  * 浏览器：IndexedDB assets（library: true）
  */
 

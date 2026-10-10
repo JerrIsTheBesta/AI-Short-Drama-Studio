@@ -20,6 +20,9 @@ const storage = ref<{ usage: number; quota: number }>({ usage: 0, quota: 0 })
 const ffmpegReady = ref(isFFmpegReady())
 const ffmpegLoading = ref(false)
 const grantingAccess = ref(false)
+const storageRoot = ref('')
+const changingStorageRoot = ref(false)
+const appVersion = ref('0.1.5')
 
 const diag = ref({
   crossOriginIsolated: false,
@@ -33,10 +36,25 @@ const diag = ref({
 
 const saving = ref(false)
 
+const llmReady = computed(() => endpointReady(settings.config.llm))
+const assistantTargetsReady = computed(() =>
+  ['vision', 'image', 'video'].every((kind) =>
+    endpointReady(settings.config[kind as 'vision' | 'image' | 'video'])
+  )
+)
+
 onMounted(async () => {
   await settings.ensureHydrated()
   storage.value = await estimateStorage()
   await assets.refresh()
+  if (isDesktop()) {
+    try {
+      storageRoot.value = await desktop().getRoot()
+      appVersion.value = await desktop().getVersion()
+    } catch {
+      /* desktop info is non-critical */
+    }
+  }
   await runDiagnostics()
 })
 
@@ -46,6 +64,15 @@ async function saveSettings() {
   try {
     await settings.flush()
     toast.success('配置已保存到本机')
+    if (section.value === 'llm' && endpointReady(settings.config.llm)) {
+      const needsAssistant = !['vision', 'image', 'video'].every((kind) =>
+        endpointReady(settings.config[kind as 'vision' | 'image' | 'video'])
+      )
+      if (needsAssistant) {
+        toast.success('第 1 步完成，接下来让接入助手配置其他模型')
+        await router.replace('/settings/agent')
+      }
+    }
   } catch (e: any) {
     toast.error(e?.message || '保存失败，请再试一次')
   } finally {
@@ -60,6 +87,27 @@ async function openSettingsFolder() {
     await desktop().openPath(root)
   } catch {
     toast.error('打不开配置目录')
+  }
+}
+
+async function chooseStorageFolder() {
+  if (!isDesktop() || changingStorageRoot.value) return
+  try {
+    const selected = await desktop().pickDirectory()
+    if (!selected || selected === storageRoot.value) return
+    const ok = confirm(
+      `要把项目、素材和配置迁移到这里吗？\n\n${selected}\n\n现有资料会复制到新目录，完成后应用将自动刷新。`
+    )
+    if (!ok) return
+    changingStorageRoot.value = true
+    toast.info('正在迁移项目与素材，请不要关闭应用…', 10000)
+    storageRoot.value = await desktop().setRoot(selected)
+    toast.success('保存位置已修改，正在重新载入…')
+    setTimeout(() => window.location.reload(), 700)
+  } catch (err: any) {
+    toast.error(err?.message || '修改保存位置失败', 8000)
+  } finally {
+    changingStorageRoot.value = false
   }
 }
 
@@ -217,8 +265,8 @@ type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 
 const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'system']
 
 const nav = [
-  { id: 'agent' as const, label: '接入助手', desc: '用 LLM 写入其余能力' },
   { id: 'llm' as const, label: '语言模型', desc: '剧本、智能体、接入助手' },
+  { id: 'agent' as const, label: '接入助手', desc: '用语言模型配置其余能力' },
   { id: 'vision' as const, label: '视觉理解', desc: '看图与质检' },
   { id: 'image' as const, label: '图像生成', desc: '人设、场景、看板' },
   { id: 'tts' as const, label: '配音', desc: '后期口播 TTS' },
@@ -227,8 +275,9 @@ const nav = [
 ]
 
 const section = computed<SettingsSection>(() => {
-  const raw = String(route.params.section || 'agent')
-  return SECTIONS.includes(raw as SettingsSection) ? (raw as SettingsSection) : 'agent'
+  const fallback: SettingsSection = llmReady.value ? 'agent' : 'llm'
+  const raw = String(route.params.section || fallback)
+  return SECTIONS.includes(raw as SettingsSection) ? (raw as SettingsSection) : fallback
 })
 
 const currentNav = computed(() => nav.find((n) => n.id === section.value) || nav[0])
@@ -293,6 +342,47 @@ function navReady(id: SettingsSection) {
       </nav>
 
       <main class="main">
+        <section
+          v-if="(section === 'llm' || section === 'agent') && !(section === 'agent' && assistantTargetsReady)"
+          class="onboarding"
+        >
+          <div class="onboarding-head">
+            <div>
+              <b>开始使用前，按这两步完成 AI 配置</b>
+              <p>先让语言模型可用，再由接入助手帮你配置视觉、生图、视频和配音。</p>
+            </div>
+            <span v-if="assistantTargetsReady" class="onboarding-done">基础能力已就绪</span>
+          </div>
+          <div class="onboarding-steps">
+            <button
+              type="button"
+              class="onboarding-step"
+              :class="{ active: section === 'llm', done: llmReady }"
+              @click="go('llm')"
+            >
+              <i>{{ llmReady ? '✓' : '1' }}</i>
+              <span>
+                <b>配置语言模型</b>
+                <small>填写接口地址、API Key 和模型名，然后点击保存</small>
+              </span>
+            </button>
+            <div class="onboarding-arrow">→</div>
+            <button
+              type="button"
+              class="onboarding-step"
+              :class="{ active: section === 'agent', locked: !llmReady, done: assistantTargetsReady }"
+              :disabled="!llmReady"
+              @click="go('agent')"
+            >
+              <i>{{ assistantTargetsReady ? '✓' : '2' }}</i>
+              <span>
+                <b>让接入助手配置其他模型</b>
+                <small>{{ llmReady ? '按提示配置视觉、生图、视频和配音' : '完成第 1 步后解锁' }}</small>
+              </span>
+            </button>
+          </div>
+        </section>
+
         <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
         <StudioSettings
           v-if="settings.diskReady && section !== 'agent' && section !== 'system'"
@@ -306,7 +396,7 @@ function navReady(id: SettingsSection) {
           <section v-if="isDesktop()" class="panel">
             <h2>本机文件权限</h2>
             <p class="card-desc">
-              上传参考图走系统文件框，由主进程复制进「文档\AI-Cut」，不再经过浏览器沙箱。
+              上传参考图走系统文件框，由主进程复制进当前保存目录，不再经过浏览器沙箱。
             </p>
             <p class="muted">
               若仍被拦截，点「授权访问本机文件」。会弹出 Windows 账户控制，允许后把本程序和素材目录加入安全中心排除项。360 / 火绒请把「剧流 Studio」加到信任区。
@@ -357,12 +447,26 @@ function navReady(id: SettingsSection) {
             <p class="card-desc">语言模型、生图、配音、视频等密钥写在本机 SQLite，不进安装目录，也不走浏览器。</p>
             <p v-if="settings.persistPath" class="path">{{ settings.persistPath }}</p>
             <p v-else class="muted">浏览器端保存在本机 localStorage。</p>
-            <button v-if="isDesktop()" type="button" class="mini" @click="openSettingsFolder">打开配置文件夹</button>
           </section>
 
           <section class="panel">
-            <h2>存储</h2>
-            <p class="card-desc">桌面端项目和素材在「文档\AI-Cut」；浏览器端用 IndexedDB。</p>
+            <h2>保存位置</h2>
+            <p class="card-desc">
+              项目、图片、视频、音频和模型配置都会保存在下面的目录。修改后会迁移现有资料，之后的新资料也会存入新目录。
+            </p>
+            <p v-if="isDesktop()" class="path storage-path">{{ storageRoot || '正在读取…' }}</p>
+            <p v-else class="muted">浏览器端使用 IndexedDB，保存位置由浏览器管理。</p>
+            <div v-if="isDesktop()" class="proj storage-actions">
+              <button type="button" class="mini" @click="openSettingsFolder">打开保存文件夹</button>
+              <button
+                type="button"
+                class="mini"
+                :disabled="changingStorageRoot"
+                @click="chooseStorageFolder"
+              >
+                {{ changingStorageRoot ? '正在迁移…' : '选择新的保存文件夹' }}
+              </button>
+            </div>
             <div class="storage-bar"><div class="storage-bar-fill" :style="{ width: storagePct + '%' }" /></div>
             <div class="storage-info">
               <span>已用 {{ formatSize(storage.usage) }} / 配额 {{ formatSize(storage.quota) }}</span>
@@ -388,12 +492,11 @@ function navReady(id: SettingsSection) {
 
           <section class="panel">
             <h2>关于</h2>
-            <p class="card-desc">开源桌面端：从剧本到成片</p>
-            <div class="about-row"><span>版本</span><b>v0.1.1</b></div>
-            <div class="about-row"><span>前端</span><b>Vue 3 + Vite + TypeScript</b></div>
-            <div class="about-row"><span>视频引擎</span><b>FFmpeg.wasm 0.12</b></div>
-            <div class="about-row"><span>配置库</span><b>文档\AI-Cut\app.db</b></div>
-            <div class="about-row"><span>工程文件</span><b>文档\AI-Cut</b></div>
+            <div class="about-row"><span>版本</span><b>v{{ appVersion }}</b></div>
+            <div class="about-row qq-group">
+              <span><i>QQ</i> 官方交流群</span>
+              <b>13892383</b>
+            </div>
           </section>
         </div>
       </main>
@@ -520,6 +623,66 @@ function navReady(id: SettingsSection) {
   min-width: 0;
   overflow: auto;
   padding: 24px 28px 40px;
+}
+.onboarding {
+  max-width: 900px;
+  margin: 0 0 22px;
+  padding: 16px;
+  border: 1px solid rgba(124, 58, 237, 0.42);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.14), rgba(37, 99, 235, 0.07));
+}
+.onboarding-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.onboarding-head > div > b { font-size: 15px; color: var(--color-text-1); }
+.onboarding-head p { margin: 4px 0 0; color: var(--color-text-3); font-size: 12px; }
+.onboarding-done { flex-shrink: 0; color: #34d399; font-size: 12px; }
+.onboarding-steps {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+.onboarding-step {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.onboarding-step.active { border-color: var(--color-accent); box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2); }
+.onboarding-step.done i { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.onboarding-step.locked { opacity: 0.5; cursor: not-allowed; }
+.onboarding-step i {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 50%;
+  background: rgba(124, 58, 237, 0.2);
+  color: #c4b5fd;
+  font-style: normal;
+  font-weight: 700;
+}
+.onboarding-step span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.onboarding-step b { font-size: 13px; color: var(--color-text-1); }
+.onboarding-step small { color: var(--color-text-4); line-height: 1.4; }
+.onboarding-arrow { align-self: center; color: var(--color-text-4); }
+@media (max-width: 760px) {
+  .onboarding-steps { grid-template-columns: 1fr; }
+  .onboarding-arrow { display: none; }
 }
 .loading {
   margin: 12px 0;
@@ -701,5 +864,42 @@ function navReady(id: SettingsSection) {
 .about-row b {
   color: var(--color-text-1);
   font-weight: 600;
+}
+.about-row.qq-group {
+  align-items: center;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(59, 130, 246, 0.5);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.18), rgba(124, 58, 237, 0.13));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 6px 20px rgba(37, 99, 235, 0.08);
+}
+.qq-group span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #bfdbfe;
+  font-weight: 600;
+}
+.qq-group span i {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: #2563eb;
+  color: white;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+.about-row.qq-group b {
+  color: #f8fafc;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-shadow: 0 0 14px rgba(96, 165, 250, 0.5);
 }
 </style>
