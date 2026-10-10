@@ -114,11 +114,21 @@ export async function getFFmpeg(
 
     // 检查浏览器支持
     if (typeof SharedArrayBuffer === 'undefined') {
+      if (window.desktop?.isDesktop) {
+        throw new Error(
+          '桌面版未能启用视频合成环境（SharedArrayBuffer 不可用）。这是当前安装版本的问题，请安装包含桌面合成修复的最新版后重试。'
+        )
+      }
       throw new Error(
         '浏览器不支持 SharedArrayBuffer。请用 Chrome 92+ / Edge 92+ / Firefox 89+，并确保通过 http://localhost 访问（不是 file://）。'
       )
     }
     if (!self.crossOriginIsolated) {
+      if (window.desktop?.isDesktop) {
+        throw new Error(
+          '桌面版视频页面未启用安全隔离，无法启动 FFmpeg 合成。请安装包含桌面合成修复的最新版后重试。'
+        )
+      }
       throw new Error(
         '当前页面未启用 cross-origin isolation。请确认 Vite 启动时设置了 COOP/COEP headers。'
       )
