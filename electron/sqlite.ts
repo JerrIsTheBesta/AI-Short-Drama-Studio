@@ -1,5 +1,5 @@
 /**
- * 桌面端本地 SQLite（node:sqlite），库文件在「文档/AI-Cut/app.db」。
+ * 桌面端本地 SQLite（node:sqlite），库文件位于用户选择的保存目录。
  * 用来存模型密钥等用户配置，不走浏览器 localStorage。
  */
 import path from 'node:path'

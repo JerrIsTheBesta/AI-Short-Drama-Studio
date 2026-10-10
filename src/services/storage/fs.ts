@@ -1,7 +1,7 @@
 /**
  * 桌面端本地文件夹存储
  *
- * Documents/AI-Cut/<project>/
+ * 用户所选保存目录/<project>/
  *   project.json
  *   assets/manifest.json
  *   assets/images|videos|audio/<id>.<ext>

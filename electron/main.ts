@@ -18,9 +18,133 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
+import https from 'node:https'
 import { closeAppDb, getDbPath, kvGet, kvSet, openAppDb } from './sqlite'
 
 const mainDir = path.dirname(fileURLToPath(import.meta.url))
+
+/**
+ * 开源版允许用户接入任意视频工作流，结果往往落在各家临时 CDN，
+ * 不能再用固定域名白名单。这里改为拦截本机/内网地址，避免下载 IPC
+ * 被滥用于 SSRF，同时允许正常的公网 HTTPS 视频地址。
+ */
+function isPrivateIp(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '')
+  if (normalized === '::1' || normalized === '::' || normalized.startsWith('fe80:')) {
+    return true
+  }
+  if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true
+
+  // IPv4-mapped IPv6，例如 ::ffff:127.0.0.1
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized)
+  const ipv4 = mapped?.[1] ?? (isIP(normalized) === 4 ? normalized : '')
+  if (!ipv4) return false
+  const octets = ipv4.split('.').map(Number)
+  const [a, b] = octets
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a >= 224
+  )
+}
+
+async function assertPublicHttpsUrl(raw: string): Promise<URL> {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    throw new Error('视频下载地址无效')
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('只允许下载公网 HTTPS 视频地址')
+  }
+  const host = parsed.hostname.toLowerCase()
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) {
+    throw new Error('不允许下载本机或内网地址')
+  }
+  if (isIP(host)) {
+    if (isPrivateIp(host)) throw new Error('不允许下载本机或内网地址')
+    return parsed
+  }
+  let addresses: Awaited<ReturnType<typeof lookup>>
+  try {
+    addresses = await lookup(host, { all: true, verbatim: true })
+  } catch {
+    throw new Error(`无法解析视频源域名：${host}`)
+  }
+  if (!addresses.length || addresses.some((item) => isPrivateIp(item.address))) {
+    throw new Error('不允许下载解析到本机或内网的视频地址')
+  }
+  return parsed
+}
+
+/**
+ * Electron net.fetch 会把响应头转换成 Web Headers；部分 CDN 在
+ * Content-Disposition 中直接返回中文文件名时，会触发 undici 的
+ * ByteString TypeError 并造成主进程未捕获异常。使用 Node HTTPS 原始流
+ * 下载可避开该转换，同时每一跳重定向仍做公网地址校验。
+ */
+async function downloadPublicVideo(
+  rawUrl: string,
+  dest: string,
+  redirectsLeft = 5
+): Promise<void> {
+  const parsed = await assertPublicHttpsUrl(rawUrl)
+  await new Promise<void>((resolve, reject) => {
+    const req = https.get(
+      parsed,
+      {
+        headers: {
+          Accept: 'video/*,application/octet-stream;q=0.9,*/*;q=0.1',
+          'User-Agent': 'AI-Cut-Desktop/1.0'
+        },
+        timeout: 180_000
+      },
+      (res) => {
+        const status = res.statusCode || 0
+        const location = res.headers.location
+        if (status >= 300 && status < 400 && location) {
+          res.resume()
+          if (redirectsLeft <= 0) {
+            reject(new Error('视频下载重定向次数过多'))
+            return
+          }
+          const next = new URL(location, parsed).toString()
+          downloadPublicVideo(next, dest, redirectsLeft - 1).then(resolve, reject)
+          return
+        }
+        if (status < 200 || status >= 300) {
+          res.resume()
+          reject(new Error(`下载失败 ${status}`))
+          return
+        }
+
+        const contentType = String(res.headers['content-type'] || '').toLowerCase()
+        if (
+          contentType &&
+          !contentType.startsWith('video/') &&
+          !contentType.includes('application/octet-stream') &&
+          !contentType.includes('binary/octet-stream')
+        ) {
+          res.resume()
+          reject(new Error(`视频源返回了非视频内容：${contentType}`))
+          return
+        }
+
+        pipeline(res, createWriteStream(dest)).then(resolve, reject)
+      }
+    )
+    req.once('timeout', () => req.destroy(new Error('视频下载超时')))
+    req.once('error', reject)
+  })
+}
 
 function resolvePreload() {
   for (const name of ['preload.cjs', 'preload.js', 'preload.mjs']) {
@@ -118,9 +242,56 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 const ROOT_NAME = 'AI-Cut'
+const ROOT_PREF_FILE = 'storage-root.json'
+
+let activeRoot = ''
 
 function defaultRoot() {
   return path.join(app.getPath('documents'), ROOT_NAME)
+}
+
+function rootPreferencePath() {
+  return path.join(app.getPath('userData'), ROOT_PREF_FILE)
+}
+
+async function loadStorageRoot() {
+  try {
+    const raw = await fs.readFile(rootPreferencePath(), 'utf8')
+    const saved = String(JSON.parse(raw)?.root || '').trim()
+    if (saved && path.isAbsolute(saved)) return path.normalize(saved)
+  } catch {
+    /* first launch or invalid preference: use default */
+  }
+  return defaultRoot()
+}
+
+async function saveStorageRoot(root: string) {
+  await ensureDir(path.dirname(rootPreferencePath()))
+  await fs.writeFile(
+    rootPreferencePath(),
+    JSON.stringify({ root: path.normalize(root) }, null, 2),
+    'utf8'
+  )
+}
+
+function currentRoot() {
+  return activeRoot || defaultRoot()
+}
+
+function isSameOrNested(parent: string, child: string) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+async function copyMissingRootContents(source: string, target: string) {
+  if (!existsSync(source)) return
+  const entries = await fs.readdir(source, { withFileTypes: true })
+  for (const entry of entries) {
+    const src = path.join(source, entry.name)
+    const dest = path.join(target, entry.name)
+    if (existsSync(dest)) continue
+    await fs.cp(src, dest, { recursive: true, force: false, errorOnExist: false })
+  }
 }
 
 async function ensureDir(dir: string) {
@@ -240,7 +411,8 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
-  const root = defaultRoot()
+  const root = await loadStorageRoot()
+  activeRoot = root
   await ensureDir(root)
   await openAppDb(root)
 
@@ -256,19 +428,53 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('desktop:getRoot', async () => {
-    const root = defaultRoot()
+    const root = currentRoot()
     await ensureDir(root)
     return root
   })
 
-  ipcMain.handle('desktop:dbPath', () => getDbPath() || path.join(defaultRoot(), 'app.db'))
+  ipcMain.handle('desktop:setRoot', async (_e, requestedRoot: string) => {
+    const nextRoot = path.resolve(String(requestedRoot || '').trim())
+    const previousRoot = currentRoot()
+    if (!requestedRoot || !path.isAbsolute(nextRoot)) {
+      throw new Error('请选择有效的绝对路径')
+    }
+    if (nextRoot === path.parse(nextRoot).root) {
+      throw new Error('不能直接使用磁盘根目录，请选择一个专用文件夹')
+    }
+    if (
+      path.resolve(previousRoot) !== nextRoot &&
+      (isSameOrNested(previousRoot, nextRoot) || isSameOrNested(nextRoot, previousRoot))
+    ) {
+      throw new Error('新旧保存目录不能互相包含，请选择其他文件夹')
+    }
+    if (path.resolve(previousRoot) === nextRoot) return nextRoot
+
+    await ensureDir(nextRoot)
+    closeAppDb()
+    try {
+      // 目标已有资料时不覆盖；否则将当前数据库、项目和素材完整带过去。
+      await copyMissingRootContents(previousRoot, nextRoot)
+      await openAppDb(nextRoot)
+      activeRoot = nextRoot
+      await saveStorageRoot(nextRoot)
+      return nextRoot
+    } catch (error) {
+      activeRoot = previousRoot
+      await openAppDb(previousRoot)
+      throw error
+    }
+  })
+
+  ipcMain.handle('desktop:dbPath', () => getDbPath() || path.join(currentRoot(), 'app.db'))
+  ipcMain.handle('desktop:getVersion', () => app.getVersion())
   ipcMain.handle('desktop:kvGet', (_e, key: string) => kvGet(String(key || '')))
   ipcMain.handle('desktop:kvSet', (_e, key: string, value: string) => {
     kvSet(String(key || ''), String(value ?? ''))
   })
 
   ipcMain.handle('desktop:ensureProjectDir', async (_e, name: string, id: string) => {
-    const dir = path.join(defaultRoot(), slugName(name, id))
+    const dir = path.join(currentRoot(), slugName(name, id))
     await ensureDir(path.join(dir, 'assets', 'images'))
     await ensureDir(path.join(dir, 'assets', 'videos'))
     await ensureDir(path.join(dir, 'assets', 'audio'))
@@ -277,7 +483,7 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('desktop:listProjectDirs', async () => {
-    const root = defaultRoot()
+    const root = currentRoot()
     await ensureDir(root)
     const names = await fs.readdir(root, { withFileTypes: true })
     const out: string[] = []
@@ -356,7 +562,7 @@ app.whenReady().then(async () => {
       })
       if (res.canceled || !res.filePaths.length) return []
 
-      const inbox = path.join(defaultRoot(), 'inbox')
+      const inbox = path.join(currentRoot(), 'inbox')
       await ensureDir(inbox)
       const out: Array<{ name: string; mime: string; data: ArrayBuffer }> = []
       for (const src of res.filePaths) {
@@ -394,7 +600,7 @@ app.whenReady().then(async () => {
     if (process.platform !== 'win32') {
       throw new Error('这项授权只在 Windows 上需要')
     }
-    const root = defaultRoot()
+    const root = currentRoot()
     const exe = process.execPath
     const exeDir = path.dirname(exe)
     const exeName = path.basename(exe)
@@ -646,26 +852,21 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('desktop:downloadToTemp', async (_e, url: string) => {
     const target = String(url || '')
-    let parsed: URL
-    try {
-      parsed = new URL(target)
-    } catch {
-      throw new Error('invalid url')
-    }
-    if (
-      parsed.protocol !== 'https:' ||
-      !/myqcloud\.com|codewithgpu|autodl\.art|aliyuncs\.com/i.test(parsed.hostname)
-    ) {
-      throw new Error('只允许下载已知视频源')
-    }
     const dest = path.join(
       os.tmpdir(),
       `aicuts-dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`
     )
-    const res = await net.fetch(target, { redirect: 'follow' })
-    if (!res.ok || !res.body) throw new Error(`下载失败 ${res.status}`)
-    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(dest))
-    return dest
+    try {
+      await downloadPublicVideo(target, dest)
+      return dest
+    } catch (error) {
+      try {
+        await fs.unlink(dest)
+      } catch {
+        /* ignore incomplete temp file */
+      }
+      throw error
+    }
   })
 
   function senderWin(e: Electron.IpcMainInvokeEvent) {

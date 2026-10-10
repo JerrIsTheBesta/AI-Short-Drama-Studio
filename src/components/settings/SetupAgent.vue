@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { llmSetupReady, runSetupAgentTurn, type SetupEvent, type SetupMessage } from '@/services/settings/setupAgent'
 import { friendlyAiError, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
 import { namedModelGroups } from '@/stores/settings'
-import { useSettingsStore } from '@/stores'
+import { useSettingsStore, endpointReady } from '@/stores'
 
 const emit = defineEmits<{
   open: [section: string]
@@ -28,7 +28,7 @@ const feed = ref<FeedItem[]>([
     type: 'msg',
     role: 'assistant',
     content:
-      '我是接入助手。可以说厂家和 Key，也可以直接把中转站或自定义网关的 API 文档贴进来，我会解析地址、模型和鉴权，写成自定义接入。密钥只留在这台电脑。写好后，画布节点和下拉里就能选到。'
+      '语言模型已经就绪，我来帮你完成其余能力。建议按「视觉理解 → 图像生成 → 视频生成 → 配音」配置。你可以告诉我厂家和 Key，也可以直接粘贴中转站或自定义网关的 API 文档；我会解析地址、模型和鉴权并写入设置。密钥只留在这台电脑。'
   }
 ])
 const input = ref('')
@@ -52,6 +52,12 @@ const messages = computed<SetupMessage[]>(() =>
 )
 
 const llmGroups = computed(() => namedModelGroups(settings.config.llms ?? []))
+const abilityRows = computed(() => [
+  { id: 'vision', label: '视觉理解', ready: endpointReady(settings.config.vision), hint: '看图与画面质检' },
+  { id: 'image', label: '图像生成', ready: endpointReady(settings.config.image), hint: '人设、场景与分镜配图' },
+  { id: 'video', label: '视频生成', ready: endpointReady(settings.config.video), hint: '分镜图生成视频' },
+  { id: 'tts', label: '配音 TTS', ready: endpointReady(settings.config.tts), hint: '口播与角色声音' }
+])
 
 async function scrollToEnd() {
   await nextTick()
@@ -165,18 +171,31 @@ const statusText = computed(() => {
     </div>
 
     <template v-else>
-      <label class="llm-pick">
-        <span>本助手使用</span>
-        <select :value="`${settings.config.activeLlmId}::${settings.config.llm.model}`" @change="(e) => {
-          const v = (e.target as HTMLSelectElement).value
-          const i = v.indexOf('::')
-          if (i > 0) pickLlm(v.slice(0, i), v.slice(i + 2))
-        }">
-          <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
-            <option v-for="m in g.models" :key="g.id + m" :value="`${g.id}::${m}`">{{ m }}</option>
-          </optgroup>
-        </select>
-      </label>
+      <div class="ability-checklist">
+        <div v-for="item in abilityRows" :key="item.id" class="ability-item" :class="{ done: item.ready }">
+          <i>{{ item.ready ? '✓' : '○' }}</i>
+          <span><b>{{ item.label }}</b><small>{{ item.hint }}</small></span>
+          <button v-if="!item.ready" type="button" @click="useChip(chips.find((c) => c.label.includes(item.id === 'vision' ? '视觉' : item.id === 'image' ? '生图' : item.id === 'video' ? '视频' : '配音')) || { label: item.label, text: `帮我配置${item.label}` })">让助手配置</button>
+          <em v-else>已配置</em>
+        </div>
+      </div>
+
+      <details v-if="llmGroups.reduce((n, g) => n + g.models.length, 0) > 1" class="model-switch">
+        <summary>默认使用已配置的语言模型：<b>{{ llmLabel }}</b><span>需要时切换</span></summary>
+        <label class="llm-pick">
+          <span>切换本次助手使用的模型</span>
+          <select :value="`${settings.config.activeLlmId}::${settings.config.llm.model}`" @change="(e) => {
+            const v = (e.target as HTMLSelectElement).value
+            const i = v.indexOf('::')
+            if (i > 0) pickLlm(v.slice(0, i), v.slice(i + 2))
+          }">
+            <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
+              <option v-for="m in g.models" :key="g.id + m" :value="`${g.id}::${m}`">{{ m }}</option>
+            </optgroup>
+          </select>
+        </label>
+      </details>
+      <p v-else class="current-model">默认使用已配置的语言模型：<b>{{ llmLabel }}</b></p>
 
       <div ref="box" class="msgs">
         <template v-for="item in feed" :key="item.id">
@@ -222,7 +241,7 @@ const statusText = computed(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  height: 100%;
+  height: auto;
   max-width: 720px;
 }
 .head {
@@ -270,6 +289,44 @@ const statusText = computed(() => {
   color: var(--color-text-2);
   line-height: 1.6;
 }
+.ability-checklist {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ability-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+}
+.ability-item > i { color: var(--color-text-4); font-style: normal; font-weight: 700; }
+.ability-item.done > i,
+.ability-item.done > em { color: #34d399; }
+.ability-item > span {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+.ability-item b { color: var(--color-text-1); font-size: 12px; }
+.ability-item small { color: var(--color-text-4); font-size: 10px; }
+.ability-item button {
+  border: 0;
+  background: transparent;
+  color: #a78bfa;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ability-item em { font-style: normal; font-size: 11px; }
+@media (max-width: 680px) {
+  .ability-checklist { grid-template-columns: 1fr; }
+}
 .llm-pick {
   display: flex;
   align-items: center;
@@ -278,6 +335,27 @@ const statusText = computed(() => {
   font-size: 12px;
   color: var(--color-text-3);
 }
+.model-switch {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.model-switch summary {
+  cursor: pointer;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+.model-switch summary b { color: var(--color-text-2); font-weight: 600; }
+.model-switch summary span { float: right; color: #a78bfa; }
+.model-switch .llm-pick { margin: 10px 0 0; }
+.current-model {
+  margin: 0 0 10px;
+  color: var(--color-text-4);
+  font-size: 11px;
+}
+.current-model b { color: var(--color-text-2); }
 .llm-pick select {
   flex: 1;
   min-width: 0;
@@ -289,8 +367,9 @@ const statusText = computed(() => {
   color: var(--color-text-1);
 }
 .msgs {
-  flex: 1;
-  min-height: 240px;
+  flex: 0 1 auto;
+  min-height: 140px;
+  max-height: min(300px, 34vh);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -358,6 +437,10 @@ const statusText = computed(() => {
   color: var(--color-text-1);
   font: inherit;
   font-size: 13px;
+}
+.composer {
+  flex-shrink: 0;
+  padding-bottom: 4px;
 }
 .actions {
   display: flex;

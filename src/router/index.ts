@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
-import { useProjectStore, useAssetsStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useSettingsStore, endpointReady } from '@/stores'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -92,6 +92,18 @@ export const router = createRouter({
 router.beforeEach(async (to) => {
   const project = useProjectStore()
   const assets = useAssetsStore()
+  const settings = useSettingsStore()
+  await settings.ensureHydrated()
+
+  const llmReady = endpointReady(settings.config.llm)
+  const section = String(to.params.section || '')
+  if (!llmReady && to.name !== 'settings') {
+    return '/settings/llm'
+  }
+  if (to.name === 'settings' && !section) {
+    return llmReady ? '/settings/agent' : '/settings/llm'
+  }
+
   await project.ensureLoaded()
   await assets.refresh()
   project.startAutoSave()
