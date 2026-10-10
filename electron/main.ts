@@ -156,6 +156,21 @@ function resolvePreload() {
 
 function mimeOf(filePath: string) {
   switch (path.extname(filePath).toLowerCase()) {
+    case '.html':
+      return 'text/html; charset=utf-8'
+    case '.js':
+    case '.mjs':
+      return 'text/javascript; charset=utf-8'
+    case '.css':
+      return 'text/css; charset=utf-8'
+    case '.json':
+      return 'application/json; charset=utf-8'
+    case '.wasm':
+      return 'application/wasm'
+    case '.svg':
+      return 'image/svg+xml'
+    case '.ico':
+      return 'image/x-icon'
     case '.mp4':
       return 'video/mp4'
     case '.webm':
@@ -229,6 +244,17 @@ function fileRangeResponse(filePath: string, request: Request) {
 
 protocol.registerSchemesAsPrivileged([
   {
+    scheme: 'aicut-app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+      codeCache: true
+    }
+  },
+  {
     scheme: 'aicuts',
     privileges: {
       standard: true,
@@ -240,6 +266,40 @@ protocol.registerSchemesAsPrivileged([
     }
   }
 ])
+
+const ISOLATION_HEADERS = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+  'Cross-Origin-Resource-Policy': 'same-origin'
+}
+
+function appAssetResponse(request: Request) {
+  const distRoot = path.resolve(mainDir, '../dist')
+  let pathname = '/index.html'
+  try {
+    pathname = decodeURIComponent(new URL(request.url).pathname || '/index.html')
+  } catch {
+    return new Response('bad request', { status: 400 })
+  }
+  if (pathname === '/') pathname = '/index.html'
+
+  const filePath = path.resolve(distRoot, `.${pathname}`)
+  if (!isSameOrNested(distRoot, filePath) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    return new Response('not found', { status: 404, headers: ISOLATION_HEADERS })
+  }
+
+  const headers = {
+    ...ISOLATION_HEADERS,
+    'Content-Type': mimeOf(filePath),
+    'Content-Length': String(statSync(filePath).size)
+  }
+  if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
+  const stream = createReadStream(filePath)
+  return new Response(Readable.toWeb(stream) as ReadableStream, {
+    status: 200,
+    headers
+  })
+}
 
 const ROOT_NAME = 'AI-Cut'
 const ROOT_PREF_FILE = 'storage-root.json'
@@ -393,7 +453,7 @@ function createWindow() {
     win.loadURL(devUrl)
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    win.loadFile(path.join(mainDir, '../dist/index.html'))
+    win.loadURL('aicut-app://app/index.html')
   }
   win.webContents.on('did-finish-load', () => {
     console.log('[electron] preload', resolvePreload(), 'desktop api via preload.cjs')
@@ -415,6 +475,8 @@ app.whenReady().then(async () => {
   activeRoot = root
   await ensureDir(root)
   await openAppDb(root)
+
+  protocol.handle('aicut-app', appAssetResponse)
 
   protocol.handle('aicuts', (request) => {
     try {
