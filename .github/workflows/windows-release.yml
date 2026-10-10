@@ -46,7 +46,7 @@ jobs:
         id: installers
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path release -Recurse -Filter *.exe
+          $files = Get-ChildItem -Path release -Recurse -Filter *Setup*.exe
           if (-not $files) { throw '没有生成 Windows 安装包' }
           $files | ForEach-Object { Write-Host "安装包：$($_.FullName)" }
 
@@ -54,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AI-Short-Drama-Studio-Windows-${{ github.ref_name }}
-          path: release/**/*.exe
+          path: release/**/*Setup*.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -65,7 +65,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ github.ref_name }}'
-          $files = @(Get-ChildItem -Path release -Recurse -Filter *.exe | ForEach-Object { $_.FullName })
+          $files = @(Get-ChildItem -Path release -Recurse -Filter *Setup*.exe | ForEach-Object { $_.FullName })
           gh release create $tag @files `
             --repo '${{ github.repository }}' `
             --title "剧流 Studio $tag" `
