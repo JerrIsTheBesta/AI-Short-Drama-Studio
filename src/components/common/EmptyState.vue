@@ -8,7 +8,7 @@ defineProps<{
 
 <template>
   <div class="empty">
-    <div class="icon">{{ icon ?? '✨' }}</div>
+    <div class="icon"><slot name="icon">{{ icon ?? '' }}</slot></div>
     <div class="title">{{ title }}</div>
     <div v-if="description" class="desc">{{ description }}</div>
     <div v-if="$slots.action" class="action">

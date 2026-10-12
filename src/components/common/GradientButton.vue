@@ -24,7 +24,9 @@ const emit = defineEmits<{
     :disabled="disabled || loading"
     @click="emit('click', $event)"
   >
-    <span v-if="icon" class="icon">{{ icon }}</span>
+    <span v-if="$slots.icon || icon" class="icon">
+      <slot name="icon">{{ icon }}</slot>
+    </span>
     <span class="content">
       <slot />
     </span>
