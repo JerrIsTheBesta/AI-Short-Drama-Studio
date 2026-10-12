@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { Shot, TimelineClip, TransitionType } from '@/types'
+import EditIcon from '@/components/edit/EditIcon.vue'
 
 const props = defineProps<{
   clips: TimelineClip[]
@@ -8,6 +9,7 @@ const props = defineProps<{
   totalDuration: number
   selectedId: string | null
   playhead?: number
+  sourceDurations?: Record<string, number>
 }>()
 
 const emit = defineEmits<{
@@ -62,16 +64,33 @@ const ruler = computed(() => {
   return ticks
 })
 
-/** 拖拽右边缘调整时长 */
-function startResize(clip: TimelineClip, evt: MouseEvent) {
+/** 拖动片段边缘做真实素材裁剪：左侧改变入点，右侧改变出点。 */
+function startTrim(clip: TimelineClip, edge: 'left' | 'right', evt: MouseEvent) {
   evt.preventDefault()
+  evt.stopPropagation()
+  emit('select', clip.id)
   const startX = evt.clientX
   const startDuration = clip.duration
+  const startSourceIn = clip.sourceIn
+  const speed = Math.max(0.01, clip.speed || 1)
+  const sourceDuration = props.sourceDurations?.[clip.id]
+  const maxOutputDuration = sourceDuration
+    ? Math.max(0.1, (sourceDuration - startSourceIn) / speed)
+    : Number.POSITIVE_INFINITY
   const onMove = (e: MouseEvent) => {
-    const dx = e.clientX - startX
-    const dSec = dx / PX_PER_SECOND
-    const newDuration = Math.max(0.5, startDuration + dSec)
-    emit('update', clip.id, { duration: Number(newDuration.toFixed(2)) })
+    const delta = (e.clientX - startX) / PX_PER_SECOND
+    if (edge === 'left') {
+      const minDelta = -startSourceIn / speed
+      const maxDelta = startDuration - 0.1
+      const applied = Math.max(minDelta, Math.min(maxDelta, delta))
+      emit('update', clip.id, {
+        sourceIn: Number(Math.max(0, startSourceIn + applied * speed).toFixed(3)),
+        duration: Number(Math.max(0.1, startDuration - applied).toFixed(3))
+      })
+      return
+    }
+    const newDuration = Math.max(0.1, Math.min(maxOutputDuration, startDuration + delta))
+    emit('update', clip.id, { duration: Number(newDuration.toFixed(3)) })
   }
   const onUp = () => {
     document.removeEventListener('mousemove', onMove)
@@ -126,7 +145,7 @@ function startPlayheadDrag(evt: MouseEvent) {
   <div class="timeline">
     <div class="timeline-head">
       <div class="tl-info">
-        <span class="tl-label">⏱ 总时长</span>
+        <span class="tl-label"><EditIcon name="clock" :size="14" />总时长</span>
         <span class="tl-value gradient-text">{{ totalDuration }}s</span>
         <span class="tl-divider">·</span>
         <span class="tl-label">片段</span>
@@ -180,16 +199,21 @@ function startPlayheadDrag(evt: MouseEvent) {
             @drop.prevent="dropOn(clip, $event)"
           >
             <div class="clip-head">
-              <span class="clip-drag" title="拖动调整顺序">⠿</span>
+              <span class="clip-drag" title="拖动调整顺序"><EditIcon name="grip" :size="14" /></span>
               <span class="clip-num">#{{ shotOf(clip) ? (shotOf(clip)!.index + 1) : (clips.findIndex(c => c.id === clip.id) + 1) }}</span>
               <span class="clip-title">{{ shotOf(clip)?.title || clip.label || '视频素材' }}</span>
               <button
                 class="clip-remove"
                 @click.stop="emit('remove', clip.id)"
                 title="删除"
-              >×</button>
+              ><EditIcon name="close" :size="12" /></button>
             </div>
             <div class="clip-body">
+              <div
+                class="clip-handle clip-handle-left"
+                title="向右拖动，裁掉片段开头"
+                @mousedown="(e) => startTrim(clip, 'left', e)"
+              />
               <div
                 v-if="clip.transitionIn !== 'none'"
                 class="clip-transition"
@@ -198,14 +222,16 @@ function startPlayheadDrag(evt: MouseEvent) {
                 {{ transitionLabel(clip.transitionIn) }}
               </div>
               <div class="clip-duration">
-                {{ clip.duration.toFixed(1) }}s
+                <span>{{ clip.duration.toFixed(1) }}s</span>
+                <span v-if="clip.sourceIn > 0.01" class="trim-badge">入点 {{ clip.sourceIn.toFixed(1) }}s</span>
                 <span v-if="clip.speed !== 1" class="speed-badge">
                   {{ clip.speed }}x
                 </span>
               </div>
               <div
                 class="clip-handle clip-handle-right"
-                @mousedown="(e) => startResize(clip, e)"
+                title="向左拖动，裁掉片段结尾"
+                @mousedown="(e) => startTrim(clip, 'right', e)"
               />
             </div>
           </div>
@@ -238,6 +264,9 @@ function startPlayheadDrag(evt: MouseEvent) {
 }
 .tl-label {
   color: var(--color-text-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .tl-value {
   font-weight: 600;
@@ -266,7 +295,7 @@ function startPlayheadDrag(evt: MouseEvent) {
   position: relative;
   height: 24px;
   background: var(--color-bg-2);
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   margin-bottom: 8px;
   border: 1px solid var(--color-border);
 }
@@ -293,7 +322,7 @@ function startPlayheadDrag(evt: MouseEvent) {
   position: relative;
   min-height: 84px;
   background: var(--color-bg-2);
-  border-radius: var(--radius-sm);
+  border-radius: 7px;
   border: 1px solid var(--color-border);
   padding: 8px 0;
 }
@@ -313,9 +342,9 @@ function startPlayheadDrag(evt: MouseEvent) {
   position: absolute;
   top: 8px;
   height: 68px;
-  background: var(--grad-primary-soft);
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-sm);
+  background: #25324a;
+  border: 1px solid #496da9;
+  border-radius: 6px;
   cursor: pointer;
   transition: all var(--duration-fast);
   overflow: hidden;
@@ -324,11 +353,12 @@ function startPlayheadDrag(evt: MouseEvent) {
 }
 .clip:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  border-color: #7ea9ff;
+  box-shadow: none;
 }
 .clip.active {
-  border-color: var(--color-accent-2);
-  box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.3), var(--shadow-md);
+  border-color: #9bc0ff;
+  box-shadow: 0 0 0 2px rgba(126, 169, 255, .18);
 }
 .clip.disabled {
   opacity: 0.4;
@@ -373,7 +403,6 @@ function startPlayheadDrag(evt: MouseEvent) {
 .clip-drag {
   color: var(--color-text-3);
   cursor: grab;
-  font-size: 13px;
   line-height: 1;
   flex-shrink: 0;
 }
@@ -401,6 +430,8 @@ function startPlayheadDrag(evt: MouseEvent) {
   font-size: 12px;
   color: var(--color-text-3);
   line-height: 1;
+  display: grid;
+  place-items: center;
 }
 .clip-remove:hover {
   background: var(--color-error);
@@ -413,6 +444,17 @@ function startPlayheadDrag(evt: MouseEvent) {
   flex-direction: column;
   justify-content: space-between;
   position: relative;
+}
+.trim-badge {
+  overflow: hidden;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(126, 169, 255, .18);
+  color: #b9d1ff;
+  font-size: 9px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .clip-transition {
   font-size: 9px;
@@ -442,14 +484,20 @@ function startPlayheadDrag(evt: MouseEvent) {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 6px;
+  width: 8px;
   cursor: ew-resize;
-  background: transparent;
+  z-index: 3;
+  background: rgba(126, 169, 255, .08);
+}
+.clip-handle-left {
+  left: 0;
+  border-right: 1px solid rgba(126, 169, 255, .35);
 }
 .clip-handle-right {
   right: 0;
+  border-left: 1px solid rgba(126, 169, 255, .35);
 }
-.clip-handle-right:hover {
-  background: var(--color-accent);
+.clip-handle:hover {
+  background: #7ea9ff;
 }
 </style>

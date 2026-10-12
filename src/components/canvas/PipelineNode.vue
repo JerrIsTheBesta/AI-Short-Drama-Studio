@@ -21,6 +21,7 @@ import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
+import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
@@ -791,8 +792,8 @@ const cropStyle = computed(() => ({
           <button v-if="hasAsset" type="button" @click="downloadAsset">
             <span>⬇</span>下载
           </button>
-          <button type="button" class="icon" title="更多" @click="moreOpen = !moreOpen">⋯</button>
-          <button v-if="hasAsset" type="button" class="icon" title="全屏" @click="previewFull">⛶</button>
+          <button type="button" class="icon" title="更多" @click="moreOpen = !moreOpen"><CanvasToolbarIcon name="more" :size="17" /></button>
+          <button v-if="hasAsset" type="button" class="icon" title="查看大图" @click="previewFull"><CanvasToolbarIcon name="expand" :size="17" /></button>
           <div v-if="moreOpen" class="more">
             <button v-if="showPrompt" type="button" @click="copyPrompt(); moreOpen = false">复制提示词</button>
             <button

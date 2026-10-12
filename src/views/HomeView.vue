@@ -6,6 +6,7 @@ import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
+import HomeIcon from '@/components/common/HomeIcon.vue'
 import { isDesktop, desktop } from '@/services/desktop'
 import { pickCoverAssetId, projectCoverUrl } from '@/services/storage'
 import { pickLocalFiles } from '@/utils/pickLocalFiles'
@@ -34,11 +35,11 @@ const MAX_REMAKE_PRODUCTS = 8
 
 /** 比例预设（带尺寸） */
 const aspectPresets: { value: AspectRatio; label: string; desc: string; w: number; h: number }[] = [
-  { value: '16:9', label: '🖥 横版', desc: '电脑/YouTube', w: 1280, h: 720 },
-  { value: '9:16', label: '📱 竖版', desc: '抖音/小红书/手机', w: 720, h: 1280 },
-  { value: '1:1', label: '⬜ 方形', desc: 'Instagram/朋友圈', w: 1024, h: 1024 },
-  { value: '4:3', label: '📺 传统', desc: '传统电视/老视频', w: 1024, h: 768 },
-  { value: '21:9', label: '🎬 影院', desc: '电影宽屏', w: 1680, h: 720 }
+  { value: '16:9', label: '横版', desc: '电脑 / YouTube', w: 1280, h: 720 },
+  { value: '9:16', label: '竖版', desc: '抖音 / 小红书', w: 720, h: 1280 },
+  { value: '1:1', label: '方形', desc: '朋友圈 / 社交媒体', w: 1024, h: 1024 },
+  { value: '4:3', label: '传统', desc: '电视 / 经典画幅', w: 1024, h: 768 },
+  { value: '21:9', label: '影院', desc: '电影宽屏', w: 1680, h: 720 }
 ]
 
 const covers = ref<Record<string, string>>({})
@@ -463,10 +464,6 @@ async function moveSelectedLibrary() {
     <div class="hero">
       <div class="hero-bg" />
       <div class="hero-content">
-        <div class="brand">
-          <img class="brand-mark" src="/logo.png" alt="" />
-          <span class="brand-name">剧流 Studio</span>
-        </div>
         <h1 class="title">
           一句话，<span class="gradient-text">一条 AI 流水线</span>，<br />
           输出一条视频
@@ -475,13 +472,16 @@ async function moveSelectedLibrary() {
           桌面端无限画布 + 智能体：人设、分镜、配图、视频都在一张图上连起来。资源存在本地文件夹。
         </p>
         <div class="hero-actions">
-          <GradientButton size="lg" icon="✂" type="secondary" @click="openQuickEditor">
+          <GradientButton size="lg" type="secondary" @click="openQuickEditor">
+            <template #icon><HomeIcon name="scissors" :size="18" /></template>
             视频剪辑
           </GradientButton>
-          <GradientButton size="lg" icon="◉" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
+          <GradientButton size="lg" type="secondary" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
+            <template #icon><HomeIcon name="mic" :size="18" /></template>
             智能口播
           </GradientButton>
-          <GradientButton size="lg" icon="✨" @click="showCreateModal = true">
+          <GradientButton size="lg" @click="showCreateModal = true">
+            <template #icon><HomeIcon name="plus" :size="18" /></template>
             创建新项目
           </GradientButton>
           <GradientButton
@@ -492,10 +492,12 @@ async function moveSelectedLibrary() {
             :title="project.current?.folderPath || '请先创建或打开一个项目'"
             @click="openProjectFolder()"
           >
+            <template #icon><HomeIcon name="folder" :size="18" /></template>
             打开当前项目目录
           </GradientButton>
           <GradientButton size="lg" type="ghost" @click="router.push('/settings')">
-            ⚙ 接入 AI 能力
+            <template #icon><HomeIcon name="settings" :size="18" /></template>
+            接入 AI 能力
           </GradientButton>
         </div>
         <div class="stats">
@@ -542,26 +544,27 @@ async function moveSelectedLibrary() {
           </button>
         </div>
         <div v-if="homeTab === 'projects'" class="filter">
-          <input
-            v-model="search"
-            class="search"
-            placeholder="🔍 搜索项目..."
-          />
+          <HomeIcon class="search-icon" name="search" :size="17" />
+          <input v-model="search" class="search" placeholder="搜索项目" />
         </div>
         <button v-else type="button" class="lib-upload" :disabled="libUploading" @click="uploadLibraryImages">
-          {{ libUploading ? '上传中…' : `＋ 上传到${currentFolderLabel}` }}
+          <HomeIcon name="upload" :size="16" />
+          {{ libUploading ? '上传中…' : `上传到${currentFolderLabel}` }}
         </button>
       </div>
 
       <div v-if="homeTab === 'projects'">
       <EmptyState
         v-if="filteredProjects.length === 0"
-        icon="🎬"
         title="还没有项目"
         description="点击「创建新项目」开始你的第一条视频"
       >
+        <template #icon><HomeIcon name="film" :size="44" /></template>
         <template #action>
-          <GradientButton @click="showCreateModal = true">创建新项目</GradientButton>
+          <GradientButton @click="showCreateModal = true">
+            <template #icon><HomeIcon name="plus" :size="16" /></template>
+            创建新项目
+          </GradientButton>
         </template>
       </EmptyState>
 
@@ -578,7 +581,7 @@ async function moveSelectedLibrary() {
             <img v-if="covers[p.id]" class="proj-cover" :src="covers[p.id]" alt="" />
             <div v-else class="proj-thumb-grad" :data-style="p.script?.style || 'cinematic'" />
             <div v-if="!covers[p.id]" class="proj-thumb-overlay">
-              <div class="proj-thumb-icon">🎬</div>
+              <div class="proj-thumb-icon"><HomeIcon name="film" :size="42" /></div>
             </div>
             <div class="proj-meta-top">
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
@@ -586,21 +589,21 @@ async function moveSelectedLibrary() {
               <Tag v-else-if="p.pipelineMode === 'smart-speech'" type="success" size="sm">智能口播</Tag>
               <Tag v-else-if="p.pipelineMode === 'drama'" type="accent" size="sm">AI 短剧 · {{ p.chapters?.length || 0 }} 章</Tag>
               <Tag v-if="p.shots.length > 0" type="accent" size="sm">
-                🎬 {{ p.shots.length }} 个分镜
+                <HomeIcon name="film" :size="12" />{{ p.shots.length }} 个分镜
               </Tag>
               <Tag
                 v-if="p.shots.some((s) => s.imageAssetId)"
                 type="info"
                 size="sm"
               >
-                🖼 {{ p.shots.filter((s) => s.imageAssetId).length }} 张图
+                <HomeIcon name="image" :size="12" />{{ p.shots.filter((s) => s.imageAssetId).length }} 张图
               </Tag>
               <Tag
                 v-if="p.shots.some((s) => s.videoAssetId)"
                 type="success"
                 size="sm"
               >
-                🎥 {{ p.shots.filter((s) => s.videoAssetId).length }} 段视频
+                <HomeIcon name="video" :size="12" />{{ p.shots.filter((s) => s.videoAssetId).length }} 段视频
               </Tag>
             </div>
           </div>
@@ -619,14 +622,14 @@ async function moveSelectedLibrary() {
                   :title="p.folderPath ? '打开项目目录' : '该项目没有本地目录记录'"
                   @click="openProjectFolder(p.id)"
                 >
-                  📁
+                  <HomeIcon name="folder" :size="16" />
                 </button>
                 <button
                   class="proj-del"
                   title="删除"
                   @click="deleteProject(p.id)"
                 >
-                  🗑
+                  <HomeIcon name="trash" :size="16" />
                 </button>
               </div>
             </div>
@@ -644,6 +647,7 @@ async function moveSelectedLibrary() {
             :class="{ on: libFolderId === LIBRARY_PUBLIC_ID }"
             @click="selectLibFolder(LIBRARY_PUBLIC_ID)"
           >
+            <HomeIcon name="library" :size="16" />
             <span>公共资产</span>
             <em>{{ library.folderCount(LIBRARY_PUBLIC_ID) }}</em>
           </button>
@@ -668,7 +672,7 @@ async function moveSelectedLibrary() {
               title="重命名"
               @click="startRenameFolder(f.id, f.name)"
             >
-              ✎
+              <HomeIcon name="edit" :size="14" />
             </button>
             <button
               type="button"
@@ -676,7 +680,7 @@ async function moveSelectedLibrary() {
               title="删除文件夹"
               @click="removeLibFolder(f.id, f.name)"
             >
-              🗑
+              <HomeIcon name="trash" :size="14" />
             </button>
           </div>
           <form class="lib-new-folder" @submit.prevent="createLibFolder">
@@ -705,7 +709,6 @@ async function moveSelectedLibrary() {
           </div>
           <EmptyState
             v-if="visibleLibraryAssets.length === 0"
-            :icon="library.all.length === 0 ? '🖼' : '📂'"
             :title="
               library.all.length === 0 && libFolderId === LIBRARY_PUBLIC_ID
                 ? '资产库还是空的'
@@ -716,7 +719,11 @@ async function moveSelectedLibrary() {
                 ? '上传图片，或在项目画布里把生成图加入公共库'
                 : '上传到这里，或从公共资产勾选后点「转移」'
             "
-          />
+          >
+            <template #icon>
+              <HomeIcon :name="library.all.length === 0 ? 'image' : 'folder'" :size="44" />
+            </template>
+          </EmptyState>
           <div v-else class="lib-grid">
             <div
               v-for="a in visibleLibraryAssets"
@@ -733,11 +740,11 @@ async function moveSelectedLibrary() {
               </label>
               <button type="button" class="lib-thumb" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
                 <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
-                <span v-else>🖼</span>
+                <span v-else><HomeIcon name="image" :size="30" /></span>
               </button>
               <div class="lib-meta">
                 <span>{{ a.filename }}</span>
-                <button type="button" title="删除" @click="removeLibraryItem(a.id)">🗑</button>
+                <button type="button" title="删除" @click="removeLibraryItem(a.id)"><HomeIcon name="trash" :size="14" /></button>
               </div>
             </div>
           </div>
@@ -757,7 +764,7 @@ async function moveSelectedLibrary() {
                 : pipelineMode === 'remake'
                   ? '上传参考视频和产品图，AI 会按镜头复刻脚本；配音后期合成，视频里不出口播。'
                   : pipelineMode === 'img2video'
-                    ? '自由画布：右键添加图片、视频和剧本。剧本可以提炼角色、场景和分镜。'
+                    ? '无限画布自由操作，可按需添加图片、视频和剧本。'
                     : '起个好名字，下一步可以填具体文案'
             }}
           </p>
@@ -776,14 +783,16 @@ async function moveSelectedLibrary() {
                   :class="{ active: pipelineMode === 'standard' }"
                   @click="pipelineMode = 'standard'"
                 >
-                  <div class="mode-title">普通创作</div>
-                  <div class="mode-desc">从主题/文案写剧本</div>
+                  <HomeIcon name="wand" :size="20" />
+                  <div class="mode-title">一键创作</div>
+                  <div class="mode-desc">自动全流程，写剧本，分镜出片</div>
                 </button>
                 <button
                   class="mode-pick"
                   :class="{ active: pipelineMode === 'remake' }"
                   @click="pipelineMode = 'remake'"
                 >
+                  <HomeIcon name="remake" :size="20" />
                   <div class="mode-title">视频复刻</div>
                   <div class="mode-desc">按参考视频镜头换上你的产品</div>
                 </button>
@@ -792,8 +801,9 @@ async function moveSelectedLibrary() {
                   :class="{ active: pipelineMode === 'img2video' }"
                   @click="pipelineMode = 'img2video'"
                 >
+                  <HomeIcon name="canvas" :size="20" />
                   <div class="mode-title">自由模式</div>
-                  <div class="mode-desc">画布上自由加图片、视频和剧本</div>
+                  <div class="mode-desc">无限画布自由操作</div>
                 </button>
               </div>
             </label>
@@ -819,7 +829,7 @@ async function moveSelectedLibrary() {
                   </button>
                 </div>
                 <button v-else type="button" class="video-add" @click="pickRemakeVideo">
-                  ＋ 上传参考视频
+                  <HomeIcon name="upload" :size="18" />上传参考视频
                 </button>
                 <p class="upload-hint">支持 mp4 / mov 等常见视频，会抽帧理解镜头语言。</p>
               </div>
@@ -842,7 +852,7 @@ async function moveSelectedLibrary() {
                     class="product-add"
                     @click="pickRemakeProducts"
                   >
-                    ＋ 上传产品图
+                    <HomeIcon name="plus" :size="18" />上传产品图
                   </button>
                 </div>
               </div>
@@ -888,7 +898,8 @@ async function moveSelectedLibrary() {
 
           <div class="modal-actions">
             <GradientButton type="ghost" :disabled="creating" @click="closeCreateModal">取消</GradientButton>
-            <GradientButton icon="✨" :loading="creating" :disabled="creating" @click="createProject">
+            <GradientButton :loading="creating" :disabled="creating" @click="createProject">
+              <template #icon><HomeIcon name="wand" :size="16" /></template>
               {{ pipelineMode === 'remake' ? '创建并分析视频' : '创建并开始' }}
             </GradientButton>
           </div>
@@ -902,84 +913,106 @@ async function moveSelectedLibrary() {
 .home {
   height: 100%;
   overflow-y: auto;
-  background: var(--color-bg-0);
+  background: #0f1014;
 }
 .hero {
   position: relative;
-  min-height: 420px;
+  min-height: 380px;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 .hero-bg {
   position: absolute;
   inset: 0;
-  background: var(--color-bg-0);
+  background:
+    radial-gradient(circle at 72% 24%, rgba(91, 132, 255, 0.12), transparent 34%),
+    linear-gradient(180deg, #151721 0%, #101116 100%);
   z-index: 0;
+}
+.hero-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.22;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.18) 0.7px, transparent 0.7px);
+  background-size: 22px 22px;
+  mask-image: linear-gradient(to right, transparent 10%, #000 65%, transparent);
 }
 .hero-content {
   position: relative;
   z-index: 1;
-  text-align: center;
-  padding: var(--space-8) var(--space-5);
-  max-width: 900px;
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: var(--space-6);
-}
-.brand-mark {
-  display: block;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
-  object-fit: contain;
-}
-.brand-name {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--color-text-1);
-  letter-spacing: 0.5px;
+  width: min(1180px, calc(100% - 40px));
+  padding: 54px 0 42px;
 }
 .title {
-  font-size: 48px;
-  font-weight: 800;
-  line-height: 1.2;
-  margin: 0 0 var(--space-5);
-  letter-spacing: -0.02em;
+  max-width: 760px;
+  font-size: clamp(36px, 4vw, 54px);
+  font-weight: 720;
+  line-height: 1.14;
+  margin: 0 0 18px;
+  letter-spacing: -0.035em;
 }
 .subtitle {
-  font-size: 16px;
+  max-width: 720px;
+  font-size: 15px;
   color: var(--color-text-2);
-  margin: 0 0 var(--space-8);
-  letter-spacing: 0.3px;
+  margin: 0 0 26px;
+  line-height: 1.7;
 }
 .hero-actions {
   display: flex;
-  gap: var(--space-3);
-  justify-content: center;
-  margin-bottom: var(--space-10);
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 34px;
+}
+.hero-actions :deep(.grad-btn) {
+  min-height: 42px;
+  padding: 10px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  box-shadow: none;
+}
+.hero-actions :deep(.type-primary) {
+  background: #6f8cff;
+  border: 1px solid #6f8cff;
+}
+.hero-actions :deep(.type-primary:hover:not(:disabled)) {
+  background: #8099ff;
+}
+.hero-actions :deep(.type-secondary) {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.11);
+}
+.hero-actions :deep(.type-secondary:hover:not(:disabled)),
+.hero-actions :deep(.type-ghost:hover:not(:disabled)) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.18);
 }
 .stats {
   display: flex;
-  gap: var(--space-6);
-  justify-content: center;
-  padding-top: var(--space-6);
-  border-top: 1px solid var(--color-border);
-  max-width: 600px;
-  margin: 0 auto;
+  width: fit-content;
+  gap: 0;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
 }
 .stat {
-  text-align: center;
+  min-width: 112px;
+  padding: 3px 18px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+.stat:last-child {
+  border-right: 0;
 }
 .stat-value {
-  font-size: 24px;
-  font-weight: 700;
+  font-size: 20px;
+  font-weight: 650;
   color: var(--color-text-1);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .stat-label {
   font-size: 12px;
@@ -990,7 +1023,7 @@ async function moveSelectedLibrary() {
 .container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: var(--space-8) var(--space-5) var(--space-12);
+  padding: 30px 20px 52px;
 }
 .section-header {
   display: flex;
@@ -1005,15 +1038,19 @@ async function moveSelectedLibrary() {
 }
 .home-tabs {
   display: flex;
-  gap: 6px;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
 }
 .home-tabs button {
   margin: 0;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  border-radius: 10px;
+  padding: 7px 13px;
+  border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--color-text-3);
@@ -1032,19 +1069,31 @@ async function moveSelectedLibrary() {
   color: var(--color-text-4);
 }
 .home-tabs button.on {
-  background: var(--color-bg-2);
-  border-color: var(--color-border);
+  background: rgba(255, 255, 255, 0.09);
+  border-color: transparent;
   color: var(--color-text-1);
 }
 .home-tabs button.on em {
   background: var(--color-fill-strong);
   color: var(--color-text-2);
 }
+.filter {
+  position: relative;
+}
+.search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  z-index: 1;
+  color: var(--color-text-4);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
 .search {
-  background: var(--color-bg-2);
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 8px 14px;
+  padding: 9px 14px 9px 38px;
   font-size: 13px;
   color: var(--color-text-1);
   outline: none;
@@ -1059,15 +1108,19 @@ async function moveSelectedLibrary() {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: var(--space-5);
+  gap: 16px;
 }
 .proj {
   cursor: pointer;
   overflow: hidden;
-  transition: transform var(--duration-fast) var(--ease-out);
+  border-radius: 12px !important;
+  box-shadow: none !important;
+  transition: border-color var(--duration-fast), background var(--duration-fast) !important;
 }
 .proj:hover {
-  transform: translateY(-4px);
+  transform: none !important;
+  border-color: rgba(132, 158, 255, 0.36) !important;
+  background: #191b22 !important;
 }
 .proj-thumb {
   position: relative;
@@ -1105,8 +1158,8 @@ async function moveSelectedLibrary() {
   justify-content: center;
 }
 .proj-thumb-icon {
-  font-size: 48px;
-  opacity: 0.4;
+  color: var(--color-text-4);
+  opacity: 0.7;
 }
 .proj-meta-top {
   position: absolute;
@@ -1149,9 +1202,9 @@ async function moveSelectedLibrary() {
   color: var(--color-text-4);
 }
 .proj-del {
-  font-size: 13px;
-  opacity: 0.4;
-  padding: 4px 6px;
+  display: inline-flex;
+  opacity: 0.55;
+  padding: 5px;
   border-radius: var(--radius-sm);
   transition: all var(--duration-fast);
 }
@@ -1160,9 +1213,9 @@ async function moveSelectedLibrary() {
   background: rgba(239, 68, 68, 0.15);
 }
 .proj-folder {
-  font-size: 13px;
+  display: inline-flex;
   opacity: 0.55;
-  padding: 4px 6px;
+  padding: 5px;
   border-radius: var(--radius-sm);
   transition: all var(--duration-fast);
 }
@@ -1235,9 +1288,9 @@ async function moveSelectedLibrary() {
   gap: var(--space-2);
 }
 .style-pick {
-  padding: 8px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
+  padding: 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--color-border);
   color: var(--color-text-2);
   font-size: 12px;
@@ -1248,9 +1301,9 @@ async function moveSelectedLibrary() {
   border-color: var(--color-border-strong);
 }
 .style-pick.active {
-  background: var(--grad-primary-soft);
-  border-color: var(--color-accent);
-  color: var(--color-text-1);
+  background: rgba(111, 140, 255, 0.13);
+  border-color: rgba(111, 140, 255, 0.7);
+  color: #cbd5ff;
 }
 
 .aspect-grid {
@@ -1260,7 +1313,7 @@ async function moveSelectedLibrary() {
 }
 .aspect-pick {
   text-align: left;
-  background: var(--color-bg-2);
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   padding: 10px;
@@ -1274,8 +1327,8 @@ async function moveSelectedLibrary() {
   border-color: var(--color-border-strong);
 }
 .aspect-pick.active {
-  background: var(--grad-primary-soft);
-  border-color: var(--color-accent);
+  background: rgba(111, 140, 255, 0.11);
+  border-color: rgba(111, 140, 255, 0.72);
 }
 .aspect-pick.active .aspect-label {
   color: var(--color-text-1);
@@ -1328,25 +1381,32 @@ async function moveSelectedLibrary() {
 }
 .mode-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-2);
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
 }
 .mode-pick {
   text-align: left;
-  padding: 12px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
+  padding: 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid var(--color-border);
   color: var(--color-text-2);
   transition: all var(--duration-fast);
+}
+.mode-pick > .home-icon {
+  margin-bottom: 12px;
+  color: var(--color-text-3);
 }
 .mode-pick:hover {
   border-color: var(--color-border-strong);
 }
 .mode-pick.active {
-  background: var(--grad-primary-soft);
-  border-color: var(--color-accent);
-  color: var(--color-text-1);
+  background: rgba(111, 140, 255, 0.11);
+  border-color: rgba(111, 140, 255, 0.72);
+  color: #e7ebff;
+}
+.mode-pick.active > .home-icon {
+  color: #8fa6ff;
 }
 .mode-title {
   font-size: 13px;
@@ -1395,6 +1455,7 @@ async function moveSelectedLibrary() {
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  gap: 8px;
 }
 .replace-video {
   padding: 8px;
@@ -1462,6 +1523,8 @@ async function moveSelectedLibrary() {
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  flex-direction: column;
+  gap: 6px;
 }
 .product-add:hover {
   border-color: var(--color-accent);
@@ -1493,10 +1556,11 @@ async function moveSelectedLibrary() {
 .lib-upload {
   display: inline-flex;
   align-items: center;
-  padding: 6px 12px;
+  gap: 7px;
+  padding: 8px 12px;
   border-radius: 8px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-2);
+  background: rgba(255, 255, 255, 0.045);
   color: var(--color-text-1);
   font-size: 12px;
   cursor: pointer;
@@ -1511,7 +1575,7 @@ async function moveSelectedLibrary() {
   position: sticky;
   top: 12px;
   padding: 12px;
-  background: var(--color-bg-1);
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
@@ -1556,8 +1620,8 @@ async function moveSelectedLibrary() {
   color: var(--color-text-4);
 }
 .lib-folder.on {
-  background: var(--color-fill-strong);
-  border-color: var(--color-border-strong);
+  background: rgba(111, 140, 255, 0.11);
+  border-color: rgba(111, 140, 255, 0.34);
   color: var(--color-text-1);
 }
 .lib-folder-act {
@@ -1567,7 +1631,7 @@ async function moveSelectedLibrary() {
   border: none;
   color: var(--color-text-4);
   cursor: pointer;
-  font-size: 11px;
+  display: inline-flex;
 }
 .lib-folder-act:hover {
   color: var(--color-text-1);
@@ -1656,7 +1720,7 @@ async function moveSelectedLibrary() {
   position: relative;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   overflow: hidden;
 }
 .lib-card.picked {
@@ -1717,11 +1781,25 @@ async function moveSelectedLibrary() {
   border: none;
   cursor: pointer;
   color: var(--color-text-4);
+  display: inline-flex;
 }
+.proj-meta-top :deep(.tag) { gap: 4px; }
+.modal-actions :deep(.grad-btn) { border-radius: 8px; box-shadow: none; }
 .lib-meta button:hover {
   color: var(--color-error);
 }
 @media (max-width: 720px) {
+  .hero-content {
+    width: min(calc(100% - 28px), 1180px);
+    padding-top: 36px;
+  }
+  .title { font-size: 36px; }
+  .stats { width: 100%; }
+  .stat { min-width: 0; flex: 1; padding-inline: 8px; }
+  .section-header { align-items: stretch; gap: 12px; flex-direction: column; }
+  .search { width: 100%; }
+  .mode-grid,
+  .aspect-grid { grid-template-columns: 1fr 1fr; }
   .lib-layout {
     grid-template-columns: 1fr;
   }
