@@ -14,6 +14,7 @@ import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
+import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
@@ -513,8 +514,8 @@ function removeSelf() {
           <button v-if="hasAsset" type="button" @click="downloadAsset">
             <span>⬇</span>下载
           </button>
-          <button type="button" class="icon" title="更多" @click="moreOpen = !moreOpen">⋯</button>
-          <button v-if="hasAsset" type="button" class="icon" title="全屏" @click="previewFull">⛶</button>
+          <button type="button" class="icon" title="更多" @click="moreOpen = !moreOpen"><CanvasToolbarIcon name="more" :size="17" /></button>
+          <button v-if="hasAsset" type="button" class="icon" title="查看大图" @click="previewFull"><CanvasToolbarIcon name="expand" :size="17" /></button>
           <div v-if="moreOpen" class="more">
             <button type="button" @click="copyPrompt">复制提示词</button>
             <button type="button" @click="duplicateSelf">复制节点</button>
@@ -532,7 +533,6 @@ function removeSelf() {
           class="nodrag nowheel frame"
           :src="posterUrl"
           alt=""
-          @click.stop="previewFull"
         />
         <div v-else class="ready">视频已生成</div>
         <button
@@ -547,10 +547,9 @@ function removeSelf() {
       </template>
       <img
         v-else-if="mediaUrl"
-        class="nodrag nowheel zoomable"
+        class="nodrag nowheel"
         :src="mediaUrl"
         alt=""
-        @click.stop="previewFull"
       />
       <div
         v-else
