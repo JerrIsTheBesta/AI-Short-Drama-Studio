@@ -240,6 +240,8 @@ export async function providerHttp(
     method?: string
     headers?: Record<string, string>
     body?: string
+    bodyBase64?: string
+    contentType?: string
     signal?: AbortSignal
     timeoutMs?: number
   } = {}
@@ -267,7 +269,9 @@ export async function providerHttp(
       extraHeaders: Object.fromEntries(
         Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization')
       ),
-      body: init.body,
+      body: init.bodyBase64 ? undefined : init.body,
+      bodyBase64: init.bodyBase64,
+      contentType: init.contentType,
       timeoutMs
     })
     return {
@@ -290,10 +294,19 @@ export async function providerHttp(
   const onAbort = () => controller.abort()
   init.signal?.addEventListener('abort', onAbort)
   try {
+    const headers = { ...(init.headers || {}) }
+    let body: BodyInit | undefined = init.body
+    if (init.bodyBase64) {
+      const binary = atob(init.bodyBase64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      body = bytes
+      if (init.contentType) headers['Content-Type'] = init.contentType
+    }
     const resp = await fetch(url, {
       method,
-      headers: init.headers,
-      body: init.body,
+      headers,
+      body,
       signal: controller.signal
     })
     const bytes = await resp.arrayBuffer()

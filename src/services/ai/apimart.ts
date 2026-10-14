@@ -285,6 +285,72 @@ async function mediaFromJson(
   return downloadMedia(url, authorization, signal)
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+function multipartFile(bytes: Uint8Array, filename: string, mime: string) {
+  const boundary = `----AiCut${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`
+  const head = new TextEncoder().encode(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`
+  )
+  const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`)
+  const body = new Uint8Array(head.length + bytes.length + tail.length)
+  body.set(head, 0)
+  body.set(bytes, head.length)
+  body.set(tail, head.length + bytes.length)
+  return {
+    bodyBase64: bytesToBase64(body),
+    contentType: `multipart/form-data; boundary=${boundary}`
+  }
+}
+
+async function uploadReferenceImage(
+  root: string,
+  authorization: string,
+  blob: Blob,
+  signal?: AbortSignal
+): Promise<string> {
+  const file = dataUriToBlob(await referenceDataUrl(blob))
+  const bytes = new Uint8Array(await file.blob.arrayBuffer())
+  if (bytes.byteLength > 20 * 1024 * 1024) throw new Error('参考图超过 20MB，无法上传')
+  const part = multipartFile(bytes, 'reference.jpg', file.mimeType || 'image/jpeg')
+  const resp = await providerHttp(`${root}/v1/uploads/images`, {
+    method: 'POST',
+    headers: { Authorization: authorization, Accept: 'application/json' },
+    bodyBase64: part.bodyBase64,
+    contentType: part.contentType,
+    signal,
+    timeoutMs: 120_000
+  })
+  const json = await readJson(resp)
+  const url = String(json?.url || json?.data?.url || '').trim()
+  if (!/^https?:\/\//i.test(url)) throw new Error('上传参考图没有返回可用地址')
+  return url
+}
+
+async function uploadReferenceImages(
+  root: string,
+  authorization: string,
+  blobs: Blob[],
+  limit: number,
+  signal?: AbortSignal,
+  onProgress?: (msg: string) => void
+): Promise<string[]> {
+  const list = blobs.slice(0, limit)
+  const urls: string[] = []
+  for (let i = 0; i < list.length; i++) {
+    onProgress?.(`上传参考图 ${i + 1}/${list.length}...`)
+    urls.push(await uploadReferenceImage(root, authorization, list[i], signal))
+  }
+  return urls
+}
+
 export async function apimartGenerateImage(opts: {
   baseUrl?: string
   apiKey: string
@@ -300,10 +366,14 @@ export async function apimartGenerateImage(opts: {
   const root = apimartRoot(opts.baseUrl)
   const authorization = bearer(opts.apiKey)
   const model = pickModel(opts.model, APIMART_IMAGE_MODEL)
-  const imageUrls: string[] = []
-  for (const blob of (opts.referenceImages || []).slice(0, 15)) {
-    imageUrls.push(await referenceDataUrl(blob))
-  }
+  const imageUrls = await uploadReferenceImages(
+    root,
+    authorization,
+    opts.referenceImages || [],
+    15,
+    opts.signal,
+    opts.onProgress
+  )
   const count = Math.max(1, Math.round(Number(opts.n) || 1))
   const body: Record<string, unknown> = {
     model,
@@ -352,12 +422,14 @@ export async function apimartGenerateVideo(opts: {
   const duration = videoSeconds(model, opts.duration)
   let taskId = String(opts.resumeTaskId || '').trim()
   if (!taskId) {
-    const imageUrls: string[] = []
-    for (const blob of (opts.images || []).slice(0, 7)) {
-      const url = await blobToDataUrl(blob)
-      if (/^https?:\/\//i.test(url)) imageUrls.push(url)
-      else if (url.startsWith('data:')) imageUrls.push(url)
-    }
+    const imageUrls = await uploadReferenceImages(
+      root,
+      authorization,
+      opts.images || [],
+      7,
+      opts.signal,
+      opts.onProgress
+    )
     const body: Record<string, unknown> = {
       model,
       prompt: opts.prompt,

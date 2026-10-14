@@ -746,6 +746,8 @@ app.whenReady().then(async () => {
     authorization?: string
     extraHeaders?: Record<string, string>
     body?: string
+    bodyBase64?: string
+    contentType?: string
     timeoutMs?: number
   }) => {
     const url = String(opts?.url || '')
@@ -769,11 +771,17 @@ app.whenReady().then(async () => {
       }
       const token = String(opts?.authorization || '').trim()
       if (token) headers.Authorization = token
-      if (method === 'POST') headers['Content-Type'] = 'application/json'
+      const requestType = String(opts?.contentType || '').trim()
+      if (method === 'POST') headers['Content-Type'] = requestType || 'application/json'
+      const rawBody = method === 'POST'
+        ? opts?.bodyBase64
+          ? Buffer.from(String(opts.bodyBase64), 'base64')
+          : String(opts?.body || '')
+        : undefined
       const res = await net.fetch(url, {
         method,
         headers,
-        body: method === 'POST' ? String(opts?.body || '') : undefined,
+        body: rawBody,
         signal: controller.signal
       })
       const contentType = res.headers.get('content-type') || ''
