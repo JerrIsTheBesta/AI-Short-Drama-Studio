@@ -72,16 +72,31 @@ export function getVideoPromptStyle(): VideoPromptStyle {
   return pick()?.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
 }
 
-export function getVideoConfig() {
+export function getVideoConfig(profileId?: string) {
   const d = envDefaults().video
-  const s = pick()?.video
+  const settings = pick()
+  let s = profileId
+    ? settings?.videos?.find((profile) => profile.id === profileId) || settings?.video
+    : settings?.video
+  // 兼容旧节点/旧配置：曾出现 adapter 已是 Zealman、地址却从默认 AutoDL 回填的混合配置。
+  if (s?.adapter?.type === 'zealman-workflow' && /autodl\.art/i.test(s.baseUrl || '')) {
+    s = settings?.videos?.find(
+      (profile) =>
+        profile.provider === 'zealman' &&
+        profile.workflowId === s?.workflowId &&
+        !/autodl\.art/i.test(profile.baseUrl || '')
+    ) || settings?.videos?.find(
+      (profile) => profile.provider === 'zealman' && !/autodl\.art/i.test(profile.baseUrl || '')
+    ) || s
+  }
   return {
     baseUrl: migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
     apiKey: s?.apiKey || d.apiKey,
     workflowId: migrateVideoWorkflowId(s?.workflowId || d.workflowId),
     promptStyle: getVideoPromptStyle(),
     adapter: s?.adapter,
-    provider: s?.provider
+    provider: s?.provider,
+    zealmanBaseUrl: settings?.zealmanBaseUrl || ''
   }
 }
 

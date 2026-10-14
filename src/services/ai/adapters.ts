@@ -17,6 +17,7 @@ export type AdapterType =
   | 'openai-images'
   | 'http-custom'
   | 'comfyui-workflow'
+  | 'zealman-workflow'
   | 'comfyui-prompt'
 
 export interface AdapterConfig {
@@ -90,7 +91,7 @@ export function resolveImageAdapter(ep: EndpointLike): AdapterType {
 /** 推断视频适配器 */
 export function resolveVideoAdapter(ep: EndpointLike): AdapterType {
   const t = ep.adapter?.type
-  if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'comfyui-workflow') return t
+  if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'comfyui-workflow' || t === 'zealman-workflow') return t
   const url = ep.baseUrl || ''
   if (isAutodlHost(url) || ep.provider === 'autodl') return 'comfyui-workflow'
   if (ep.provider === 'custom' || isLocalComfyHost(url) || /comfy/i.test(url)) return 'comfyui-prompt'
@@ -165,6 +166,7 @@ export type ProxyHttpResult = {
   status: number
   text: () => Promise<string>
   json: () => Promise<any>
+  blob: () => Promise<Blob>
 }
 
 /**
@@ -183,8 +185,8 @@ export async function providerHttp(
 ): Promise<ProxyHttpResult> {
   const method = (init.method || 'GET').toUpperCase()
   const timeoutMs = init.timeoutMs ?? 60_000
-  const preferProxy =
-    isDesktop() && (isAutodlHost(url) || isLocalComfyHost(url) || /\/api\/v1\/comfyui\//i.test(url))
+  // 桌面端统一走主进程，既绕过云端 ComfyUI 的 CORS，也让 /view 二进制输出可用。
+  const preferProxy = isDesktop()
 
   if (preferProxy) {
     const api = desktop()
@@ -201,6 +203,9 @@ export async function providerHttp(
       url,
       method,
       authorization: String(auth || ''),
+      extraHeaders: Object.fromEntries(
+        Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization')
+      ),
       body: init.body,
       timeoutMs
     })
@@ -208,7 +213,14 @@ export async function providerHttp(
       ok: res.ok,
       status: res.status,
       text: async () => res.text,
-      json: async () => JSON.parse(res.text || '{}')
+      json: async () => JSON.parse(res.text || '{}'),
+      blob: async () => {
+        if (!res.dataBase64) return new Blob([res.text || ''], { type: res.contentType || 'application/octet-stream' })
+        const binary = atob(res.dataBase64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        return new Blob([bytes], { type: res.contentType || 'application/octet-stream' })
+      }
     }
   }
 
@@ -223,7 +235,8 @@ export async function providerHttp(
       body: init.body,
       signal: controller.signal
     })
-    const text = await resp.text()
+    const bytes = await resp.arrayBuffer()
+    const text = new TextDecoder().decode(bytes)
     return {
       ok: resp.ok,
       status: resp.status,
@@ -234,7 +247,8 @@ export async function providerHttp(
         } catch {
           throw new Error(`响应不是 JSON：${text.slice(0, 120)}`)
         }
-      }
+      },
+      blob: async () => new Blob([bytes], { type: resp.headers.get('content-type') || 'application/octet-stream' })
     }
   } finally {
     clearTimeout(timer)
@@ -547,7 +561,12 @@ export async function comfyPromptGenerate(opts: {
       (adapter.resultJsonPath ? getByJsonPath(entry, adapter.resultJsonPath) : null) ||
       findFirstMediaUrl(entry)
     if (typeof direct === 'string' && /^https?:\/\//i.test(direct)) {
-      const r = await fetch(direct, { signal: opts.signal })
+      const r = await providerHttp(direct, {
+        method: 'GET',
+        headers: buildAuthHeader(opts.apiKey || '', adapter),
+        signal: opts.signal,
+        timeoutMs: 180_000
+      })
       if (!r.ok) throw new Error(`[comfyui] 下载失败 ${r.status}`)
       const blob = await r.blob()
       return {
@@ -570,15 +589,10 @@ export async function comfyPromptGenerate(opts: {
         signal: opts.signal,
         timeoutMs: 180_000
       })
-      // providerHttp returns text — for binary we need raw fetch for /view
-      const binResp = await fetch(viewUrl, {
-        headers: buildAuthHeader(opts.apiKey || '', adapter),
-        signal: opts.signal
-      })
-      if (!binResp.ok) {
-        throw new Error(`[comfyui] /view 失败 ${binResp.status}（poll=${view.status}）`)
+      if (!view.ok) {
+        throw new Error(`[comfyui] /view 失败 ${view.status}`)
       }
-      const blob = await binResp.blob()
+      const blob = await view.blob()
       const name = fileMeta.filename.toLowerCase()
       const mime =
         blob.type ||

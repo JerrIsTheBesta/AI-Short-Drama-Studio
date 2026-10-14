@@ -2,10 +2,7 @@ import { blobToChatImageUrl, callLLM, getAIMode } from './client'
 import { getVisionConfig } from './runtime'
 import type { Subject } from '@/types'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
-
-function stripJsonFence(text: string): string {
-  return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-}
+import { parseJsonRobust } from '@/utils/jsonRepair'
 
 function fallbackLock(style: VideoPromptStyle): string {
   if (style === 'formatted') {
@@ -72,7 +69,7 @@ ${roster || '（没有具名角色）'}
       signal: opts.signal
     })
     const lock = String(
-      (JSON.parse(stripJsonFence(resp.content)) as { identityLock?: string }).identityLock || ''
+      (parseJsonRobust(resp.content) as { identityLock?: string }).identityLock || ''
     ).trim()
     return lock || fallbackLock(style)
   } catch {

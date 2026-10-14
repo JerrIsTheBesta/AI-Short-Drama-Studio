@@ -111,6 +111,8 @@ export interface Shot {
   /** 关联的素材 */
   imageAssetId?: ID
   videoAssetId?: ID
+  /** 当前分镜锁定的视频接入 profile。 */
+  videoProfileId?: string
   /** AutoDL / 万相未完成下载时的任务 ID，重试时先拿这个查结果，避免再交一遍 */
   videoTaskId?: string
   /** 口播 TTS 音频 */

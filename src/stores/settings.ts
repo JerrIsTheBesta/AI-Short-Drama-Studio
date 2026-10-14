@@ -98,6 +98,8 @@ export interface AppSettings {
   video: VideoEndpoint
   videos: VideoProfile[]
   activeVideoId: string
+  /** Zealman 镜像独立地址，不与 AutoDL/其它视频 profile 共用。 */
+  zealmanBaseUrl: string
   music: ServiceEndpoint
   musics: NamedEndpoint[]
   activeMusicId: string
@@ -146,6 +148,7 @@ export function endpointReady(ep?: {
   const adapterType = ep.adapter?.type
   const localComfy =
     adapterType === 'comfyui-prompt' ||
+    adapterType === 'zealman-workflow' ||
     (/localhost|127\.0\.0\.1/i.test(ep.baseUrl || '') && ep.provider === 'custom')
   const hasEndpoint = Boolean(ep.baseUrl?.trim() && (ep.apiKey?.trim() || localComfy))
   const hasModel = Boolean(ep.model?.trim() || ep.workflowId?.trim() || adapterType === 'comfyui-prompt')
@@ -365,6 +368,7 @@ function buildDefaults(): AppSettings {
     video: asVideo(videoFirst),
     videos: [videoFirst],
     activeVideoId: videoFirst.id,
+    zealmanBaseUrl: '',
     music: asEndpoint(musicFirst),
     musics: [musicFirst],
     activeMusicId: musicFirst.id
@@ -437,6 +441,11 @@ function parseSettings(raw: string | null): AppSettings {
       },
       parsed.activeVideoId
     )
+    const zealmanBaseUrl = String(
+      parsed.zealmanBaseUrl ||
+      video.list.find((profile) => profile.provider === 'zealman' && !/autodl\.art/i.test(profile.baseUrl || ''))?.baseUrl ||
+      ''
+    ).trim().replace(/\/+$/, '')
     const music = hydrateNamed(
       parsed.musics,
       {
@@ -469,6 +478,7 @@ function parseSettings(raw: string | null): AppSettings {
       video: video.active,
       videos: video.list,
       activeVideoId: video.activeId,
+      zealmanBaseUrl,
       music: music.active,
       musics: music.list,
       activeMusicId: music.activeId
@@ -916,6 +926,11 @@ export const useSettingsStore = defineStore('settings', () => {
     syncVideo({ ...cur, ...patch })
   }
 
+  function setZealmanBaseUrl(baseUrl: string) {
+    touch()
+    config.value = { ...config.value, zealmanBaseUrl: baseUrl.trim().replace(/\/+$/, '') }
+  }
+
   function addVideo(seed: {
     name: string
     baseUrl: string
@@ -1106,6 +1121,7 @@ export const useSettingsStore = defineStore('settings', () => {
     removeTts,
     renameTts,
     patchVideo,
+    setZealmanBaseUrl,
     addVideo,
     selectVideo,
     removeVideo,

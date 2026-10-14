@@ -10,7 +10,7 @@ import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph, NODE_W, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
 import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
-import { rebindShotScenes } from '@/services/canvas/runner'
+import { rebindShotScenes, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import {
   appendCanvasReferenceSource,
   canvasNodeProducesImage
@@ -25,7 +25,7 @@ import AgentChat from '@/components/canvas/AgentChat.vue'
 import PromptCoach from '@/components/canvas/PromptCoach.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
-import type { CanvasNode, Shot } from '@/types'
+import { normalizeVideoGenModel, type CanvasNode, type Shot } from '@/types'
 
 const project = useProjectStore()
 const assets = useAssetsStore()
@@ -35,6 +35,8 @@ const agentOpen = ref(true)
 const agentWidth = ref(440)
 const resizingAgent = ref(false)
 const rightOpen = ref(false)
+const optimizingAllVideos = ref(false)
+const optimizeAllProgress = ref('')
 const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
 
 const AGENT_WIDTH_KEY = 'aicut:agent-chat-width'
@@ -354,6 +356,80 @@ async function relayout() {
   setTimeout(() => fitView({ padding: 0.2 }), 40)
 }
 
+async function optimizeAllVideoPrompts() {
+  const p = project.current
+  if (!p?.canvas || optimizingAllVideos.value) return
+  const nodes = p.canvas.nodes
+    .filter((node) =>
+      (node.type === 'shotVideo' || node.type === 'videoGen') &&
+      normalizeVideoGenModel(node.data.videoModel) !== 'wan-prime'
+    )
+    .sort((a, b) => {
+      const ai = a.data.shotId ? p.shots.find((shot) => shot.id === a.data.shotId)?.index ?? 9999 : 9999
+      const bi = b.data.shotId ? p.shots.find((shot) => shot.id === b.data.shotId)?.index ?? 9999 : 9999
+      return ai - bi || a.position.y - b.position.y || a.position.x - b.position.x
+    })
+  if (!nodes.length) {
+    toast.warn('画布上没有可优化的 H3 视频节点')
+    return
+  }
+  optimizingAllVideos.value = true
+  const failed: string[] = []
+  let processed = 0
+  let stoppedByAuth = false
+  const concurrency = 5
+  try {
+    for (let offset = 0; offset < nodes.length; offset += concurrency) {
+      const batch = nodes.slice(offset, offset + concurrency)
+      optimizeAllProgress.value = `${processed}/${nodes.length} · 本批 ${batch.length} 个`
+      const results = await Promise.all(
+        batch.map(async (node) => {
+          try {
+            if (node.type === 'shotVideo' && node.data.shotId) {
+              const shot = project.current?.shots.find((item) => item.id === node.data.shotId)
+              if (!shot) throw new Error('找不到分镜')
+              await optimizeShotVideoPrompt(shot)
+            } else {
+              await optimizeFreeformVideoPrompt(node.id)
+            }
+            return { node, ok: true as const, message: '' }
+          } catch (error) {
+            return {
+              node,
+              ok: false as const,
+              message: error instanceof Error ? error.message : String(error)
+            }
+          }
+        })
+      )
+      processed += batch.length
+      optimizeAllProgress.value = `${processed}/${nodes.length}`
+      for (const result of results) {
+        if (result.ok) continue
+        failed.push(`${result.node.data.label || result.node.id}：${result.message}`)
+        if (/401|鉴权失败|Authentication Fails|invalid.*api.?key/i.test(result.message)) {
+          stoppedByAuth = true
+        }
+      }
+      if (stoppedByAuth) {
+        const authMessage = results.find((result) => !result.ok && /401|鉴权失败|Authentication Fails|invalid.*api.?key/i.test(result.message))?.message || ''
+        toast.error(`语言模型鉴权失败，当前批完成后已停止队列。${authMessage}`, 12000)
+        break
+      }
+    }
+    if (failed.length) {
+      const succeeded = processed - failed.length
+      const stopped = processed < nodes.length ? `；已停止，剩余 ${nodes.length - processed} 个未请求` : ''
+      toast.warn(`已完成 ${succeeded}/${nodes.length} 个；${failed.length} 个失败${stopped}：${failed.slice(0, 2).join('；')}`, 10000)
+    } else {
+      toast.success(`已按每批最多 ${concurrency} 个完成全部 ${nodes.length} 个视频提示词`)
+    }
+  } finally {
+    optimizingAllVideos.value = false
+    optimizeAllProgress.value = ''
+  }
+}
+
 function eventFromCtx(
   ev: MouseEvent | TouchEvent | { event: MouseEvent | TouchEvent }
 ): MouseEvent | TouchEvent | null {
@@ -655,6 +731,16 @@ function goClassic() {
       </span>
       <div class="spacer" />
       <button
+        class="bulk-optimize-btn"
+        type="button"
+        :disabled="optimizingAllVideos"
+        title="按分镜顺序逐个优化所有 H3 视频节点提示词"
+        @click="optimizeAllVideoPrompts"
+      >
+        <CanvasToolbarIcon name="sparkles" :size="16" />
+        {{ optimizingAllVideos ? `优化中 ${optimizeAllProgress}` : '一键优化全部视频提示词' }}
+      </button>
+      <button
         class="icon-btn"
         :class="{ on: agentOpen }"
         :title="agentOpen ? '收起对话' : '打开智能体'"
@@ -901,6 +987,26 @@ function goClassic() {
   background: var(--color-bg-3);
   color: var(--color-accent);
 }
+.bulk-optimize-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 38%, var(--color-border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-1));
+  color: var(--color-text-1);
+  font-size: 11px;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.bulk-optimize-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-bg-1));
+}
+.bulk-optimize-btn:disabled { opacity: .65; cursor: wait; }
 .empty-hint {
   position: absolute;
   inset: 0;

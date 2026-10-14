@@ -21,11 +21,16 @@ export function applyShotVideoModel(nodeId: string, model: VideoGenModel) {
   if (!node) return
   const prevStill = stillModeFromNode(node)
   const nextStill = stillModeForVideoModel(model, settings.config.video)
+  const nextH3Mode = settings.config.video.provider === 'zealman' && settings.config.video.workflowId.startsWith('U02-')
+    ? 'fl2va'
+    : node.data.h3GenMode
   const min = videoMinSeconds(model)
   const max = videoMaxSeconds(model)
   project.patchCanvasNode(nodeId, {
     videoModel: model,
+    videoProfileId: model === 'h3' ? settings.config.activeVideoId : undefined,
     videoStillMode: nextStill,
+    h3GenMode: nextH3Mode,
     videoResolution: normalizeVideoResolution(node.data.videoResolution, model),
     ...(node.type === 'videoGen'
       ? { duration: Math.min(max, Math.max(min, Math.round(node.data.duration || min))) }
@@ -36,7 +41,9 @@ export function applyShotVideoModel(nodeId: string, model: VideoGenModel) {
     const shot = project.current?.shots.find((s) => s.id === shotId)
     if (shot) {
       project.updateShot(shot.id, {
-        duration: Math.min(max, Math.max(min, Math.round(shot.duration || min)))
+        duration: Math.min(max, Math.max(min, Math.round(shot.duration || min))),
+        videoProfileId: model === 'h3' ? settings.config.activeVideoId : undefined,
+        h3GenMode: nextH3Mode
       })
     }
   }

@@ -781,6 +781,15 @@ const cropStyle = computed(() => ({
             <span>↺</span>{{ hasAsset ? '重绘' : genLabel }}
           </button>
           <button
+            v-if="type === 'shotVideo' && isH3VideoNode"
+            type="button"
+            :disabled="generating || gateBlocked || !!toolBusy || optimizingPrompt"
+            title="只优化当前节点的提示词"
+            @click="optimizePrompt"
+          >
+            <span>✦</span>{{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+          </button>
+          <button
             v-if="isImageNode"
             type="button"
             :disabled="generating || !!toolBusy"

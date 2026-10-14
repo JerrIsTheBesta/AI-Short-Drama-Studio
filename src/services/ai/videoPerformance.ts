@@ -10,10 +10,7 @@ import {
   thisShotAction,
   videoPerformanceSpec
 } from '@/utils/shotPrompt'
-
-function stripJsonFence(text: string): string {
-  return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-}
+import { parseJsonRobust } from '@/utils/jsonRepair'
 
 function shotLine(shot?: Shot): string {
   if (!shot) return '（无）'
@@ -113,7 +110,7 @@ ${(opts.shot.visualPrompt || '').slice(0, 400)}`
       maxTokens: 1600,
       signal: opts.signal
     })
-    const parsed = JSON.parse(stripJsonFence(resp.content)) as { videoPrompt?: string }
+    const parsed = parseJsonRobust(resp.content) as { videoPrompt?: string }
     const rich = stripFrameLead(String(parsed.videoPrompt || ''))
     if (!rich || rich === (opts.shot.visualPrompt || '').trim()) return current
     if (isVideoPerformanceTemplate(rich)) return current

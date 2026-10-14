@@ -54,14 +54,14 @@ async function onAdd() {
 <template>
   <section class="comfy-quick">
     <header class="head">
-      <h3>添加自建 ComfyUI</h3>
+      <h3>本地 ComfyUI</h3>
       <p class="hint">
-        只需填写地址（例如 <code>http://127.0.0.1:8188</code>）。会写入生图/视频接入并设为当前。
-        真正出片前再在下方「适配器」粘贴工作流 JSON。
+        只用于你电脑上或局域网里的 ComfyUI，例如 <code>http://127.0.0.1:8188</code>。
+        云端大厂和中转站请使用下面的“API 来源 / Base URL / API Key”。
       </p>
     </header>
 
-    <label>ComfyUI 地址</label>
+    <label>本地 ComfyUI 地址</label>
     <input
       v-model="baseUrl"
       placeholder="http://127.0.0.1:8188"
@@ -82,7 +82,7 @@ async function onAdd() {
       </label>
       <label class="check">
         <input v-model="runTest" type="checkbox" />
-        <span>添加后探测连通（/system_stats）</span>
+        <span>添加后测试是否能连接</span>
       </label>
     </div>
 

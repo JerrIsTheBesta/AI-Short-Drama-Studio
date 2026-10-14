@@ -11,6 +11,7 @@ import {
 } from './dialogue'
 import { normalizeForSpeech } from './tts'
 import { callLLM, getAIMode } from './client'
+import { parseJsonRobust } from '@/utils/jsonRepair'
 
 export interface H3ImageSlot {
   index: number
@@ -1233,6 +1234,60 @@ function stripJsonFence(text: string): string {
   return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
 }
 
+type H3PromptJson = {
+  detailed_description?: string
+  integrated_multimodal_description?: string
+  overall_soundscape?: string
+}
+
+function extractPossiblyTruncatedJsonString(text: string, field: string): string {
+  const source = stripJsonFence(text)
+  const match = new RegExp(`"${field}"\\s*:\\s*"`, 'i').exec(source)
+  if (!match) return ''
+  const start = match.index + match[0].length
+  let escaped = false
+  let raw = ''
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i]
+    if (!escaped && char === '"') break
+    raw += char
+    if (escaped) escaped = false
+    else if (char === '\\') escaped = true
+  }
+  if (raw.endsWith('\\')) raw = raw.slice(0, -1)
+  try {
+    return JSON.parse(`"${raw.replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t')}"`)
+  } catch {
+    return raw
+      .replace(/\\([^"\\/bfnrtu])/g, '$1')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\')
+      .trim()
+  }
+}
+
+function parseH3PromptJson(content: string): { parsed: H3PromptJson; truncated: boolean } {
+  try {
+    return { parsed: parseJsonRobust(content) as H3PromptJson, truncated: false }
+  } catch (error) {
+    const parsed: H3PromptJson = {
+      integrated_multimodal_description: extractPossiblyTruncatedJsonString(
+        content,
+        'integrated_multimodal_description'
+      ),
+      detailed_description: extractPossiblyTruncatedJsonString(content, 'detailed_description'),
+      overall_soundscape: extractPossiblyTruncatedJsonString(content, 'overall_soundscape')
+    }
+    if (parsed.integrated_multimodal_description || parsed.detailed_description) {
+      return { parsed, truncated: true }
+    }
+    throw error
+  }
+}
+
 /** 把中文场记编译成 H3 官方英文：integrated_multimodal_description + 内部切镜；失败则回退模板。 */
 export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<string> {
   const resolved: H3PromptInput = { ...input, forceIntegrated: input.forceIntegrated !== false }
@@ -1330,11 +1385,8 @@ ${source || '(perform the beat in this location)'}`
       timeoutMs: 240_000,
       signal: resolved.signal
     })
-    let parsed = JSON.parse(stripJsonFence(resp.content)) as {
-      detailed_description?: string
-      integrated_multimodal_description?: string
-      overall_soundscape?: string
-    }
+    const firstResult = parseH3PromptJson(resp.content)
+    let parsed = firstResult.parsed
     let desc = String(parsed.integrated_multimodal_description || parsed.detailed_description || '').trim()
     if (/overall_soundscape\s*:/i.test(desc)) {
       desc =
@@ -1344,7 +1396,13 @@ ${source || '(perform the beat in this location)'}`
     }
     let sound = String(parsed.overall_soundscape || '').trim()
     const firstDialogueIssue = dialogueTurnIssue(desc, dialogueCues)
-    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc) || firstDialogueIssue) {
+    if (
+      firstResult.truncated ||
+      !desc ||
+      isGenericActionDump(desc) ||
+      isLifelessH3Prompt(desc) ||
+      firstDialogueIssue
+    ) {
       const repair = await callLLM({
         messages: [
           {
@@ -1369,7 +1427,7 @@ Required dialogue ownership and order:
 ${dialogueCues.length ? dialogueCues.map((cue, i) => `${i + 1}. speaker=${cue.speaker || 'infer from source context'} | words=${cue.text}`).join('\n') : '(none)'}
 
 Rejected-draft dialogue defect:
-${firstDialogueIssue || '(none; repair the visual-action defect)'}
+${firstResult.truncated ? 'The previous JSON response was cut off mid-string. Reconstruct the complete shot; do not merely close the broken sentence.' : firstDialogueIssue || '(none; repair the visual-action defect)'}
 
 Original scene material:
 ${source}
@@ -1384,11 +1442,9 @@ ${desc || '(empty)'}`
         timeoutMs: 240_000,
         signal: resolved.signal
       })
-      parsed = JSON.parse(stripJsonFence(repair.content)) as {
-        detailed_description?: string
-        integrated_multimodal_description?: string
-        overall_soundscape?: string
-      }
+      const repairResult = parseH3PromptJson(repair.content)
+      if (repairResult.truncated) return composeH3VideoPrompt(resolved)
+      parsed = repairResult.parsed
       desc = String(parsed.integrated_multimodal_description || parsed.detailed_description || '').trim()
       sound = String(parsed.overall_soundscape || '').trim()
     }

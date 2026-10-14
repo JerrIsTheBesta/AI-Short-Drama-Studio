@@ -697,6 +697,7 @@ async function regenerateDigitalHumanShot(
       audioSync: true,
       promptAsIs: true,
       mode: 'I2VA',
+      videoProfileId: shot.videoProfileId,
       signal,
       resumeTaskId: shot.videoTaskId,
       onTaskSubmitted: async (taskId) => {
@@ -755,6 +756,17 @@ function clampVideoDuration(raw: number | undefined, videoModel: VideoGenModel, 
   const min = videoMinSeconds(videoModel)
   const max = videoMaxSeconds(videoModel)
   return Math.min(max, Math.max(min, Math.round(raw || fallback)))
+}
+
+function storyboardVideoModel(): VideoGenModel {
+  const p = useProjectStore().current
+  const existing = p?.canvas?.nodes.find((node) => node.type === 'shotVideo')
+  if (existing?.data.videoModel) return normalizeVideoGenModel(existing.data.videoModel)
+  const cfg = useSettingsStore().config.video
+  const marker = `${cfg.provider || ''} ${cfg.workflowId || ''} ${cfg.adapter?.type || ''}`.toLowerCase()
+  if (/dashscope|wan/.test(marker)) return 'wan-prime'
+  if (/h3.*v5/.test(marker) && !/15s/.test(marker)) return 'h3-v5'
+  return 'h3'
 }
 
 function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
@@ -833,6 +845,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
         cameraMovement: shot.cameraMovement,
         promptStyle,
         videoModel: 'h3',
+        videoProfileId: shot.videoProfileId,
         videoResolution: canvasVideoResolutionForShot(shot, videoModel),
         h3GenMode: 'fl2va',
         mode: 'I2VA',
@@ -966,6 +979,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       cameraMovement: shot.cameraMovement,
       promptStyle,
       videoModel,
+      videoProfileId: shot.videoProfileId,
       videoResolution: canvasVideoResolutionForShot(shot, videoModel),
       h3GenMode: 'reference',
       mode: h3Mode,
@@ -1200,6 +1214,7 @@ export async function runGeneratePlay(
       content: requestContent,
       style: look.style,
       shotDuration: project.current.script.shotDuration,
+      maxShotDuration: videoMaxSeconds(storyboardVideoModel()),
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
@@ -1417,6 +1432,7 @@ export async function runExtractStoryboard(
       content: project.current.script.content,
       style: look.style,
       shotDuration: project.current.script.shotDuration,
+      maxShotDuration: videoMaxSeconds(storyboardVideoModel()),
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
@@ -1836,7 +1852,8 @@ export async function generateFreeformVideo(
       prompt: sendPrompt,
       promptAsIs: true,
       imageBlob: blobs[0],
-      referenceImages: blobs.slice(1, videoMaxRefImages(videoModel)),
+      referenceImages: useFl2va ? [] : blobs.slice(1, videoMaxRefImages(videoModel)),
+      lastFrameBlob: useFl2va ? blobs[1] : undefined,
       imageSlots,
       duration,
       width: videoSize.width,
@@ -1845,8 +1862,9 @@ export async function generateFreeformVideo(
       voiceMode: 'none',
       promptStyle: 'scene-narrative',
       videoModel,
+      videoProfileId: node.data.videoProfileId,
       videoResolution: node.data.videoResolution,
-      h3GenMode: 'reference',
+      h3GenMode: useFl2va ? 'fl2va' : 'reference',
       mode: 'R2VA',
       signal,
       resumeTaskId: node.data.videoTaskId,

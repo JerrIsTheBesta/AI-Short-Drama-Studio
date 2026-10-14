@@ -4,6 +4,7 @@ import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore, endpointReady } from '@/stores'
 import StudioSettings from '@/components/canvas/StudioSettings.vue'
 import SetupAgent from '@/components/settings/SetupAgent.vue'
+import ZealmanSettings from '@/components/settings/ZealmanSettings.vue'
 import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
@@ -261,8 +262,8 @@ const storagePct = computed(() => {
   return (storage.value.usage / storage.value.quota) * 100
 })
 
-type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'system'
-const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'system']
+type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'zealman' | 'system'
+const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'zealman', 'system']
 
 const nav = [
   { id: 'llm' as const, label: '语言模型', desc: '剧本、智能体、接入助手' },
@@ -271,6 +272,7 @@ const nav = [
   { id: 'image' as const, label: '图像生成', desc: '人设、场景、看板' },
   { id: 'tts' as const, label: '配音', desc: '后期口播 TTS' },
   { id: 'video' as const, label: '视频', desc: '图生视频' },
+  { id: 'zealman' as const, label: 'Zealman 镜像', desc: '内置工作流镜像接口' },
   { id: 'system' as const, label: '系统', desc: '引擎、存储、关于' }
 ]
 
@@ -298,6 +300,7 @@ function navReady(id: SettingsSection) {
   if (id === 'image') return endpointReady(c.image)
   if (id === 'tts') return endpointReady(c.tts)
   if (id === 'video') return endpointReady(c.video)
+  if (id === 'zealman') return c.videos.some((item) => item.provider === 'zealman' && Boolean(item.baseUrl))
   return false
 }
 </script>
@@ -318,7 +321,7 @@ function navReady(id: SettingsSection) {
       <nav class="side" aria-label="设置分区">
         <p class="group">配置</p>
         <RouterLink
-          v-for="item in nav.slice(0, 6)"
+          v-for="item in nav.slice(0, 7)"
           :key="item.id"
           :to="`/settings/${item.id}`"
           replace
@@ -384,8 +387,9 @@ function navReady(id: SettingsSection) {
         </section>
 
         <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
+        <ZealmanSettings v-if="settings.diskReady && section === 'zealman'" />
         <StudioSettings
-          v-if="settings.diskReady && section !== 'agent' && section !== 'system'"
+          v-if="settings.diskReady && section !== 'agent' && section !== 'zealman' && section !== 'system'"
           :module="section"
         />
         <p v-else-if="!settings.diskReady && section !== 'agent' && section !== 'system'" class="loading">

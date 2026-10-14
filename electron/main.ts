@@ -730,27 +730,21 @@ app.whenReady().then(async () => {
   })
 
   function isAllowedProviderFetch(parsed: URL) {
-    const host = parsed.hostname.toLowerCase()
-    const path = parsed.pathname || ''
-    const autodl =
-      (host === 'autodl.art' || host.endsWith('.autodl.art')) &&
-      path.includes('/api/v1/comfyui/')
-    const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1'
-    const localComfy =
-      localHost &&
+    // 地址来自用户明确保存的模型接入配置。桌面主进程只负责绕过 CORS，
+    // 不应再把云端自建 ComfyUI 写死成 AutoDL / localhost 白名单。
+    return (
       (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      (/\/(prompt|history|system_stats|object_info|view|queue|embeddings|interrupt|userdata|api\/userdata|v2\/userdata|api\/v2\/userdata|api\/workflows|workflows|api\/system_stats|api\/object_info|api\/prompt|api\/history)(\/|$|\?)/i.test(
-        path
-      ) ||
-        path === '/' ||
-        path === '')
-    return autodl || localComfy
+      Boolean(parsed.hostname) &&
+      !parsed.username &&
+      !parsed.password
+    )
   }
 
   ipcMain.handle('desktop:autodlFetch', async (_e, opts?: {
     url?: string
     method?: string
     authorization?: string
+    extraHeaders?: Record<string, string>
     body?: string
     timeoutMs?: number
   }) => {
@@ -761,15 +755,18 @@ app.whenReady().then(async () => {
     } catch {
       throw new Error('invalid url')
     }
-    if (!isAllowedProviderFetch(parsed)) {
-      throw new Error('只允许请求 AutoDL ComfyUI 或本机 ComfyUI（localhost）')
-    }
+    if (!isAllowedProviderFetch(parsed)) throw new Error('ComfyUI 地址只支持 http:// 或 https://')
     const method = String(opts?.method || 'GET').toUpperCase()
+    if (method !== 'GET' && method !== 'POST') throw new Error('ComfyUI 请求只支持 GET 或 POST')
     const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const headers: Record<string, string> = { Accept: 'application/json' }
+      for (const [name, value] of Object.entries(opts?.extraHeaders || {})) {
+        if (!/^[a-z0-9-]+$/i.test(name) || /^(host|content-length|connection|cookie|origin|referer)$/i.test(name)) continue
+        headers[name] = String(value)
+      }
       const token = String(opts?.authorization || '').trim()
       if (token) headers.Authorization = token
       if (method === 'POST') headers['Content-Type'] = 'application/json'
@@ -779,8 +776,16 @@ app.whenReady().then(async () => {
         body: method === 'POST' ? String(opts?.body || '') : undefined,
         signal: controller.signal
       })
-      const text = await res.text()
-      return { status: res.status, ok: res.ok, text }
+      const contentType = res.headers.get('content-type') || ''
+      const bytes = Buffer.from(await res.arrayBuffer())
+      const textual = /json|text|xml|javascript|x-www-form-urlencoded/i.test(contentType)
+      return {
+        status: res.status,
+        ok: res.ok,
+        text: textual ? bytes.toString('utf8') : '',
+        dataBase64: textual ? undefined : bytes.toString('base64'),
+        contentType
+      }
     } catch (err: any) {
       if (controller.signal.aborted) {
         throw new Error(`AutoDL 请求超时（${Math.round(timeoutMs / 1000)} 秒）`)

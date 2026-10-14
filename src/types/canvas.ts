@@ -126,6 +126,8 @@ export interface CanvasNode {
     /** 节点自己的画幅；为空时只继承项目默认值，不反向修改其他节点。 */
     aspectRatio?: import('./project').AspectRatio
     videoModel?: VideoGenModel
+    /** 当前节点锁定的视频接入，避免不同供应商配置互相串用。 */
+    videoProfileId?: string
     /** 这一镜出视频时用什么参考图；切模型时写入，决定画布是否铺分镜关键帧 */
     videoStillMode?: VideoStillMode
     /** h3-v5 可选 1080p，其余固定 768p */

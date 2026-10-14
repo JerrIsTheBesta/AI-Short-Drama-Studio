@@ -30,6 +30,7 @@ import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
 import { isLandscapeAspect } from '@/utils/aspect'
 import { toDigitalHumanWav } from '@/services/ffmpeg'
+import { normalizeZealmanBaseUrl, zealmanWorkflowById } from './zealman'
 
 export interface VideoGenInput {
   /** 第一张参考图：角色设计图 / 场景图 / 故事看板之一，不是人物+场景配图 */
@@ -82,6 +83,8 @@ export interface VideoGenInput {
   promptStyle?: VideoPromptStyle
   /** 图生视频节点模型。默认 H3 15s；h3-v5 为 10 秒 1080p */
   videoModel?: VideoGenModel
+  /** 锁定设置中的视频接入，生成时不能回落到另一个供应商。 */
+  videoProfileId?: string
   /** h3-v5 可选 1080p */
   videoResolution?: VideoResolution
   /** H3：参考图生成或首尾帧。默认参考图。 */
@@ -339,6 +342,7 @@ async function autodlRequest(
       url,
       method: init.method || 'GET',
       authorization: headers.Authorization || '',
+      extraHeaders: headers,
       body: init.body,
       timeoutMs
     })
@@ -587,7 +591,7 @@ async function realWorkflowVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const cfg = getVideoConfig()
+  const cfg = getVideoConfig(input.videoProfileId)
   const baseUrl = migrateVideoBaseUrl(cfg.baseUrl || VIDEO_AUTODL_ROOT)
   const apiKey = cfg.apiKey
   const isFl2va = input.h3GenMode === 'fl2va'
@@ -1054,7 +1058,7 @@ async function realHttpCustomVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const cfg = getVideoConfig()
+  const cfg = getVideoConfig(input.videoProfileId)
   if (!cfg.baseUrl) throw new Error('[video] 未配置自定义视频接口地址')
   const prompt = buildPrompt(input)
   onProgress?.('自定义 HTTP 出视频…')
@@ -1079,11 +1083,114 @@ async function realHttpCustomVideo(
   return { blob, mimeType, prompt, duration: input.duration }
 }
 
+async function realZealmanVideo(
+  input: VideoGenInput,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  const cfg = getVideoConfig(input.videoProfileId)
+  const configuredRoot = String(cfg.zealmanBaseUrl || cfg.baseUrl || '').trim()
+  const root = normalizeZealmanBaseUrl(configuredRoot) || configuredRoot.replace(/\/+$/, '')
+  const workflow = zealmanWorkflowById(cfg.workflowId || '')
+  if (!root) throw new Error('[video] 请先在设置 → Zealman 镜像中填写 Base URL')
+  if (/^https?:\/\/([^/]+\.)?autodl\.art(?::\d+)?$/i.test(root)) {
+    throw new Error('[video] Zealman 镜像地址仍是 AutoDL。请到设置 → Zealman 镜像重新填写 SeetaCloud Base URL 并点击“应用配置”。')
+  }
+  if (!workflow) throw new Error(`[video] 未识别的 Zealman 工作流：${cfg.workflowId || '空'}`)
+
+  const blobs = workflow.mode === 'fl2va'
+    ? [input.imageBlob, input.lastFrameBlob].filter((item): item is Blob => Boolean(item))
+    : [input.imageBlob, ...(input.referenceImages || [])]
+        .filter((item): item is Blob => Boolean(item))
+        .slice(0, workflow.maxImages)
+  if (workflow.mode === 'fl2va' && blobs.length < 2) throw new Error('[video] Zealman 首尾帧工作流需要首帧和尾帧各一张')
+  if (!blobs.length) throw new Error('[video] Zealman 工作流没有可用的参考图')
+
+  onProgress?.(`准备 Zealman ${workflow.mode === 'fl2va' ? '首尾帧' : '多图参考'}工作流…`)
+  const images: string[] = []
+  for (const blob of blobs) images.push(await blobToVideoImageDataUrl(blob))
+  const prompt = buildPrompt(input).slice(0, 10000)
+  const duration = Math.max(1, Math.min(workflow.maxDuration, Math.round(input.duration) || 5))
+  const width = Math.max(256, Math.round(input.width) || 864)
+  const height = Math.max(256, Math.round(input.height) || 480)
+  const inputValues: Record<string, string | number> = {
+    [workflow.stepsKey]: 12,
+    [workflow.promptKey]: prompt,
+    [workflow.durationKey]: duration,
+    [workflow.widthKey]: width,
+    [workflow.heightKey]: height
+  }
+  workflow.imageKeys.forEach((key, index) => {
+    if (images[index]) inputValues[key] = images[index]
+  })
+
+  let promptId = String(input.resumeTaskId || '').trim()
+  if (!promptId) {
+    onProgress?.('提交 Zealman 生成任务…')
+    const submitUrl = `${root}/api/workflow/generate`
+    const submitBody = JSON.stringify({ workflow_id: workflow.id, input_values: inputValues })
+    const postSubmit = (url: string) => autodlRequest(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: submitBody,
+        signal: input.signal
+      }, 180_000)
+    let finalSubmitUrl = submitUrl
+    let response = await postSubmit(finalSubmitUrl)
+    let text = await response.text()
+    // 部分 Zealman/Nginx 部署对结尾斜杠采用严格路由；405 时换一种形式重试一次。
+    if (response.status === 405) {
+      finalSubmitUrl = `${submitUrl}/`
+      onProgress?.('镜像接口拒绝了无斜杠路径，正在改用兼容路径重试…')
+      response = await postSubmit(finalSubmitUrl)
+      text = await response.text()
+    }
+    if (!response.ok) {
+      throw new Error(
+        `[video] Zealman 提交失败 HTTP ${response.status}\n请求地址：${finalSubmitUrl}\n${text.slice(0, 800)}`
+      )
+    }
+    let data: any
+    try { data = JSON.parse(text) } catch { throw new Error(`[video] Zealman 提交成功但响应不是 JSON\n请求地址：${finalSubmitUrl}\n${text.slice(0, 500)}`) }
+    if (data?.success === false) throw new Error(`[video] Zealman 提交失败：${data?.error || text.slice(0, 800)}`)
+    promptId = String(data?.prompt_id || '').trim()
+    if (!promptId) throw new Error('[video] Zealman 响应中没有 prompt_id')
+    await input.onTaskSubmitted?.(promptId)
+  }
+
+  const deadline = Date.now() + 30 * 60 * 1000
+  while (Date.now() < deadline) {
+    throwIfAborted(input.signal)
+    onProgress?.(`Zealman 正在生成… (${promptId.slice(0, 8)})`)
+    const response = await autodlRequest(
+      `${root}/api/workflow/result?prompt_id=${encodeURIComponent(promptId)}`,
+      { method: 'GET', signal: input.signal },
+      60_000
+    )
+    const text = await response.text()
+    let data: any
+    try { data = JSON.parse(text) } catch { data = null }
+    if (!response.ok || data?.success === false) throw new Error(`[video] Zealman 查询失败：${data?.error || text.slice(0, 800)}`)
+    if (data?.pending === false) {
+      const result = Array.isArray(data.results)
+        ? data.results.find((item: any) => item?.type === 'video' && item?.url)
+        : null
+      if (!result?.url) throw new Error('[video] Zealman 任务已结束，但没有返回视频文件')
+      const videoUrl = new URL(String(result.url), `${root}/`).toString()
+      onProgress?.('下载 Zealman 生成的视频…')
+      const { blob: rawBlob, mime: mimeHint } = await fetchVideoBytes(videoUrl, input.signal)
+      const blob = await assertVideoBlob(rawBlob, mimeHint)
+      return { blob, mimeType: blob.type || 'video/mp4', prompt, duration }
+    }
+    await abortableDelay(1500, input.signal)
+  }
+  throw new Error('[video] Zealman 生成超过 30 分钟，已停止轮询')
+}
+
 async function realComfyNativeVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
 ): Promise<VideoGenOutput> {
-  const cfg = getVideoConfig()
+  const cfg = getVideoConfig(input.videoProfileId)
   if (!cfg.baseUrl) throw new Error('[video] 未配置自建 ComfyUI 地址')
   onProgress?.('自建 ComfyUI 出视频…')
   const prompt = buildPrompt(input)
@@ -1128,8 +1235,11 @@ export async function generateVideo(
     if (input.videoModel === 'wan-prime') {
       return await realWanVideo(input, onProgress)
     }
-    const vcfg = getVideoConfig()
+    const vcfg = getVideoConfig(input.videoProfileId)
     const adapterType = resolveVideoAdapter(vcfg)
+    if (adapterType === 'zealman-workflow') {
+      return await realZealmanVideo(input, onProgress)
+    }
     if (adapterType === 'comfyui-prompt') {
       return await realComfyNativeVideo(input, onProgress)
     }

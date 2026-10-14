@@ -488,6 +488,15 @@ function removeSelf() {
           <button type="button" :disabled="generating || optimizingPrompt" @click="generate">
             <span>↺</span>{{ genLabel }}
           </button>
+          <button
+            v-if="isH3Video"
+            type="button"
+            :disabled="generating || optimizingPrompt"
+            title="只优化当前节点的提示词"
+            @click="optimizePrompt"
+          >
+            <span>✦</span>{{ optimizingPrompt ? '优化中…' : '优化提示词' }}
+          </button>
           <button type="button" :disabled="generating" title="选用已有资源，不重新生成" @click="openOutputPicker">
             <span>▣</span>选用
           </button>

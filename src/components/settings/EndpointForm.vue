@@ -82,13 +82,14 @@ function onAdd() {
       <p v-if="hint" class="hint">{{ hint }}</p>
     </header>
 
-    <label>接入方式</label>
+    <label>API 来源</label>
     <select v-model="providerId">
       <option v-for="p in presets" :key="p.id" :value="p.id">{{ p.name }}</option>
     </select>
+    <p class="hint">大厂官方和中转站都在这里配置。选择预设会自动填写推荐地址；中转站请选择“自定义”。</p>
     <p class="hint">{{ currentPreset.hint }}</p>
 
-    <label>接口地址</label>
+    <label>Base URL（接口地址）</label>
     <input
       v-model="baseUrlModel"
       :placeholder="currentPreset.baseUrl || 'https://…/v1'"
@@ -107,9 +108,9 @@ function onAdd() {
       </button>
     </div>
 
-    <label>这个接入下的模型</label>
+    <label>模型名称</label>
     <p class="hint">
-      同一套地址和 Key 可以挂多个模型名。点一项设为当前使用。
+      点击模型即可设为当前使用。同一地址和 Key 支持多个模型时，也可以继续添加。
     </p>
     <div class="chips">
       <button

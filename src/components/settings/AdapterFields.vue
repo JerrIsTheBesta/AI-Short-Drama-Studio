@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { AdapterConfig, AdapterType } from '@/services/ai/adapters'
 import ComfyWorkflowPanel from '@/components/settings/ComfyWorkflowPanel.vue'
 
@@ -17,6 +17,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   patch: [patch: { adapter?: AdapterConfig; workflowId?: string }]
 }>()
+const expanded = ref(false)
 
 const typeOptions: { value: AdapterType | ''; label: string; kinds: string[] }[] = [
   { value: '', label: '自动（按地址推断）', kinds: ['llm', 'vision', 'image', 'tts', 'video'] },
@@ -108,14 +109,15 @@ function onPasteWorkflow(ev: ClipboardEvent) {
 
 <template>
   <section class="adapter">
-    <header class="head">
-      <h3>适配器</h3>
-      <p class="hint">
-        大厂预设可留空「自动」。自定义中转、自建 ComfyUI、或非标准路径时在这里指定类型与字段。
-      </p>
-    </header>
+    <button type="button" class="advanced-toggle" @click="expanded = !expanded">
+      <span><strong>高级接口兼容</strong><small>大多数官方接口和中转站不需要设置</small></span>
+      <b>{{ expanded ? '收起' : '展开' }}</b>
+    </button>
 
-    <label>适配器类型</label>
+    <template v-if="expanded">
+    <p class="hint">仅当接口文档明确要求自定义请求路径、鉴权头或 ComfyUI 工作流 JSON 时才修改这里。</p>
+
+    <label>接口协议</label>
     <select v-model="typeModel">
       <option v-for="o in options" :key="o.value || 'auto'" :value="o.value">{{ o.label }}</option>
     </select>
@@ -183,6 +185,7 @@ function onPasteWorkflow(ev: ClipboardEvent) {
       :api-key="apiKey"
       @patch="(a) => emit('patch', { adapter: a })"
     />
+    </template>
   </section>
 </template>
 
@@ -194,6 +197,7 @@ function onPasteWorkflow(ev: ClipboardEvent) {
   max-width: 640px;
   margin-top: 8px;
 }
+.advanced-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 12px;border:1px solid var(--color-border);border-radius:8px;background:var(--color-bg-1);color:var(--color-text-2);text-align:left;cursor:pointer}.advanced-toggle span{display:grid;gap:2px}.advanced-toggle strong{font-size:12px;color:var(--color-text-1)}.advanced-toggle small{font-size:11px;color:var(--color-text-4);font-weight:400}.advanced-toggle b{font-size:11px;color:var(--color-accent)}
 .head h3 {
   margin: 0 0 4px;
   font-size: 15px;

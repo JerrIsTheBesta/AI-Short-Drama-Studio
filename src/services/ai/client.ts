@@ -6,6 +6,7 @@ export type { AIMode } from '@/stores/settings'
 export { getAIMode } from './runtime'
 
 import { desktop, isDesktop } from '@/services/desktop'
+import { parseJsonRobust } from '@/utils/jsonRepair'
 import { mockLLM } from './mock'
 import { getAIMode, getLlmConfig, getVisionConfig } from './runtime'
 
@@ -69,6 +70,16 @@ function hasJsonObject(text: string) {
   return /[{｛]/.test(text)
 }
 
+function isValidJsonOutput(text: string): boolean {
+  if (!text.trim()) return false
+  try {
+    parseJsonRobust(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function looksLikeShotList(text: string) {
   return /镜头\s*\d+\s*[：:]/.test(text) && /画面[：:]/.test(text)
 }
@@ -100,6 +111,16 @@ function isRetryableNetwork(e: unknown): boolean {
 
 function shouldRetryHttp(status: number): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504
+}
+
+function llmHttpError(status: number, detail: string, baseUrl: string, provider?: string): Error {
+  let host = baseUrl
+  try { host = new URL(baseUrl).host } catch { /* keep configured URL */ }
+  const source = provider === 'vision' ? '视觉模型' : '语言模型'
+  if (status === 401) {
+    return new Error(`[${source}] 401 鉴权失败（${host}）：当前 API Key 无效、已过期，或不属于这个接口地址。${detail ? `\n${detail}` : ''}`)
+  }
+  return new Error(`[LLM] ${status} ${detail}`)
 }
 
 function friendlyNetworkError(e: unknown): Error {
@@ -260,25 +281,29 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
         `当前视觉模型不支持看图。请到设置页把「视觉理解」换成能看图的模型。`
       )
     }
-    if (!ok) throw new Error(`[LLM] ${status} ${errText}`)
+    if (!ok) throw llmHttpError(status, errText, baseUrl, req.provider)
     let data = await json()
     let content = pickMessageContent(data.choices?.[0]?.message)
     if (!content.trim() && body.response_format) {
       delete body.response_format
       ;({ ok, status, errText, json } = await post(body))
-      if (!ok) throw new Error(`[LLM] ${status} ${errText}`)
+      if (!ok) throw llmHttpError(status, errText, baseUrl, req.provider)
       data = await json()
       content = pickMessageContent(data.choices?.[0]?.message)
     }
-    if (req.jsonMode && !hasJsonObject(content)) {
+    if (req.jsonMode && !isValidJsonOutput(content)) {
       const followControl = controlledSignal(req.signal, Math.min(timeoutMs, 240_000))
       try {
         const follow = {
           ...body,
           temperature: 0,
-          max_tokens: Math.max(Number(body.max_tokens) || 0, 4000),
+          max_tokens: Math.min(
+            12_000,
+            Math.max(Math.ceil((Number(body.max_tokens) || 4000) * 1.5), 6000)
+          ),
           messages: [
             ...req.messages,
+            ...(content.trim() ? ([{ role: 'assistant', content }] as LLMMessage[]) : []),
             {
               role: 'user',
               content:

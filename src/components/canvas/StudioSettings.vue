@@ -158,7 +158,7 @@ function patchAdapter(
         placeholder="例如 DeepSeek 官方"
       />
       <EndpointForm
-        title="连接信息"
+        title="API 接入"
         hint="智能体、写剧本、提炼分镜、以及设置页的接入助手，都用当前选中的这一套。"
         :presets="LLM_PROVIDERS"
         :base-url="settings.config.llm.baseUrl"
@@ -195,7 +195,7 @@ function patchAdapter(
         placeholder="例如 阿里云百炼视觉"
       />
       <EndpointForm
-        title="连接信息"
+        title="API 接入"
         hint="只在看图、对画面做质检时调用，不参与写剧本。"
         :presets="VISION_PROVIDERS"
         :base-url="settings.config.vision.baseUrl"
@@ -233,7 +233,7 @@ function patchAdapter(
         placeholder="例如 火山方舟 Seedream"
       />
       <EndpointForm
-        title="连接信息"
+        title="API 接入"
         hint="选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。"
         :presets="IMAGE_PROVIDERS"
         :base-url="settings.config.image.baseUrl"
@@ -272,7 +272,7 @@ function patchAdapter(
         placeholder="例如 阿里云百炼 TTS"
       />
       <EndpointForm
-        title="连接信息"
+        title="API 接入"
         hint="口播 TTS。配好后可在字幕页和口播节点里选用。"
         :presets="TTS_PROVIDERS"
         :base-url="settings.config.tts.baseUrl"
@@ -315,11 +315,14 @@ function patchAdapter(
         placeholder="例如 AutoDL H3"
       />
       <section class="video">
-        <h3>图生视频</h3>
+        <h3>一键出片设置</h3>
         <p class="hint">
-          H3 走 AutoDL 算力上的 ComfyUI 工作流，不是海螺官方接口。节点也可改选阿里云万相 3.0 Prime。
-          可在此添加其它工作流；参考图方式决定出视频前要不要铺分镜关键帧。
+          选择视频模型后，系统会自动使用适合它的参考图数量、关键帧方式、最长时长和提示词格式。
+          普通用户只需填写下面的接口地址、凭证和模型/工作流名称。
         </p>
+        <details class="rule-details">
+          <summary>自定义出片规则（高级）</summary>
+          <p class="hint">只有工作流文档明确要求特殊参考图或提示词结构时才需要修改。</p>
         <label>参考图方式</label>
         <div class="style-cards">
           <button
@@ -366,23 +369,26 @@ function patchAdapter(
             <span>人物图 + 空镜底板直接出视频。按 Aesthetic / SHOT / Visual Prompt 结构组装。</span>
           </button>
         </div>
-        <label>服务地址</label>
+        </details>
+        <h3 class="api-title">中转站 / 云端工作流 API</h3>
+        <p class="hint">大厂官方接口和 API Router、中转站都填写在这里；本机 ComfyUI 请使用页面顶部的“本地 ComfyUI”。</p>
+        <label>Base URL（接口地址）</label>
         <input
           v-model="videoUrl"
           placeholder="https://autodl.art"
         />
-        <label>工作流 ID</label>
+        <label>模型名 / 工作流 ID</label>
         <input
           v-model="videoWorkflow"
           placeholder="minimax_h3_lightx2v_v5_15s"
         />
-        <label>令牌</label>
+        <label>API Key / Token</label>
         <div class="secret">
           <input
             :type="showVideoKey ? 'text' : 'password'"
             autocomplete="off"
             v-model="videoKey"
-            placeholder="AutoDL Token"
+            placeholder="填写服务商提供的 API Key 或 Token"
           />
           <button type="button" class="eye" @click="showVideoKey = !showVideoKey">
             {{ showVideoKey ? '隐藏' : '显示' }}
@@ -417,6 +423,10 @@ function patchAdapter(
   font-size: 15px;
   font-weight: 650;
 }
+.api-title { margin-top: 14px !important; }
+.rule-details { margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-1); }
+.rule-details summary { cursor: pointer; color: var(--color-text-2); font-size: 12px; font-weight: 600; }
+.rule-details[open] summary { margin-bottom: 8px; color: var(--color-text-1); }
 .hint {
   margin: 0;
   font-size: 12px;

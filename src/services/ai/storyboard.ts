@@ -43,6 +43,8 @@ export interface StoryboardInput {
   content: string
   style: VisualStyle
   shotDuration: number
+  /** 当前所选视频模型允许的单镜最长时长。导演应优先在此范围内完成连续动作。 */
+  maxShotDuration?: number
   aspectRatio: string
   /** 文案关键词（若有） */
   keywords?: string[]
@@ -78,6 +80,10 @@ export interface StoryboardInput {
 
 function isFilmChapterInput(input: Pick<StoryboardInput, 'workflowMode' | 'content'>): boolean {
   return input.workflowMode === 'film-chapter' || looksLikeFilmChapterPlay(input.content || '')
+}
+
+function shotDurationLimit(input: Pick<StoryboardInput, 'maxShotDuration'>): number {
+  return Math.max(5, Math.min(30, Math.round(Number(input.maxShotDuration) || 15)))
 }
 
 function isLongFormPlay(input: Pick<StoryboardInput, 'workflowMode' | 'content'>, play = ''): boolean {
@@ -457,7 +463,8 @@ async function repairStoryboardOnce(
     style: input.style,
     topic: input.topic,
     content: input.content,
-    keywords: input.keywords
+    keywords: input.keywords,
+    maxShotDuration: input.maxShotDuration
   })
 }
 
@@ -669,7 +676,7 @@ visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体�
           content: `工作包：${batch.label}
 已有人物：${subjectNames.join('、') || '（按原文识别）'}
 已有地点：${sceneNames.join('、') || '（按原文识别）'}
-单镜时长参考：${input.shotDuration} 秒，可按动作与台词在 3–10 秒调整。
+当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。按完整动作与对白决定时长，可在 3–${shotDurationLimit(input)} 秒调整；同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头，不要机械拆成两个 5 秒镜头。
 ${directives ? `\n全片约束（只用于保真）：\n${directives}\n` : ''}
 ${batch.previousHint ? `上一工作包末尾（只用于承接，不要重复拍）：\n${batch.previousHint}\n` : ''}
 本工作包剧本原文：
@@ -941,7 +948,7 @@ async function extractShotOutline(
         role: 'user',
         content: `已有人物：${subjectNames.join('、') || '（无）'}
 已有地点：${sceneNames.join('、') || '（无）'}
-单镜时长：${film ? '5–10' : `参考 ${input.shotDuration}，可在 3–10`} 秒
+单镜时长：当前模型最长 ${shotDurationLimit(input)} 秒；${film ? `按场次动作在 5–${shotDurationLimit(input)} 秒内规划` : `参考 ${input.shotDuration}，可在 3–${shotDurationLimit(input)} 秒内规划`}。连续动作能在一个镜头完成就不要拆成多个短镜头
 
 ${directives ? `本章必须遵守：\n${directives}\n` : ''}完整剧本：
 ${play}`
@@ -1219,7 +1226,7 @@ ${stylePriority}
       if (!rows.length) throw new Error('提炼人物失败：剧本里没有人物节或对白名，模型也没给出名单')
       const normalized = normalizeStoryboard(
         { subjects: rows, scenes: [], shots: [] },
-        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
+        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords, maxShotDuration: input.maxShotDuration }
       )
       await input.onExtractStage?.('subjects', { subjects: normalized.subjects, scenes: [], shots: [] })
       onProgress?.(`✓ 已保存 ${normalized.subjects?.length || 0} 个角色`)
@@ -1267,7 +1274,7 @@ ${extractPlayForSceneStage(play)}`
       if (!rows.length) throw new Error('提炼场景失败：剧本里没有「环境与场景」或「内景｜地点」，模型也没给出地点。人物节点已经保留。')
       const normalized = normalizeStoryboard(
         { ...scenePart.raw, subjects: subjectPart.raw.subjects || [], scenes: rows, shots: [] },
-        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
+        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords, maxShotDuration: input.maxShotDuration }
       )
       await input.onExtractStage?.('scenes', { ...normalized, shots: [] })
       onProgress?.(`✓ 已保存 ${normalized.scenes?.length || 0} 个场景`)
@@ -1310,7 +1317,7 @@ ${extractPlayForSceneStage(play)}`
       const shots = rows.flatMap((batch) => batch || [])
       return normalizeStoryboard(
         { ...scenePart.raw, subjects: subjectRows, scenes: sceneRows, shots },
-        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords }
+        { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords, maxShotDuration: input.maxShotDuration }
       )
     }
     const landFinishedBatch = async (
@@ -1455,7 +1462,8 @@ ${extractPlayForSceneStage(play)}`
       style: input.style,
       topic: input.topic,
       content: input.content,
-      keywords: input.keywords
+      keywords: input.keywords,
+      maxShotDuration: input.maxShotDuration
     })
     const warnings = storyboardQualityIssues(parsed, input)
     if (warnings.length) {
@@ -1583,7 +1591,7 @@ ${videoPerformanceSpec(getVideoPromptStyle())}
       "voiceover": "<人物名：这一镜连续要说的 1-4 个短句；优先 2-4 句，没有就空字符串>",
       "audioMode": "h3-dialogue|h3-voiceover|tts|none",
       "speakerHint": "<说话人声音特征 / 情绪 / 表达方式；没有口播则空字符串>",
-      "duration": <5-10>,
+      "duration": <5-${shotDurationLimit(input)}>,
       "cameraMovement": "push|pull|pan|tilt|static|orbit",
       "subjectIds": ["sub_1"],
       "sceneId": "scn_1"
@@ -1595,7 +1603,7 @@ ${videoPerformanceSpec(getVideoPromptStyle())}
 visualPrompt 若只有站位没有环境实物、或开头结尾是画风套话，视为不合格。
 videoPrompt 若没从0秒覆盖到镜头结束、没按拍点写清每段谁在做什么和谁在说什么，或只是机械等分后填套话，视为不合格。
 ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉风格。' : `${styleGuide.avoid}。`}
-默认每镜使用 H3 出镜对白：把原文按语义段落分配到 voiceover，并设置 audioMode=h3-dialogue。不要机械地一镜一句；同一人物、同一表达意图的连续 2-4 个短句优先合成一个 7-10 秒镜头，短促反应或转场才只说一句，口播总量约每秒 4 个字。voiceover 写“人物名：台词”，speakerHint 同时写说话人和声线。说话镜头的景别服从画面感、动作、空间关系和情绪节奏：表情是重点且不需交代环境时可以收近；需要看清递物、争执、问答、人物距离、环境压力或集体反应时，保留中景、双人或多人同框。禁止按“只要说话就特写”的模板拆镜，但要写清当前谁说话、其余人如何反应，避免所有人同时张嘴。只有原文明说是旁白/画外音时才用 h3-voiceover，明确要求后期配音时才用 tts，明确无口播的空镜才用 none。人物章每一个 ### 都必须在 subjects 中单独建档；已故角色至少一镜出现遗物、画像或闪回，活人对手至少一镜出现对峙或可见压力。每镜 title 必须是不同的 3-8 字内容标题，禁止统一写“镜头”。逐对核对 continuity，后一镜开头必须接住前一镜结尾；重大状态变化按上面的叙事连续性硬规则展开，禁止从结果直接跳到讲解。
+默认每镜使用 H3 出镜对白：把原文按语义段落分配到 voiceover，并设置 audioMode=h3-dialogue。不要机械地一镜一句；当前模型单镜最长 ${shotDurationLimit(input)} 秒，同一地点、同一人物、同一表达意图或连续动作能在上限内完成时，优先合成一个 7-${shotDurationLimit(input)} 秒的完整镜头，禁止为了凑固定时长拆成两个 5 秒镜头。只有视觉焦点、时空、轴线或戏剧任务真正改变时才切镜。短促反应或转场才只说一句，口播总量约每秒 4 个字。voiceover 写“人物名：台词”，speakerHint 同时写说话人和声线。说话镜头的景别服从画面感、动作、空间关系和情绪节奏：表情是重点且不需交代环境时可以收近；需要看清递物、争执、问答、人物距离、环境压力或集体反应时，保留中景、双人或多人同框。禁止按“只要说话就特写”的模板拆镜，但要写清当前谁说话、其余人如何反应，避免所有人同时张嘴。只有原文明说是旁白/画外音时才用 h3-voiceover，明确要求后期配音时才用 tts，明确无口播的空镜才用 none。人物章每一个 ### 都必须在 subjects 中单独建档；已故角色至少一镜出现遗物、画像或闪回，活人对手至少一镜出现对峙或可见压力。每镜 title 必须是不同的 3-8 字内容标题，禁止统一写“镜头”。逐对核对 continuity，后一镜开头必须接住前一镜结尾；重大状态变化按上面的叙事连续性硬规则展开，禁止从结果直接跳到讲解。
 只输出合法 JSON。`
     },
     {
@@ -1629,7 +1637,8 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
     style: input.style,
     topic: input.topic,
     content: input.content,
-    keywords: input.keywords
+    keywords: input.keywords,
+    maxShotDuration: input.maxShotDuration
   })
 
   if (!parsed?.shots || !Array.isArray(parsed.shots)) {
@@ -1926,6 +1935,7 @@ export function normalizeStoryboard(
     topic?: string
     content?: string
     keywords?: string[]
+    maxShotDuration?: number
   } | VisualStyle = 'cinematic'
 ): StoryboardResult {
   const options =
@@ -2089,7 +2099,7 @@ export function normalizeStoryboard(
       audioDescription: String(s?.audioDescription || ''),
       voiceover,
       speakerHint: optStr(s?.speakerHint),
-      duration: clampShotDuration(s?.duration, voiceover, i),
+      duration: clampShotDuration(s?.duration, voiceover, i, options.maxShotDuration),
       cameraMovement: normalizeCameraMovement(s?.cameraMovement),
       purpose,
       blocking,
@@ -2109,7 +2119,7 @@ export function normalizeStoryboard(
       voiceover,
       audioMode,
       speakerHint: optStr(s?.speakerHint),
-      duration: clampShotDuration(s?.duration, voiceover, i),
+      duration: clampShotDuration(s?.duration, voiceover, i, options.maxShotDuration),
       cameraMovement: normalizeCameraMovement(s?.cameraMovement),
       subjectIds,
       sceneId: boundScene?.id,
@@ -2200,20 +2210,22 @@ function enrichVisualPrompt(
   return body
 }
 
-/** 视频管线限制 5-10 秒；缺省时按口播字数估算，并避免整片同一秒数 */
+/** 按当前视频模型上限规划单镜；缺省时按口播字数估算，并避免整片同一秒数。 */
 function clampShotDuration(
   raw: unknown,
   voiceover: string,
-  index: number
+  index: number,
+  maxDuration = 15
 ): number {
+  const max = Math.max(5, Math.min(30, Math.round(Number(maxDuration) || 15)))
   const n = Number(raw)
   if (Number.isFinite(n) && n > 0) {
-    return Math.min(10, Math.max(5, Math.round(n)))
+    return Math.min(max, Math.max(5, Math.round(n)))
   }
   const chars = voiceover.replace(/\s+/g, '').length
   let est = chars > 0 ? Math.ceil(chars / 4) + 1 : 6
   est += index % 3
-  return Math.min(10, Math.max(5, est))
+  return Math.min(max, Math.max(5, est))
 }
 
 export async function generateStoryboard(
@@ -2274,7 +2286,8 @@ export async function generateStoryboard(
       style: resolved.style,
       topic: resolved.topic,
       content: resolved.content,
-      keywords: resolved.keywords
+      keywords: resolved.keywords,
+      maxShotDuration: resolved.maxShotDuration
     }
   )
   return { result, source: 'mock' }
