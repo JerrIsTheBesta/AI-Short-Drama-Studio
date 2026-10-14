@@ -7,7 +7,7 @@ import { runCanvasNode, optimizeShotVideoPrompt } from '@/services/canvas/runner
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
-import { applyShotVideoModel } from '@/services/canvas/videoModel'
+import { applyShotVideoModel, applyShotVideoProfile } from '@/services/canvas/videoModel'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeFromNode } from '@/utils/videoStill'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
@@ -951,7 +951,12 @@ const cropStyle = computed(() => ({
       />
       <div class="prompt-foot">
         <ImageModelSelect v-if="isImageNode" />
-        <VideoModelSelect v-else-if="type === 'shotVideo'" v-model="videoModel" />
+        <VideoModelSelect
+          v-else-if="type === 'shotVideo'"
+          v-model="videoModel"
+          :profile-id="nodeMeta?.data.videoProfileId"
+          @select-profile="(id) => applyShotVideoProfile(props.id, id)"
+        />
         <span v-if="type === 'shotVideo' && videoStillHint" class="still-hint">{{ videoStillHint }}</span>
         <span v-else>{{ metaLine }}</span>
         <AspectRatioSeg

@@ -4,6 +4,7 @@
  */
 
 import { desktop, isDesktop } from '@/services/desktop'
+import { zealmanWorkflowById } from './zealman'
 
 function timeoutSignal(ms: number): AbortSignal {
   const c = new AbortController()
@@ -88,13 +89,35 @@ export function resolveImageAdapter(ep: EndpointLike): AdapterType {
   return 'openai-images'
 }
 
-/** 推断视频适配器 */
+/**
+ * 读档时不能把当前 Zealman 接入的 adapter/provider 套到另一条 AutoDL 上。
+ * 地址仍是 autodl.art、工作流也不是 U01/U02 时，残留的 zealman-workflow 一律拆掉。
+ */
+export function normalizeStoredVideoEndpoint<T extends EndpointLike>(ep: T): T {
+  const zealmanWorkflow = Boolean(zealmanWorkflowById(ep.workflowId || ''))
+  const autodlHost = isAutodlHost(ep.baseUrl || '')
+  const leakedZealmanAdapter = ep.adapter?.type === 'zealman-workflow' && !zealmanWorkflow
+  if ((autodlHost || ep.provider === 'autodl') && !zealmanWorkflow && (leakedZealmanAdapter || ep.provider === 'zealman')) {
+    return {
+      ...ep,
+      provider: 'autodl',
+      adapter: leakedZealmanAdapter ? undefined : ep.adapter
+    }
+  }
+  return ep
+}
+
+/** 推断视频适配器。AutoDL 地址优先于残留的 Zealman adapter，避免误打 /api/workflow/generate。 */
 export function resolveVideoAdapter(ep: EndpointLike): AdapterType {
-  const t = ep.adapter?.type
-  if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'comfyui-workflow' || t === 'zealman-workflow') return t
-  const url = ep.baseUrl || ''
-  if (isAutodlHost(url) || ep.provider === 'autodl') return 'comfyui-workflow'
-  if (ep.provider === 'custom' || isLocalComfyHost(url) || /comfy/i.test(url)) return 'comfyui-prompt'
+  const normalized = normalizeStoredVideoEndpoint(ep)
+  const t = normalized.adapter?.type
+  const zealmanWorkflow = Boolean(zealmanWorkflowById(normalized.workflowId || ''))
+  if (normalized.provider === 'zealman' && t === 'zealman-workflow' && zealmanWorkflow) return 'zealman-workflow'
+  if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'comfyui-workflow') return t
+  if (t === 'zealman-workflow' && normalized.provider === 'zealman') return 'zealman-workflow'
+  const url = normalized.baseUrl || ''
+  if (isAutodlHost(url) || normalized.provider === 'autodl') return 'comfyui-workflow'
+  if (normalized.provider === 'custom' || isLocalComfyHost(url) || /comfy/i.test(url)) return 'comfyui-prompt'
   // 默认仍走 AutoDL 风格工作流 API（兼容旧配置）
   return 'comfyui-workflow'
 }

@@ -3,7 +3,9 @@
  */
 
 import { useSettingsStore } from '@/stores'
+import { isAutodlHost, normalizeStoredVideoEndpoint } from './adapters'
 import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from './env'
+import { zealmanWorkflowById } from './zealman'
 import type { AIMode } from '@/stores/settings'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 
@@ -72,21 +74,45 @@ export function getVideoPromptStyle(): VideoPromptStyle {
   return pick()?.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative'
 }
 
+/** 内置 H3 要用 AutoDL 令牌。当前项若是 Zealman，不能拿来冒充 AutoDL。 */
+export function autodlVideoProfileId(): string | undefined {
+  const settings = pick()
+  const list = (settings?.videos || []).filter((profile) => {
+    const normalized = normalizeStoredVideoEndpoint(profile)
+    if (normalized.provider === 'zealman') return false
+    if (normalized.adapter?.type === 'zealman-workflow' && zealmanWorkflowById(normalized.workflowId || '')) return false
+    return normalized.provider === 'autodl' || isAutodlHost(normalized.baseUrl || '')
+  })
+  const active = list.find((profile) => profile.id === settings?.activeVideoId)
+  return (active || list[0])?.id
+}
+
 export function getVideoConfig(profileId?: string) {
   const d = envDefaults().video
   const settings = pick()
   let s = profileId
     ? settings?.videos?.find((profile) => profile.id === profileId) || settings?.video
     : settings?.video
-  // 兼容旧节点/旧配置：曾出现 adapter 已是 Zealman、地址却从默认 AutoDL 回填的混合配置。
-  if (s?.adapter?.type === 'zealman-workflow' && /autodl\.art/i.test(s.baseUrl || '')) {
-    s = settings?.videos?.find(
+  if (s) s = normalizeStoredVideoEndpoint(s)
+  // 只有这条接入本身就是 Zealman，且工作流 id 也是内置 U 系列时，才允许把误填的 autodl.art 换回镜像地址。
+  // 不能因为残留 adapter 就把用户选中的 AutoDL 整份换成 SeetaCloud。
+  if (
+    s?.provider === 'zealman' &&
+    s.adapter?.type === 'zealman-workflow' &&
+    zealmanWorkflowById(s.workflowId || '') &&
+    isAutodlHost(s.baseUrl || '')
+  ) {
+    const videos = (settings?.videos || []).map((profile) => normalizeStoredVideoEndpoint(profile))
+    s = videos.find(
       (profile) =>
         profile.provider === 'zealman' &&
         profile.workflowId === s?.workflowId &&
-        !/autodl\.art/i.test(profile.baseUrl || '')
-    ) || settings?.videos?.find(
-      (profile) => profile.provider === 'zealman' && !/autodl\.art/i.test(profile.baseUrl || '')
+        !isAutodlHost(profile.baseUrl || '')
+    ) || videos.find(
+      (profile) =>
+        profile.provider === 'zealman' &&
+        Boolean(zealmanWorkflowById(profile.workflowId || '')) &&
+        !isAutodlHost(profile.baseUrl || '')
     ) || s
   }
   return {

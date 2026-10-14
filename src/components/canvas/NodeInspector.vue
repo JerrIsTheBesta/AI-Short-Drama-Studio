@@ -5,7 +5,7 @@ import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settin
 import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
-import { applyShotVideoModel } from '@/services/canvas/videoModel'
+import { applyShotVideoModel, applyShotVideoProfile } from '@/services/canvas/videoModel'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeForShot } from '@/utils/videoStill'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
@@ -241,6 +241,9 @@ const videoModel = computed({
     applyShotVideoModel(props.node.id, v)
   }
 })
+function onSelectVideoProfile(profileId: string) {
+  if (props.node) applyShotVideoProfile(props.node.id, profileId)
+}
 const videoResolution = computed({
   get: () => normalizeVideoResolution(props.node?.data.videoResolution, videoModel.value),
   set: (v: VideoResolution) => {
@@ -988,7 +991,12 @@ async function optimizeVideoPrompt() {
       </div>
 
       <ImageModelSelect v-if="isImageNode" />
-      <VideoModelSelect v-if="node.type === 'shotVideo' || node.type === 'videoGen'" v-model="videoModel" />
+      <VideoModelSelect
+        v-if="node.type === 'shotVideo' || node.type === 'videoGen'"
+        v-model="videoModel"
+        :profile-id="node.data.videoProfileId"
+        @select-profile="onSelectVideoProfile"
+      />
       <VideoResolutionSeg
         v-if="(node.type === 'shotVideo' || node.type === 'videoGen') && videoAllows1080p(videoModel) && !isH3Fl2va"
         v-model="videoResolution"

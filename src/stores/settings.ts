@@ -10,7 +10,7 @@ import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/serv
 import { desktop, isDesktop } from '@/services/desktop'
 import { stillModeForVideoModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
-import type { AdapterConfig } from '@/services/ai/adapters'
+import { normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 
 export type { AdapterConfig }
 
@@ -317,8 +317,25 @@ function hydrateVideo(
     ? saved.filter((p): p is VideoProfile => Boolean(p && p.id && p.name))
     : []
   const list = savedList.length
-    ? savedList.map((p) => videoFromEndpoint({ ...fallback, ...p }, p.name, p.id))
-    : [videoFromEndpoint(fallback, '默认视频')]
+    ? savedList.map((p) => {
+        // 只给“当前这一条”补缺省。其它接入缺 adapter 时不能继承当前 Zealman，
+        // 否则 AutoDL 会在读档时被写成 zealman-workflow，提交时打到镜像的 /api/workflow/generate。
+        const isActive = p.id === savedActiveId
+        return videoFromEndpoint(
+          normalizeStoredVideoEndpoint({
+            baseUrl: p.baseUrl || (isActive ? fallback.baseUrl : ''),
+            apiKey: p.apiKey ?? (isActive ? fallback.apiKey : ''),
+            workflowId: p.workflowId || (isActive ? fallback.workflowId : ''),
+            promptStyle: p.promptStyle || fallback.promptStyle,
+            provider: p.provider ?? (isActive ? fallback.provider : undefined),
+            stillMode: p.stillMode,
+            adapter: p.adapter ?? (isActive ? fallback.adapter : undefined)
+          }),
+          p.name,
+          p.id
+        )
+      })
+    : [videoFromEndpoint(normalizeStoredVideoEndpoint(fallback), '默认视频')]
   const activeId = list.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : list[0].id
   const active = list.find((p) => p.id === activeId) || list[0]
   return { list, activeId: active.id, active: asVideo(active) }

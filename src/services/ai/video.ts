@@ -11,7 +11,7 @@
 
 import { getAIMode } from './client'
 import { comfyPromptGenerate, httpCustomMediaGenerate, resolveVideoAdapter } from './adapters'
-import { getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
+import { autodlVideoProfileId, getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
 import {
@@ -1235,18 +1235,31 @@ export async function generateVideo(
     if (input.videoModel === 'wan-prime') {
       return await realWanVideo(input, onProgress)
     }
-    const vcfg = getVideoConfig(input.videoProfileId)
+    const request = input.videoModel === 'h3-v5'
+      ? { ...input, videoProfileId: autodlVideoProfileId() || input.videoProfileId }
+      : input
+    const vcfg = getVideoConfig(request.videoProfileId)
     const adapterType = resolveVideoAdapter(vcfg)
-    if (adapterType === 'zealman-workflow') {
-      return await realZealmanVideo(input, onProgress)
+    // 三条都要成立才走镜像：接入声明是 Zealman、适配器是 zealman-workflow、工作流 id 是内置 U 系列。
+    // 10 秒 H3 固定是 AutoDL 工作流，不能因为当前激活项是 Zealman 就改道。
+    if (
+      request.videoModel !== 'h3-v5' &&
+      vcfg.provider === 'zealman' &&
+      adapterType === 'zealman-workflow' &&
+      zealmanWorkflowById(vcfg.workflowId || '')
+    ) {
+      return await realZealmanVideo(request, onProgress)
+    }
+    if (request.videoModel === 'h3-v5' && vcfg.provider === 'zealman') {
+      throw new Error('[video] 10 秒 H3 走 AutoDL 工作流。当前没有可用的 AutoDL 接入，请到设置里保存 AutoDL 算力，不要用 Zealman 镜像。')
     }
     if (adapterType === 'comfyui-prompt') {
-      return await realComfyNativeVideo(input, onProgress)
+      return await realComfyNativeVideo(request, onProgress)
     }
     if (adapterType === 'http-custom') {
-      return await realHttpCustomVideo(input, onProgress)
+      return await realHttpCustomVideo(request, onProgress)
     }
-    return await realWorkflowVideo(input, onProgress)
+    return await realWorkflowVideo(request, onProgress)
   }
 
   // mock：只需要一张图（多张也只用第一张）

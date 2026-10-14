@@ -6,19 +6,33 @@ import { useSettingsStore } from '@/stores'
 const props = withDefaults(
   defineProps<{
     modelValue?: VideoGenModel | string
+    profileId?: string
     label?: string
   }>(),
   { label: '模型' }
 )
 
-const emit = defineEmits<{ 'update:modelValue': [value: VideoGenModel] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: VideoGenModel]
+  'selectProfile': [profileId: string]
+}>()
 const settings = useSettingsStore()
 
 const value = computed(() => {
   const m = normalizeVideoGenModel(props.modelValue)
   if (m === 'wan-prime' || m === 'h3-v5') return m
+  if (props.profileId && settings.config.videos.some((profile) => profile.id === props.profileId)) {
+    return props.profileId
+  }
   return settings.config.activeVideoId || 'h3'
 })
+
+function profileLabel(profile: { name: string; provider?: string; baseUrl?: string; adapter?: { type?: string } }) {
+  const zealman = profile.provider === 'zealman' || profile.adapter?.type === 'zealman-workflow'
+  const autodl = !zealman && (profile.provider === 'autodl' || /autodl\.art/i.test(profile.baseUrl || ''))
+  const tag = zealman ? 'Zealman' : autodl ? 'AutoDL' : ''
+  return tag ? `${tag} · ${profile.name}` : profile.name
+}
 
 function onChange(event: Event) {
   const v = (event.target as HTMLSelectElement).value
@@ -26,8 +40,7 @@ function onChange(event: Event) {
     emit('update:modelValue', v)
     return
   }
-  settings.selectVideo(v)
-  emit('update:modelValue', 'h3')
+  emit('selectProfile', v)
 }
 </script>
 
@@ -37,7 +50,7 @@ function onChange(event: Event) {
     <select :value="value" @change="onChange">
       <optgroup v-if="settings.config.videos.length" label="已配置的视频接入">
         <option v-for="p in settings.config.videos" :key="p.id" :value="p.id">
-          {{ p.name }}{{ stillModeForVideoModel('h3', p) === 'keyframe' ? ' · 关键帧' : stillModeForVideoModel('h3', p) === 'storyboard' ? ' · 看板' : '' }}
+          {{ profileLabel(p) }}{{ stillModeForVideoModel('h3', p) === 'keyframe' ? ' · 关键帧' : stillModeForVideoModel('h3', p) === 'storyboard' ? ' · 看板' : '' }}
         </option>
       </optgroup>
       <optgroup label="工作流（用设置里的 AutoDL 令牌）">

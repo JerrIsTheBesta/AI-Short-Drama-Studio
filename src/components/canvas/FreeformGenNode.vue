@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useToastStore } from '@/stores'
 import { runCanvasNode, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
-import { applyShotVideoModel } from '@/services/canvas/videoModel'
+import { applyShotVideoModel, applyShotVideoProfile } from '@/services/canvas/videoModel'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import { cssAspectRatio } from '@/services/canvas/layout'
@@ -646,7 +646,12 @@ function removeSelf() {
         />
         <div class="prompt-foot">
           <ImageModelSelect v-if="!isVideo" />
-          <VideoModelSelect v-else v-model="videoModel" />
+          <VideoModelSelect
+            v-else
+            v-model="videoModel"
+            :profile-id="node?.data.videoProfileId"
+            @select-profile="(id) => applyShotVideoProfile(props.id, id)"
+          />
           <div v-if="isVideo" class="dur-edit">
             <button type="button" class="dur-btn" @click="durOpen = durOpen === 'foot' ? '' : 'foot'">
               {{ duration }} 秒
