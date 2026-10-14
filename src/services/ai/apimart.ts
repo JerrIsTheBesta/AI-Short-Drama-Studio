@@ -13,6 +13,28 @@ export const APIMART_IMAGE_MODEL = 'gpt-image-2'
 export const APIMART_VIDEO_MODEL = 'grok-imagine-1.5-video-ext'
 
 const VIDEO_SIZES = new Set(['16:9', '9:16', '1:1', '3:2', '2:3'])
+const RELAY_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2'] as const
+
+/** 上游不接受 aspect_ratio=auto，只接受固定比例。 */
+export function concreteAspectRatio(raw?: string, width?: number, height?: number): string {
+  const ratio = String(raw || '').trim()
+  if ((RELAY_RATIOS as readonly string[]).includes(ratio)) return ratio
+  if (width && height && width > 0 && height > 0) {
+    const value = width / height
+    let best: string = '16:9'
+    let bestDiff = Number.POSITIVE_INFINITY
+    for (const name of RELAY_RATIOS) {
+      const [w, h] = name.split(':').map(Number)
+      const diff = Math.abs(value - w / h)
+      if (diff < bestDiff) {
+        best = name
+        bestDiff = diff
+      }
+    }
+    return best
+  }
+  return '16:9'
+}
 
 export function isApimartEndpoint(baseUrl?: string, provider?: string): boolean {
   if (provider === 'apimart') return true
@@ -94,14 +116,11 @@ function pickModel(raw: string | undefined, fallback: string): string {
 }
 
 function videoSize(aspectRatio?: string, width?: number, height?: number): string {
-  const ratio = String(aspectRatio || '').trim()
+  const ratio = concreteAspectRatio(aspectRatio, width, height)
   if (VIDEO_SIZES.has(ratio)) return ratio
-  if (ratio === '4:3' || ratio === '3:4') return ratio === '4:3' ? '3:2' : '2:3'
-  if (width && height) {
-    if (Math.abs(width - height) < 40) return '1:1'
-    return height > width ? '9:16' : '16:9'
-  }
-  return '16:9'
+  if (ratio === '4:3' || ratio === '21:9' || ratio === '5:2') return '16:9'
+  if (ratio === '3:4') return '2:3'
+  return height && width && height > width ? '9:16' : '16:9'
 }
 
 function videoSeconds(model: string, raw?: number): number {
@@ -379,7 +398,7 @@ export async function apimartGenerateImage(opts: {
     model,
     prompt: opts.prompt,
     n: count,
-    size: opts.aspectRatio || '1:1',
+    size: !opts.aspectRatio || opts.aspectRatio === 'auto' ? '1:1' : concreteAspectRatio(opts.aspectRatio),
     resolution: imageResolution(opts.resolution)
   }
   if (imageUrls.length) body.image_urls = imageUrls
@@ -430,10 +449,12 @@ export async function apimartGenerateVideo(opts: {
       opts.signal,
       opts.onProgress
     )
+    const ratio = concreteAspectRatio(opts.aspectRatio, opts.width, opts.height)
     const body: Record<string, unknown> = {
       model,
       prompt: opts.prompt,
-      size: videoSize(opts.aspectRatio, opts.width, opts.height),
+      size: videoSize(ratio, opts.width, opts.height),
+      aspect_ratio: ratio,
       duration,
       resolution: videoQuality(opts.resolution)
     }

@@ -1118,7 +1118,7 @@ async function realHttpCustomVideo(
       ...(images.length ? { images } : {}),
       ...(lastFrame ? { last_frame: lastFrame } : {}),
       duration: input.duration,
-      aspect_ratio: input.aspectRatio,
+      aspect_ratio: input.aspectRatio && String(input.aspectRatio) !== 'auto' ? input.aspectRatio : '16:9',
       width: input.width,
       height: input.height
     },

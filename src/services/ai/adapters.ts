@@ -472,9 +472,11 @@ function requestBodyForProvider(
   const images = listed.length ? listed : stringList(source.image)
   const body: Record<string, unknown> = { model, prompt }
   if (source.duration != null) body.duration = source.duration
-  const ratio = source.aspect_ratio || source.aspectRatio
+  const rawRatio = source.aspect_ratio || source.aspectRatio || source.size
+  const ratio = !rawRatio || rawRatio === 'auto' ? '16:9' : String(rawRatio)
   if (kind === 'video') {
-    body.size = ratio || source.size || '16:9'
+    body.size = ratio
+    body.aspect_ratio = ratio
     const seconds = Math.round(Number(source.duration) || 6)
     body.duration = /grok-imagine-1\.5/i.test(model) ? Math.min(15, Math.max(6, seconds || 6)) : seconds
     const quality = String(source.resolution || '')
