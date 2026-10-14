@@ -68,6 +68,30 @@ export function isAutodlHost(url: string): boolean {
   }
 }
 
+export function isApimartHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return (
+      host === 'apimart.ai' ||
+      host.endsWith('.apimart.ai') ||
+      host === 'aiuxu.com' ||
+      host.endsWith('.aiuxu.com') ||
+      host === 'aishuch.com' ||
+      host.endsWith('.aishuch.com')
+    )
+  } catch {
+    return /apimart\.ai|aiuxu\.com|aishuch\.com/i.test(url)
+  }
+}
+
+/** 官方域名，以及配了 /v1/tasks/{id} 的白标网关，都走同一套异步生图/视频协议。 */
+export function usesApimartProtocol(baseUrl: string, adapter?: AdapterConfig): boolean {
+  if (isApimartHost(baseUrl)) return true
+  const poll = `${adapter?.pollPath || ''} ${adapter?.pollUrl || ''}`
+  const path = adapter?.path || ''
+  return /\/tasks\/\{id\}/i.test(poll) && /generations/i.test(path)
+}
+
 export function isLocalComfyHost(url: string): boolean {
   try {
     const u = new URL(url)
@@ -80,6 +104,7 @@ export function isLocalComfyHost(url: string): boolean {
 
 /** 推断图像适配器 */
 export function resolveImageAdapter(ep: EndpointLike): AdapterType {
+  if (isApimartHost(ep.baseUrl || '') || ep.provider === 'apimart') return 'http-custom'
   const t = ep.adapter?.type
   if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'openai-images' || t === 'comfyui-workflow') {
     return t
@@ -107,35 +132,48 @@ export function normalizeStoredVideoEndpoint<T extends EndpointLike>(ep: T): T {
   return ep
 }
 
-/** 推断视频适配器。AutoDL 地址优先于残留的 Zealman adapter，避免误打 /api/workflow/generate。 */
+/** 推断视频适配器。第三方 HTTP（如 APIMart）不能因为 provider=custom 就被当成自建 ComfyUI。 */
 export function resolveVideoAdapter(ep: EndpointLike): AdapterType {
   const normalized = normalizeStoredVideoEndpoint(ep)
+  const url = normalized.baseUrl || ''
+  if (isApimartHost(url) || normalized.provider === 'apimart') return 'http-custom'
   const t = normalized.adapter?.type
   const zealmanWorkflow = Boolean(zealmanWorkflowById(normalized.workflowId || ''))
   if (normalized.provider === 'zealman' && t === 'zealman-workflow' && zealmanWorkflow) return 'zealman-workflow'
   if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'comfyui-workflow') return t
   if (t === 'zealman-workflow' && normalized.provider === 'zealman') return 'zealman-workflow'
-  const url = normalized.baseUrl || ''
   if (isAutodlHost(url) || normalized.provider === 'autodl') return 'comfyui-workflow'
-  if (normalized.provider === 'custom' || isLocalComfyHost(url) || /comfy/i.test(url)) return 'comfyui-prompt'
+  if (isLocalComfyHost(url) || /comfyui/i.test(url)) return 'comfyui-prompt'
+  if (normalized.provider === 'custom' && /^https?:\/\//i.test(url)) return 'http-custom'
   // 默认仍走 AutoDL 风格工作流 API（兼容旧配置）
   return 'comfyui-workflow'
+}
+
+function withAuthSeparator(prefix: string): string {
+  const trimmed = prefix.trim()
+  if (!trimmed) return ''
+  if (/^bearer$/i.test(trimmed)) return 'Bearer '
+  if (/^(token|basic)$/i.test(trimmed)) return `${trimmed} `
+  return /\s$/.test(prefix) ? prefix : prefix
 }
 
 export function buildAuthHeader(
   apiKey: string,
   adapter?: AdapterConfig
 ): Record<string, string> {
-  const token = (apiKey || '').trim()
+  let token = (apiKey || '').trim().replace(/^\uFEFF/, '').replace(/^['"]+|['"]+$/g, '')
+  token = token.replace(/^bearer\s+/i, '').trim()
   if (!token) return {}
   const name = (adapter?.authHeader || 'Authorization').trim() || 'Authorization'
-  const prefix =
+  const prefix = withAuthSeparator(
     adapter?.authPrefix === undefined || adapter?.authPrefix === null
       ? name.toLowerCase() === 'authorization'
         ? 'Bearer '
         : ''
       : String(adapter.authPrefix)
-  return { [name]: `${prefix}${token}` }
+  )
+  const prefixText = prefix && !token.toLowerCase().startsWith(prefix.trim().toLowerCase()) ? prefix : ''
+  return { [name]: `${prefixText}${token}` }
 }
 
 export function getByJsonPath(data: unknown, path?: string): unknown {
@@ -202,6 +240,8 @@ export async function providerHttp(
     method?: string
     headers?: Record<string, string>
     body?: string
+    bodyBase64?: string
+    contentType?: string
     signal?: AbortSignal
     timeoutMs?: number
   } = {}
@@ -229,7 +269,9 @@ export async function providerHttp(
       extraHeaders: Object.fromEntries(
         Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization')
       ),
-      body: init.body,
+      body: init.bodyBase64 ? undefined : init.body,
+      bodyBase64: init.bodyBase64,
+      contentType: init.contentType,
       timeoutMs
     })
     return {
@@ -252,10 +294,19 @@ export async function providerHttp(
   const onAbort = () => controller.abort()
   init.signal?.addEventListener('abort', onAbort)
   try {
+    const headers = { ...(init.headers || {}) }
+    let body: BodyInit | undefined = init.body
+    if (init.bodyBase64) {
+      const binary = atob(init.bodyBase64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      body = bytes
+      if (init.contentType) headers['Content-Type'] = init.contentType
+    }
     const resp = await fetch(url, {
       method,
-      headers: init.headers,
-      body: init.body,
+      headers,
+      body,
       signal: controller.signal
     })
     const bytes = await resp.arrayBuffer()
@@ -294,12 +345,16 @@ function extractTaskId(data: any, adapter?: AdapterConfig): string {
   const fromPath = adapter?.taskIdJsonPath
     ? getByJsonPath(data, adapter.taskIdJsonPath)
     : undefined
+  const first = Array.isArray(data?.data) ? data.data[0] : undefined
   const raw =
     fromPath ??
     data?.id ??
     data?.task_id ??
     data?.taskId ??
     data?.request_id ??
+    first?.task_id ??
+    first?.id ??
+    getByJsonPath(data, 'data.0.task_id') ??
     getByJsonPath(data, 'data.id') ??
     getByJsonPath(data, 'data.task_id') ??
     getByJsonPath(data, 'output.task_id')
@@ -345,6 +400,96 @@ async function mediaFromValue(
   return null
 }
 
+async function mediaFromUnknown(
+  picked: unknown,
+  signal?: AbortSignal,
+  fallbackMime = 'application/octet-stream'
+): Promise<{ blob: Blob; mimeType: string } | null> {
+  const direct = await mediaFromValue(picked, signal, fallbackMime)
+  if (direct) return direct
+  const url = findFirstMediaUrl(picked)
+  if (!url || url === picked) return null
+  return mediaFromValue(url, signal, fallbackMime)
+}
+
+function apimartSubmitPath(baseUrl: string, kind: 'image' | 'video'): string {
+  const rooted = /\/v1$/i.test(trimSlash(baseUrl))
+  const leaf = kind === 'video' ? 'videos/generations' : 'images/generations'
+  return rooted ? `/${leaf}` : `/v1/${leaf}`
+}
+
+function apimartPollPath(baseUrl: string): string {
+  return /\/v1$/i.test(trimSlash(baseUrl)) ? '/tasks/{id}?language=zh' : '/v1/tasks/{id}?language=zh'
+}
+
+function isGenericMediaPath(path: string | undefined, kind: 'image' | 'video'): boolean {
+  const value = String(path || '').trim().replace(/^\//, '').toLowerCase()
+  if (!value) return true
+  if (kind === 'image') return value === 'images/generations' || value === 'v1/images/generations'
+  return value === 'videos/generations' || value === 'v1/videos/generations'
+}
+
+/** APIMart 是异步任务：POST /v1/.../generations，再 GET /v1/tasks/{id}。 */
+function apimartAdapterDefaults(
+  baseUrl: string,
+  adapter: AdapterConfig | undefined,
+  kind: 'image' | 'video'
+): AdapterConfig {
+  const current = adapter || {}
+  if (!usesApimartProtocol(baseUrl, current)) return current
+  return {
+    ...current,
+    type: 'http-custom',
+    path: isGenericMediaPath(current.path, kind) ? apimartSubmitPath(baseUrl, kind) : current.path,
+    pollPath: current.pollPath || current.pollUrl || apimartPollPath(baseUrl),
+    taskIdJsonPath: current.taskIdJsonPath || 'data.0.task_id',
+    pollJsonPath: current.pollJsonPath || 'data.status',
+    resultJsonPath: current.resultJsonPath || (kind === 'video' ? 'data.result.videos' : 'data.result.images'),
+    authHeader: current.authHeader || 'Authorization',
+    authPrefix: current.authPrefix ?? 'Bearer '
+  }
+}
+
+function stringList(value: unknown): string[] {
+  if (typeof value === 'string' && value.trim()) return [value.trim()]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+}
+
+function requestBodyForProvider(
+  baseUrl: string,
+  adapter: AdapterConfig | undefined,
+  kind: 'image' | 'video',
+  model: string,
+  prompt: string,
+  extra?: Record<string, unknown>
+): Record<string, unknown> {
+  if (!usesApimartProtocol(baseUrl, adapter)) {
+    return { model, prompt, ...(extra || {}) }
+  }
+  const source = extra || {}
+  const listed = [...stringList(source.image_urls), ...stringList(source.images)]
+  const images = listed.length ? listed : stringList(source.image)
+  const body: Record<string, unknown> = { model, prompt }
+  if (source.duration != null) body.duration = source.duration
+  const ratio = source.aspect_ratio || source.aspectRatio
+  if (kind === 'video') {
+    body.size = ratio || source.size || '16:9'
+    const seconds = Math.round(Number(source.duration) || 6)
+    body.duration = /grok-imagine-1\.5/i.test(model) ? Math.min(15, Math.max(6, seconds || 6)) : seconds
+    const quality = String(source.resolution || '')
+    body.resolution = /480/.test(quality) ? '480p' : '720p'
+    if (images.length) body.image_urls = images.slice(0, 7)
+    return body
+  }
+  body.n = Math.max(1, Math.round(Number(source.n) || 1))
+  body.size = ratio || source.size || '1:1'
+  const tier = String(source.resolution || '2k').toLowerCase()
+  body.resolution = tier.includes('4k') ? '4k' : tier === '1k' ? '1k' : '2k'
+  if (images.length) body.image_urls = images.slice(0, 15)
+  return body
+}
+
 /** 自定义 HTTP：POST JSON；可选 pollUrl/{id} 轮询；从 resultJsonPath 取媒体 */
 export async function httpCustomMediaGenerate(opts: {
   baseUrl: string
@@ -357,12 +502,10 @@ export async function httpCustomMediaGenerate(opts: {
   kind?: 'image' | 'video'
   onProgress?: (msg: string) => void
 }): Promise<{ blob: Blob; mimeType: string }> {
-  const adapter = opts.adapter || {}
   const kind = opts.kind || 'image'
+  const adapter = apimartAdapterDefaults(opts.baseUrl, opts.adapter, kind)
   const fallbackMime = kind === 'video' ? 'video/mp4' : 'image/png'
-  const path =
-    adapter.path ||
-    (kind === 'video' ? '/v1/videos/generations' : '/images/generations')
+  const path = adapter.path || (kind === 'video' ? '/v1/videos/generations' : '/images/generations')
   const url = joinUrl(opts.baseUrl, path)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -370,11 +513,7 @@ export async function httpCustomMediaGenerate(opts: {
     ...buildAuthHeader(opts.apiKey, adapter),
     ...(adapter.headers || {})
   }
-  const body = {
-    model: opts.model,
-    prompt: opts.prompt,
-    ...(opts.extraBody || {})
-  }
+  const body = requestBodyForProvider(opts.baseUrl, adapter, kind, opts.model, opts.prompt, opts.extraBody)
   opts.onProgress?.('提交自定义接口…')
   const res = await providerHttp(url, {
     method: 'POST',
@@ -384,7 +523,11 @@ export async function httpCustomMediaGenerate(opts: {
     timeoutMs: kind === 'video' ? 180_000 : 180_000
   })
   if (!res.ok) {
-    throw new Error(`[${kind}] 自定义接口失败 ${res.status} ${await res.text()}`)
+    const text = await res.text()
+    const hint = res.status === 401 && usesApimartProtocol(url, adapter)
+      ? '\n鉴权头必须是 “Bearer ” 加密钥，中间要有空格。请确认这条接入的前缀是 Bearer，而不是和密钥粘在一起。'
+      : ''
+    throw new Error(`[${kind}] 自定义接口失败 ${res.status}\n请求地址：${url}\n${text.slice(0, 500)}${hint}`)
   }
   let data = await res.json()
 
@@ -415,20 +558,35 @@ export async function httpCustomMediaGenerate(opts: {
         signal: opts.signal,
         timeoutMs: 60_000
       })
-      if (!poll.ok) continue
+      if (!poll.ok) {
+        if (poll.status === 401 || poll.status === 403) {
+          throw new Error(`[${kind}] 查询任务被拒绝 ${poll.status}\n请求地址：${pollUrl}\n${(await poll.text()).slice(0, 400)}`)
+        }
+        continue
+      }
       data = await poll.json()
       const statusRaw = adapter.pollJsonPath
         ? getByJsonPath(data, adapter.pollJsonPath)
         : data?.status || data?.state || getByJsonPath(data, 'data.status')
       const status = String(statusRaw || '').toLowerCase()
       if (/fail|error|cancel/.test(status)) {
-        throw new Error(`[${kind}] 任务失败：${JSON.stringify(statusRaw).slice(0, 200)}`)
+        const message =
+          getByJsonPath(data, 'data.error.message') ||
+          data?.error?.message ||
+          data?.message ||
+          statusRaw
+        throw new Error(`[${kind}] 任务失败：${String(message).slice(0, 300)}`)
       }
+      const waiting = /^(pending|processing|submitted|queued|running|in_progress)$/.test(status)
+      if (waiting) continue
       const picked =
         (adapter.resultJsonPath ? getByJsonPath(data, adapter.resultJsonPath) : undefined) ??
         findFirstMediaUrl(data)
-      const media = await mediaFromValue(picked, opts.signal, fallbackMime)
+      const media = await mediaFromUnknown(picked, opts.signal, fallbackMime)
       if (media) return media
+      if (/^(completed|success|succeeded|succeed)$/.test(status)) {
+        throw new Error(`[${kind}] 任务已完成，但响应里没有媒体地址。片段：${JSON.stringify(data).slice(0, 240)}`)
+      }
     }
     throw new Error(`[${kind}] 自定义接口轮询超时`)
   }
@@ -438,7 +596,7 @@ export async function httpCustomMediaGenerate(opts: {
     getByJsonPath(data, 'data.0.b64_json') ??
     getByJsonPath(data, 'data.0.url') ??
     findFirstMediaUrl(data)
-  const media = await mediaFromValue(picked, opts.signal, fallbackMime)
+  const media = await mediaFromUnknown(picked, opts.signal, fallbackMime)
   if (media) return media
   throw new Error(
     `[${kind}] 自定义接口未解析到媒体。请设置 adapter.resultJsonPath。片段：${JSON.stringify(data).slice(0, 240)}`

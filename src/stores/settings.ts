@@ -10,7 +10,7 @@ import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/serv
 import { desktop, isDesktop } from '@/services/desktop'
 import { stillModeForVideoModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
-import { normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
+import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 
 export type { AdapterConfig }
 
@@ -308,6 +308,29 @@ function hydrateTts(
   return { list, activeId: active.id, active: asTts(active) }
 }
 
+function isAutodlVideoProfile(profile: { provider?: string; baseUrl?: string; adapter?: AdapterConfig; workflowId?: string }): boolean {
+  const normalized = normalizeStoredVideoEndpoint(profile)
+  return normalized.provider === 'autodl' || isAutodlHost(normalized.baseUrl || '')
+}
+
+/** AutoDL 令牌只留在 AutoDL 接入上。其它供应商如果存了同一串，读档时清掉。 */
+function isolateVideoKeys(list: VideoProfile[]): VideoProfile[] {
+  const autodlKeys = new Set(
+    list
+      .filter((profile) => isAutodlVideoProfile(profile))
+      .map((profile) => String(profile.apiKey || '').trim())
+      .filter(Boolean)
+  )
+  if (!autodlKeys.size) return list
+  return list.map((profile) => {
+    const key = String(profile.apiKey || '').trim()
+    if (!isAutodlVideoProfile(profile) && key && autodlKeys.has(key)) {
+      return { ...profile, apiKey: '' }
+    }
+    return profile
+  })
+}
+
 function hydrateVideo(
   saved: unknown,
   fallback: VideoEndpoint,
@@ -336,9 +359,10 @@ function hydrateVideo(
         )
       })
     : [videoFromEndpoint(normalizeStoredVideoEndpoint(fallback), '默认视频')]
-  const activeId = list.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : list[0].id
-  const active = list.find((p) => p.id === activeId) || list[0]
-  return { list, activeId: active.id, active: asVideo(active) }
+  const isolated = isolateVideoKeys(list)
+  const activeId = isolated.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : isolated[0].id
+  const active = isolated.find((p) => p.id === activeId) || isolated[0]
+  return { list: isolated, activeId: active.id, active: asVideo(active) }
 }
 
 function buildDefaults(): AppSettings {
@@ -940,7 +964,19 @@ export const useSettingsStore = defineStore('settings', () => {
     const id = config.value.activeVideoId
     const cur =
       config.value.videos.find((p) => p.id === id) || videoFromEndpoint(config.value.video, '默认视频', id)
-    syncVideo({ ...cur, ...patch })
+    const next = { ...cur, ...patch }
+    if (patch.apiKey !== undefined && !isAutodlVideoProfile(next)) {
+      const incoming = String(patch.apiKey || '').trim()
+      const belongsToAutodl = config.value.videos.some(
+        (profile) =>
+          profile.id !== id &&
+          isAutodlVideoProfile(profile) &&
+          String(profile.apiKey || '').trim() === incoming &&
+          Boolean(incoming)
+      )
+      if (belongsToAutodl) next.apiKey = ''
+    }
+    syncVideo(next)
   }
 
   function setZealmanBaseUrl(baseUrl: string) {

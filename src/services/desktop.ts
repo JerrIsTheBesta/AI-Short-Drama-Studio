@@ -32,6 +32,8 @@ export type DesktopAPI = {
     authorization?: string
     extraHeaders?: Record<string, string>
     body?: string
+    bodyBase64?: string
+    contentType?: string
     timeoutMs?: number
   }) => Promise<{ status: number; ok: boolean; text: string; dataBase64?: string; contentType?: string }>
   llmFetch: (opts: {
