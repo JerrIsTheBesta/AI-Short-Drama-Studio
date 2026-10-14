@@ -17,6 +17,7 @@ import {
   comfyPromptGenerate,
   resolveImageAdapter
 } from './adapters'
+import { apimartGenerateImage, isRelayImageEndpoint } from './apimart'
 import type { VisualStyle, AspectRatio } from '@/types'
 import { abortableDelay } from './abort'
 
@@ -429,8 +430,28 @@ export async function generateImage(
   if (getAIMode() === 'real') {
     const cfg = imageConfig(input.model)
     const adapterType = resolveImageAdapter(cfg)
-    if (adapterType === 'http-custom' || adapterType === 'comfyui-prompt' || adapterType === 'comfyui-workflow') {
-      onProgress?.(adapterType === 'http-custom' ? '自定义接口出图...' : 'ComfyUI 出图...')
+    if (
+      adapterType !== 'comfyui-prompt' &&
+      adapterType !== 'comfyui-workflow' &&
+      (isRelayImageEndpoint(cfg.baseUrl, cfg.provider) || adapterType === 'http-custom')
+    ) {
+      const prompt = withGptImageQuality(buildPrompt(input, Boolean(input.referenceImages?.length)), cfg.model)
+      onProgress?.(input.referenceImages?.length ? '中转站图生图...' : '中转站文生图...')
+      const { blob, mimeType } = await apimartGenerateImage({
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        prompt,
+        aspectRatio: input.aspectRatio,
+        n: input.n,
+        referenceImages: input.referenceImages,
+        signal: input.signal,
+        onProgress
+      })
+      return { blob, mimeType, prompt }
+    }
+    if (adapterType === 'comfyui-prompt' || adapterType === 'comfyui-workflow') {
+      onProgress?.('ComfyUI 出图...')
       return await realCustomOrComfy(input)
     }
     if (isSeedreamModel(model)) {

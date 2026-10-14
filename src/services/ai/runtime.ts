@@ -87,6 +87,26 @@ export function autodlVideoProfileId(): string | undefined {
   return (active || list[0])?.id
 }
 
+function isAutodlVideoProfile(profile: { provider?: string; baseUrl?: string }): boolean {
+  return profile.provider === 'autodl' || isAutodlHost(profile.baseUrl || '')
+}
+
+/** 非 AutoDL 接入如果存进了 AutoDL 令牌，生成时丢掉，不拿去请求别的供应商。 */
+function videoKeyForProfile(
+  profile: { id?: string; provider?: string; baseUrl?: string; apiKey?: string } | undefined,
+  envKey: string
+): string {
+  const key = String(profile?.apiKey || '').trim()
+  if (!profile) return envKey
+  if (isAutodlVideoProfile(profile)) return key || envKey
+  const settings = pick()
+  const stolen = (settings?.videos || []).some((item) => {
+    if (item.id === profile.id) return false
+    return isAutodlVideoProfile(item) && String(item.apiKey || '').trim() === key && Boolean(key)
+  })
+  return stolen ? '' : key
+}
+
 export function getVideoConfig(profileId?: string) {
   const d = envDefaults().video
   const settings = pick()
@@ -117,7 +137,7 @@ export function getVideoConfig(profileId?: string) {
   }
   return {
     baseUrl: migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
-    apiKey: s?.apiKey || d.apiKey,
+    apiKey: videoKeyForProfile(s, d.apiKey),
     workflowId: migrateVideoWorkflowId(s?.workflowId || d.workflowId),
     promptStyle: getVideoPromptStyle(),
     adapter: s?.adapter,

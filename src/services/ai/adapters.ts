@@ -71,9 +71,16 @@ export function isAutodlHost(url: string): boolean {
 export function isApimartHost(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase()
-    return host === 'apimart.ai' || host.endsWith('.apimart.ai') || host === 'aiuxu.com' || host.endsWith('.aiuxu.com')
+    return (
+      host === 'apimart.ai' ||
+      host.endsWith('.apimart.ai') ||
+      host === 'aiuxu.com' ||
+      host.endsWith('.aiuxu.com') ||
+      host === 'aishuch.com' ||
+      host.endsWith('.aishuch.com')
+    )
   } catch {
-    return /apimart\.ai|aiuxu\.com/i.test(url)
+    return /apimart\.ai|aiuxu\.com|aishuch\.com/i.test(url)
   }
 }
 
@@ -454,22 +461,19 @@ function requestBodyForProvider(
   if (source.duration != null) body.duration = source.duration
   const ratio = source.aspect_ratio || source.aspectRatio
   if (kind === 'video') {
-    if (ratio) body.aspect_ratio = ratio
-    const last = stringList(source.last_frame)[0]
-    if (last && images.length) {
-      body.first_frame_image = images[0]
-      body.last_frame_image = last
-    } else if (images.length === 1) {
-      body.first_frame_image = images[0]
-    } else if (images.length > 1) {
-      body.image_urls = images
-    }
+    body.size = ratio || source.size || '16:9'
+    const seconds = Math.round(Number(source.duration) || 6)
+    body.duration = /grok-imagine-1\.5/i.test(model) ? Math.min(15, Math.max(6, seconds || 6)) : seconds
+    const quality = String(source.resolution || '')
+    body.resolution = /480/.test(quality) ? '480p' : '720p'
+    if (images.length) body.image_urls = images.slice(0, 7)
     return body
   }
-  body.n = source.n || 1
-  if (ratio) body.size = ratio
-  else if (source.size) body.size = source.size
-  if (images.length) body.image_urls = images
+  body.n = Math.max(1, Math.round(Number(source.n) || 1))
+  body.size = ratio || source.size || '1:1'
+  const tier = String(source.resolution || '2k').toLowerCase()
+  body.resolution = tier.includes('4k') ? '4k' : tier === '1k' ? '1k' : '2k'
+  if (images.length) body.image_urls = images.slice(0, 15)
   return body
 }
 

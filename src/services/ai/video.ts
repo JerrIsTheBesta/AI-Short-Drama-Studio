@@ -11,6 +11,7 @@
 
 import { getAIMode } from './client'
 import { comfyPromptGenerate, httpCustomMediaGenerate, isApimartHost, resolveVideoAdapter } from './adapters'
+import { apimartGenerateVideo, isApimartEndpoint } from './apimart'
 import { autodlVideoProfileId, getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
@@ -1054,6 +1055,40 @@ function buildPrompt(input: VideoGenInput): string {
   return raw
 }
 
+async function realApimartVideo(
+  input: VideoGenInput,
+  onProgress?: (msg: string) => void
+): Promise<VideoGenOutput> {
+  const cfg = getVideoConfig(input.videoProfileId)
+  if (!cfg.apiKey) {
+    throw new Error('[video] 这条 APIMart 视频接入还没有自己的 API Key。不会使用 AutoDL 令牌。')
+  }
+  const prompt = input.prompt.trim()
+  if (!prompt) throw new Error('[video] 请填写视频内容描述')
+  const images: Blob[] = []
+  if (input.imageBlob) images.push(input.imageBlob)
+  for (const blob of input.referenceImages || []) images.push(blob)
+  if (input.lastFrameBlob) images.push(input.lastFrameBlob)
+  onProgress?.('APIMart 出视频...')
+  const { blob, mimeType, duration } = await apimartGenerateVideo({
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.workflowId,
+    prompt,
+    aspectRatio: input.aspectRatio,
+    width: input.width,
+    height: input.height,
+    duration: input.duration,
+    resolution: input.videoResolution,
+    images,
+    signal: input.signal,
+    onProgress,
+    onTaskSubmitted: input.onTaskSubmitted,
+    resumeTaskId: input.resumeTaskId
+  })
+  return { blob, mimeType, prompt, duration }
+}
+
 async function realHttpCustomVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
@@ -1240,7 +1275,11 @@ export async function generateVideo(
         throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
       }
     } else if (!input.imageBlob) {
-      throw new Error('[video] 真实模式需要至少一张参考图')
+      const peekId = input.videoModel === 'h3-v5' ? autodlVideoProfileId() || input.videoProfileId : input.videoProfileId
+      const peek = getVideoConfig(peekId)
+      if (!isApimartEndpoint(peek.baseUrl, peek.provider)) {
+        throw new Error('[video] 真实模式需要至少一张参考图')
+      }
     }
     // 真实模式失败不再静默回退 mock，避免把「假动画/静态图」当成成品视频
     if (input.videoModel === 'wan-prime') {
@@ -1250,6 +1289,9 @@ export async function generateVideo(
       ? { ...input, videoProfileId: autodlVideoProfileId() || input.videoProfileId }
       : input
     const vcfg = getVideoConfig(request.videoProfileId)
+    if (isApimartEndpoint(vcfg.baseUrl, vcfg.provider)) {
+      return await realApimartVideo(request, onProgress)
+    }
     const adapterType = resolveVideoAdapter(vcfg)
     // 三条都要成立才走镜像：接入声明是 Zealman、适配器是 zealman-workflow、工作流 id 是内置 U 系列。
     // 10 秒 H3 固定是 AutoDL 工作流，不能因为当前激活项是 Zealman 就改道。

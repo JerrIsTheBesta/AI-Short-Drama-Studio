@@ -167,10 +167,10 @@ export const IMAGE_PROVIDERS: ProviderPreset[] = [
   {
     id: 'apimart',
     name: 'APIMart',
-    hint: '异步生图。地址用 https://api.apimart.ai，模型名填文档里的 model。提交后查询 /v1/tasks/{id}。',
-    baseUrl: 'https://api.apimart.ai',
-    models: ['gpt-image-1-official', 'gpt-image-1.5-official'],
-    defaultModel: 'gpt-image-1-official',
+    hint: '内置生图。只填接口地址和 API Key，默认 https://api.aishuch.com。模型默认 gpt-image-2，文生图和图生图同一接口。',
+    baseUrl: 'https://api.aishuch.com',
+    models: ['gpt-image-2', 'gpt-image-2-ext', 'seedream-4.5'],
+    defaultModel: 'gpt-image-2',
     keyPlaceholder: 'APIMart API Key'
   },
   CUSTOM_PROVIDER
@@ -221,10 +221,10 @@ export const VIDEO_PROVIDERS: ProviderPreset[] = [
   {
     id: 'apimart',
     name: 'APIMart',
-    hint: '异步视频。地址用 https://api.apimart.ai，工作流 ID 填模型名（如 MiniMax-H3）。提交后查询 /v1/tasks/{id}。',
-    baseUrl: 'https://api.apimart.ai',
-    models: ['MiniMax-H3', 'sora-2'],
-    defaultModel: 'MiniMax-H3',
+    hint: '内置视频。只填接口地址和 API Key，默认 https://api.aishuch.com，模型默认 grok-imagine-1.5-video-ext。',
+    baseUrl: 'https://api.aishuch.com',
+    models: ['grok-imagine-1.5-video-ext'],
+    defaultModel: 'grok-imagine-1.5-video-ext',
     keyPlaceholder: 'APIMart API Key'
   },
   CUSTOM_PROVIDER

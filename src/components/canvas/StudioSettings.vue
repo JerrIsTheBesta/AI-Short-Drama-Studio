@@ -117,7 +117,7 @@ function createVideo(providerId: string) {
     workflowId: preset.defaultModel || '',
     promptStyle: 'scene-narrative',
     provider: preset.id,
-    stillMode: preset.id === 'autodl' ? 'identity' : 'keyframe'
+    stillMode: preset.id === 'autodl' || preset.id === 'apimart' ? 'identity' : 'keyframe'
   })
 }
 
@@ -234,7 +234,7 @@ function patchAdapter(
       />
       <EndpointForm
         title="API 接入"
-        hint="选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。"
+        :hint="settings.config.image.provider === 'apimart' ? '只填接口地址和 API Key。默认 https://api.aishuch.com，模型默认 gpt-image-2。文生图和图生图都走同一接口。' : '选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。'"
         :presets="IMAGE_PROVIDERS"
         :base-url="settings.config.image.baseUrl"
         :api-key="settings.config.image.apiKey"
@@ -246,6 +246,7 @@ function patchAdapter(
         @remove-model="settings.removeModel('image', $event)"
       />
       <AdapterFields
+        v-if="settings.config.image.provider !== 'apimart'"
         kind="image"
         :adapter="settings.config.image.adapter"
         :base-url="settings.config.image.baseUrl"
@@ -372,29 +373,34 @@ function patchAdapter(
         </details>
         <h3 class="api-title">中转站 / 云端工作流 API</h3>
         <p class="hint">大厂官方接口和 API Router、中转站都填写在这里；本机 ComfyUI 请使用页面顶部的“本地 ComfyUI”。</p>
+        <p v-if="settings.config.video.provider === 'apimart'" class="hint">
+          只填接口地址和 API Key。默认 https://api.aishuch.com，模型默认 grok-imagine-1.5-video-ext。
+        </p>
         <label>Base URL（接口地址）</label>
         <input
           v-model="videoUrl"
-          placeholder="https://autodl.art"
+          :placeholder="settings.config.video.provider === 'apimart' ? 'https://api.aishuch.com' : 'https://autodl.art'"
         />
-        <label>模型名 / 工作流 ID</label>
+        <label>{{ settings.config.video.provider === 'apimart' ? '模型名' : '模型名 / 工作流 ID' }}</label>
         <input
           v-model="videoWorkflow"
-          placeholder="minimax_h3_lightx2v_v5_15s"
+          :placeholder="settings.config.video.provider === 'apimart' ? 'grok-imagine-1.5-video-ext' : 'minimax_h3_lightx2v_v5_15s'"
         />
         <label>API Key / Token</label>
         <div class="secret">
           <input
+            :key="settings.config.activeVideoId"
             :type="showVideoKey ? 'text' : 'password'"
             autocomplete="off"
             v-model="videoKey"
-            placeholder="填写服务商提供的 API Key 或 Token"
+            placeholder="只填这一家供应商的 API Key 或 Token"
           />
           <button type="button" class="eye" @click="showVideoKey = !showVideoKey">
             {{ showVideoKey ? '隐藏' : '显示' }}
           </button>
         </div>
         <AdapterFields
+          v-if="settings.config.video.provider !== 'apimart'"
           kind="video"
           :adapter="settings.config.video.adapter"
           :base-url="settings.config.video.baseUrl"

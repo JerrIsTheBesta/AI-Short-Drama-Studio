@@ -1,0 +1,385 @@
+/**
+ * APIMart 内置协议。用户只填接口地址和 API Key。
+ * 默认地址 https://api.aishuch.com
+ * 图片：POST /v1/images/generations
+ * 视频：POST /v1/videos/generations（Grok Imagine 1.5 字段）
+ * 查询：GET /v1/tasks/{task_id}?language=zh
+ */
+
+import { isApimartHost, isLocalComfyHost, providerHttp } from './adapters'
+
+export const APIMART_DEFAULT_BASE = 'https://api.aishuch.com'
+export const APIMART_IMAGE_MODEL = 'gpt-image-2'
+export const APIMART_VIDEO_MODEL = 'grok-imagine-1.5-video-ext'
+
+const VIDEO_SIZES = new Set(['16:9', '9:16', '1:1', '3:2', '2:3'])
+
+export function isApimartEndpoint(baseUrl?: string, provider?: string): boolean {
+  if (provider === 'apimart') return true
+  return isApimartHost(baseUrl || '')
+}
+
+/** APIMart 和其他中转站的生图格式相同：提交 /v1/images/generations，再查任务。官方生图和本机 ComfyUI 除外。 */
+export function isRelayImageEndpoint(baseUrl?: string, provider?: string): boolean {
+  if (isApimartEndpoint(baseUrl, provider)) return true
+  if (provider && provider !== 'custom') return false
+  const url = baseUrl || ''
+  if (!/^https?:\/\//i.test(url)) return false
+  if (isLocalComfyHost(url) || /comfyui/i.test(url)) return false
+  if (/openai\.com|volces\.com|dashscope\.aliyuncs\.com|aliyuncs\.com|bigmodel\.cn|minimaxi\.com|minimax\.chat|autodl\.art|seetacloud\.com/i.test(url)) {
+    return false
+  }
+  return true
+}
+
+function imageResolution(raw?: string): '1k' | '2k' | '4k' {
+  const value = String(raw || '').toLowerCase().replace(/\s/g, '')
+  if (value === '4k' || value === '4') return '4k'
+  if (value === '1k' || value === '1') return '1k'
+  return '2k'
+}
+
+export function apimartRoot(baseUrl?: string): string {
+  let root = (baseUrl || '').trim().replace(/\/+$/, '')
+  if (!root) root = APIMART_DEFAULT_BASE
+  root = root.replace(/\/v1$/i, '')
+  return root
+}
+
+function bearer(apiKey: string): string {
+  let key = String(apiKey || '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+  key = key.replace(/^bearer\s+/i, '').trim()
+  if (!key) throw new Error('APIMart 需要填写 API Key')
+  return `Bearer ${key}`
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('参考图读取失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function referenceDataUrl(blob: Blob): Promise<string> {
+  try {
+    const bitmap = await createImageBitmap(blob)
+    const scale = Math.min(1, 1536 / Math.max(bitmap.width, bitmap.height))
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      bitmap.close()
+      return blobToDataUrl(blob)
+    }
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+    return canvas.toDataURL('image/jpeg', 0.88)
+  } catch {
+    return blobToDataUrl(blob)
+  }
+}
+
+function pickModel(raw: string | undefined, fallback: string): string {
+  const name = String(raw || '').trim()
+  if (!name || /lightx2v|comfyui/i.test(name)) return fallback
+  return name
+}
+
+function videoSize(aspectRatio?: string, width?: number, height?: number): string {
+  const ratio = String(aspectRatio || '').trim()
+  if (VIDEO_SIZES.has(ratio)) return ratio
+  if (ratio === '4:3' || ratio === '3:4') return ratio === '4:3' ? '3:2' : '2:3'
+  if (width && height) {
+    if (Math.abs(width - height) < 40) return '1:1'
+    return height > width ? '9:16' : '16:9'
+  }
+  return '16:9'
+}
+
+function videoSeconds(model: string, raw?: number): number {
+  const seconds = Math.round(Number(raw) || 0)
+  if (/grok-imagine-1\.5/i.test(model)) return Math.min(15, Math.max(6, seconds || 6))
+  return Math.min(15, Math.max(1, seconds || 6))
+}
+
+function videoQuality(raw?: string): '480p' | '720p' {
+  return /480/.test(String(raw || '')) ? '480p' : '720p'
+}
+
+function errorMessage(json: any, status: number): string {
+  const message =
+    json?.error?.message ||
+    json?.data?.error?.message ||
+    json?.message ||
+    ''
+  const text = String(message || '').trim()
+  return text || `HTTP ${status}`
+}
+
+async function readJson(resp: { ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<any> }) {
+  const raw = await resp.text()
+  let json: any = {}
+  try {
+    json = raw ? JSON.parse(raw) : {}
+  } catch {
+    json = { message: raw.slice(0, 240) }
+  }
+  if (!resp.ok || json?.error) {
+    throw new Error(errorMessage(json, resp.status))
+  }
+  if (json?.code != null && Number(json.code) >= 400) {
+    throw new Error(errorMessage(json, Number(json.code)))
+  }
+  return json
+}
+
+function taskRecord(json: any): any {
+  if (Array.isArray(json?.data)) return json.data[0] || {}
+  if (json?.data && typeof json.data === 'object') return json.data
+  return json || {}
+}
+
+function taskIdOf(json: any): string {
+  const row = taskRecord(json)
+  return String(row?.task_id || row?.id || json?.task_id || '').trim()
+}
+
+function collectUrls(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (/^https?:\/\//i.test(text) || text.startsWith('data:')) out.push(text)
+    return out
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectUrls(item, out)
+    return out
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if ('url' in record) collectUrls(record.url, out)
+    if ('video_url' in record) collectUrls(record.video_url, out)
+    if ('image_url' in record) collectUrls(record.image_url, out)
+  }
+  return out
+}
+
+function resultUrls(json: any, kind: 'image' | 'video'): string[] {
+  const data = taskRecord(json)
+  const result = data?.result || json?.result || {}
+  const bucket = kind === 'video' ? result.videos : result.images
+  const urls = collectUrls(bucket)
+  if (urls.length) return urls
+  return collectUrls(result)
+}
+
+async function downloadMedia(
+  url: string,
+  authorization: string,
+  signal?: AbortSignal
+): Promise<{ blob: Blob; mimeType: string }> {
+  const load = (auth?: string) =>
+    providerHttp(url, {
+      method: 'GET',
+      headers: auth ? { Authorization: auth } : {},
+      signal,
+      timeoutMs: 120_000
+    })
+  let resp = await load(authorization)
+  if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
+    resp = await load()
+  }
+  if (!resp.ok) throw new Error(`结果下载失败 HTTP ${resp.status}`)
+  const blob = await resp.blob()
+  const mimeType = blob.type || (url.includes('.mp4') ? 'video/mp4' : 'image/png')
+  return { blob, mimeType }
+}
+
+async function pollTask(opts: {
+  root: string
+  taskId: string
+  authorization: string
+  kind: 'image' | 'video'
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+}): Promise<{ blob: Blob; mimeType: string }> {
+  const deadline = Date.now() + (opts.kind === 'video' ? 20 * 60_000 : 8 * 60_000)
+  const url = `${opts.root}/v1/tasks/${encodeURIComponent(opts.taskId)}?language=zh`
+  while (Date.now() < deadline) {
+    if (opts.signal?.aborted) throw new Error('已取消')
+    const resp = await providerHttp(url, {
+      method: 'GET',
+      headers: { Authorization: opts.authorization, Accept: 'application/json' },
+      signal: opts.signal,
+      timeoutMs: 30_000
+    })
+    const json = await readJson(resp)
+    const data = taskRecord(json)
+    const status = String(data.status || '').toLowerCase()
+    const progress = Number(data.progress)
+    if (status === 'failed' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(errorMessage(data.error ? { error: data.error } : data, 500))
+    }
+    if (status === 'completed' || status === 'succeeded' || status === 'success') {
+      const media = resultUrls(json, opts.kind)[0]
+      if (!media) throw new Error('任务已完成，但没有返回图片或视频地址')
+      opts.onProgress?.('正在下载结果...')
+      return downloadMedia(media, opts.authorization, opts.signal)
+    }
+    const label = Number.isFinite(progress) ? `${Math.round(progress)}%` : status || '处理中'
+    opts.onProgress?.(`生成中 ${label}`)
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+  }
+  throw new Error('等待生成结果超时')
+}
+
+async function postJson(root: string, path: string, authorization: string, body: Record<string, unknown>, signal?: AbortSignal) {
+  const resp = await providerHttp(`${root}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body: JSON.stringify(body),
+    signal,
+    timeoutMs: 60_000
+  })
+  return readJson(resp)
+}
+
+function dataUriToBlob(uri: string): { blob: Blob; mimeType: string } {
+  const match = uri.match(/^data:([^;,]+)?(;base64)?,(.*)$/s)
+  if (!match) throw new Error('图片数据无法解析')
+  const mimeType = match[1] || 'image/png'
+  const payload = match[3] || ''
+  if (match[2]) {
+    const binary = atob(payload)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return { blob: new Blob([bytes], { type: mimeType }), mimeType }
+  }
+  return { blob: new Blob([decodeURIComponent(payload)], { type: mimeType }), mimeType }
+}
+
+async function mediaFromJson(
+  json: any,
+  kind: 'image' | 'video',
+  authorization: string,
+  signal?: AbortSignal
+): Promise<{ blob: Blob; mimeType: string } | null> {
+  const row = Array.isArray(json?.data) ? json.data[0] : json?.data
+  if (row?.task_id || row?.status === 'submitted') return null
+  const b64 = typeof row?.b64_json === 'string' ? row.b64_json : ''
+  if (b64) return dataUriToBlob(`data:image/png;base64,${b64}`)
+  const url = resultUrls(json, kind)[0] || (typeof row?.url === 'string' ? row.url : '')
+  if (!url) return null
+  if (url.startsWith('data:')) return dataUriToBlob(url)
+  return downloadMedia(url, authorization, signal)
+}
+
+export async function apimartGenerateImage(opts: {
+  baseUrl?: string
+  apiKey: string
+  model?: string
+  prompt: string
+  aspectRatio?: string
+  resolution?: string
+  n?: number
+  referenceImages?: Blob[]
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+}): Promise<{ blob: Blob; mimeType: string }> {
+  const root = apimartRoot(opts.baseUrl)
+  const authorization = bearer(opts.apiKey)
+  const model = pickModel(opts.model, APIMART_IMAGE_MODEL)
+  const imageUrls: string[] = []
+  for (const blob of (opts.referenceImages || []).slice(0, 15)) {
+    imageUrls.push(await referenceDataUrl(blob))
+  }
+  const count = Math.max(1, Math.round(Number(opts.n) || 1))
+  const body: Record<string, unknown> = {
+    model,
+    prompt: opts.prompt,
+    n: count,
+    size: opts.aspectRatio || '1:1',
+    resolution: imageResolution(opts.resolution)
+  }
+  if (imageUrls.length) body.image_urls = imageUrls
+  opts.onProgress?.(imageUrls.length ? '提交图生图任务...' : '提交文生图任务...')
+  const json = await postJson(root, '/v1/images/generations', authorization, body, opts.signal)
+  const ready = await mediaFromJson(json, 'image', authorization, opts.signal)
+  if (ready) return ready
+  const taskId = taskIdOf(json)
+  if (!taskId) throw new Error('提交成功但没有返回 task_id')
+  opts.onProgress?.('已提交，正在查询...')
+  return pollTask({
+    root,
+    taskId,
+    authorization,
+    kind: 'image',
+    signal: opts.signal,
+    onProgress: opts.onProgress
+  })
+}
+
+export async function apimartGenerateVideo(opts: {
+  baseUrl?: string
+  apiKey: string
+  model?: string
+  prompt: string
+  aspectRatio?: string
+  width?: number
+  height?: number
+  duration?: number
+  resolution?: string
+  images?: Blob[]
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+  onTaskSubmitted?: (taskId: string) => void | Promise<void>
+  resumeTaskId?: string
+}): Promise<{ blob: Blob; mimeType: string; duration: number }> {
+  const root = apimartRoot(opts.baseUrl)
+  const authorization = bearer(opts.apiKey)
+  const model = pickModel(opts.model, APIMART_VIDEO_MODEL)
+  const duration = videoSeconds(model, opts.duration)
+  let taskId = String(opts.resumeTaskId || '').trim()
+  if (!taskId) {
+    const imageUrls: string[] = []
+    for (const blob of (opts.images || []).slice(0, 7)) {
+      const url = await blobToDataUrl(blob)
+      if (/^https?:\/\//i.test(url)) imageUrls.push(url)
+      else if (url.startsWith('data:')) imageUrls.push(url)
+    }
+    const body: Record<string, unknown> = {
+      model,
+      prompt: opts.prompt,
+      size: videoSize(opts.aspectRatio, opts.width, opts.height),
+      duration,
+      resolution: videoQuality(opts.resolution)
+    }
+    if (imageUrls.length) body.image_urls = imageUrls
+    opts.onProgress?.('提交视频任务...')
+    const submitted = await postJson(root, '/v1/videos/generations', authorization, body, opts.signal)
+    taskId = taskIdOf(submitted)
+    if (!taskId) throw new Error('提交成功但没有返回 task_id')
+    await opts.onTaskSubmitted?.(taskId)
+  }
+  opts.onProgress?.('已提交，正在查询...')
+  const media = await pollTask({
+    root,
+    taskId,
+    authorization,
+    kind: 'video',
+    signal: opts.signal,
+    onProgress: opts.onProgress
+  })
+  return { ...media, duration }
+}
