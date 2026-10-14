@@ -6,7 +6,7 @@
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-Desktop-47848f.svg)](https://www.electronjs.org/)
 
-![剧流 Studio 开源海报：一键生成 AI 短剧、视频复刻、智能口播和视频剪辑](docs/images/open-source-poster.png)
+![剧流 Studio 开源海报：一键生成 AI 短剧、视频复刻、智能口播和视频剪辑](docs/images/docsimagesopen-source-poster.png.png)
 
 剧流 Studio 是一款本地优先、模型可自由接入的 AI 视频创作与剪辑工作台。它把剧本、人物设定、场景、分镜、参考图、视频、对白、音乐和最终合成放进同一个可视化项目，也可以不使用 AI，直接导入本地素材完成基础视频剪辑。
 
