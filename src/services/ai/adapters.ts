@@ -71,10 +71,18 @@ export function isAutodlHost(url: string): boolean {
 export function isApimartHost(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase()
-    return host === 'apimart.ai' || host.endsWith('.apimart.ai')
+    return host === 'apimart.ai' || host.endsWith('.apimart.ai') || host === 'aiuxu.com' || host.endsWith('.aiuxu.com')
   } catch {
-    return /apimart\.ai/i.test(url)
+    return /apimart\.ai|aiuxu\.com/i.test(url)
   }
+}
+
+/** 官方域名，以及配了 /v1/tasks/{id} 的白标网关，都走同一套异步生图/视频协议。 */
+export function usesApimartProtocol(baseUrl: string, adapter?: AdapterConfig): boolean {
+  if (isApimartHost(baseUrl)) return true
+  const poll = `${adapter?.pollPath || ''} ${adapter?.pollUrl || ''}`
+  const path = adapter?.path || ''
+  return /\/tasks\/\{id\}/i.test(poll) && /generations/i.test(path)
 }
 
 export function isLocalComfyHost(url: string): boolean {
@@ -134,6 +142,14 @@ export function resolveVideoAdapter(ep: EndpointLike): AdapterType {
   return 'comfyui-workflow'
 }
 
+function withAuthSeparator(prefix: string): string {
+  const trimmed = prefix.trim()
+  if (!trimmed) return ''
+  if (/^bearer$/i.test(trimmed)) return 'Bearer '
+  if (/^(token|basic)$/i.test(trimmed)) return `${trimmed} `
+  return /\s$/.test(prefix) ? prefix : prefix
+}
+
 export function buildAuthHeader(
   apiKey: string,
   adapter?: AdapterConfig
@@ -142,12 +158,13 @@ export function buildAuthHeader(
   token = token.replace(/^bearer\s+/i, '').trim()
   if (!token) return {}
   const name = (adapter?.authHeader || 'Authorization').trim() || 'Authorization'
-  const prefix =
+  const prefix = withAuthSeparator(
     adapter?.authPrefix === undefined || adapter?.authPrefix === null
       ? name.toLowerCase() === 'authorization'
         ? 'Bearer '
         : ''
       : String(adapter.authPrefix)
+  )
   const prefixText = prefix && !token.toLowerCase().startsWith(prefix.trim().toLowerCase()) ? prefix : ''
   return { [name]: `${prefixText}${token}` }
 }
@@ -399,7 +416,7 @@ function apimartAdapterDefaults(
   kind: 'image' | 'video'
 ): AdapterConfig {
   const current = adapter || {}
-  if (!isApimartHost(baseUrl)) return current
+  if (!usesApimartProtocol(baseUrl, current)) return current
   return {
     ...current,
     type: 'http-custom',
@@ -421,12 +438,13 @@ function stringList(value: unknown): string[] {
 
 function requestBodyForProvider(
   baseUrl: string,
+  adapter: AdapterConfig | undefined,
   kind: 'image' | 'video',
   model: string,
   prompt: string,
   extra?: Record<string, unknown>
 ): Record<string, unknown> {
-  if (!isApimartHost(baseUrl)) {
+  if (!usesApimartProtocol(baseUrl, adapter)) {
     return { model, prompt, ...(extra || {}) }
   }
   const source = extra || {}
@@ -478,7 +496,7 @@ export async function httpCustomMediaGenerate(opts: {
     ...buildAuthHeader(opts.apiKey, adapter),
     ...(adapter.headers || {})
   }
-  const body = requestBodyForProvider(opts.baseUrl, kind, opts.model, opts.prompt, opts.extraBody)
+  const body = requestBodyForProvider(opts.baseUrl, adapter, kind, opts.model, opts.prompt, opts.extraBody)
   opts.onProgress?.('提交自定义接口…')
   const res = await providerHttp(url, {
     method: 'POST',
@@ -489,8 +507,8 @@ export async function httpCustomMediaGenerate(opts: {
   })
   if (!res.ok) {
     const text = await res.text()
-    const hint = res.status === 401 && isApimartHost(url)
-      ? '\nAPIMart 拒绝了这把密钥。请到 https://apimart.ai/keys 复制密钥本身，不要带 Bearer、引号或空格。'
+    const hint = res.status === 401 && usesApimartProtocol(url, adapter)
+      ? '\n鉴权头必须是 “Bearer ” 加密钥，中间要有空格。请确认这条接入的前缀是 Bearer，而不是和密钥粘在一起。'
       : ''
     throw new Error(`[${kind}] 自定义接口失败 ${res.status}\n请求地址：${url}\n${text.slice(0, 500)}${hint}`)
   }
