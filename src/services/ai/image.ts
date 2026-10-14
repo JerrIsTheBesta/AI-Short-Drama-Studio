@@ -60,12 +60,21 @@ async function realCustomOrComfy(input: ImageGenInput): Promise<ImageGenOutput> 
   const prompt = withGptImageQuality(buildPrompt(input, Boolean(input.referenceImages?.length)), cfg.model)
   if (adapterType === 'http-custom') {
     log(`→ 自定义 HTTP 生图 · ${cfg.model}`)
+    const imageUrls: string[] = []
+    for (const blob of input.referenceImages || []) {
+      imageUrls.push(await blobToDataUri(blob))
+    }
     const { blob, mimeType } = await httpCustomImageGenerate({
       baseUrl: cfg.baseUrl,
       apiKey: cfg.apiKey,
       model: cfg.model,
       prompt,
       adapter: cfg.adapter,
+      extraBody: {
+        ...(imageUrls.length ? { image_urls: imageUrls } : {}),
+        ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
+        n: 1
+      },
       signal: input.signal
     })
     return { blob, mimeType, prompt: input.prompt }

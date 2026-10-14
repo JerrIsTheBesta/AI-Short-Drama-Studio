@@ -20,7 +20,7 @@ function uniq(list: string[]): string[] {
 export const CUSTOM_PROVIDER: ProviderPreset = {
   id: 'custom',
   name: '自定义（OpenAI 兼容 / 自建）',
-  hint: '任意 OpenAI 兼容地址，或自建 ComfyUI（如 http://127.0.0.1:8188）。可用接入助手写 adapter。',
+    hint: '第三方 HTTP 填服务商地址。自建 ComfyUI 请用一键接入，不要和 APIMart 这类接口混用。',
   baseUrl: '',
   models: [],
   defaultModel: '',
@@ -164,6 +164,15 @@ export const IMAGE_PROVIDERS: ProviderPreset[] = [
     models: ['image-01'],
     defaultModel: 'image-01'
   },
+  {
+    id: 'apimart',
+    name: 'APIMart',
+    hint: '异步生图。地址用 https://api.apimart.ai，模型名填文档里的 model。提交后查询 /v1/tasks/{id}。',
+    baseUrl: 'https://api.apimart.ai',
+    models: ['gpt-image-1-official', 'gpt-image-1.5-official'],
+    defaultModel: 'gpt-image-1-official',
+    keyPlaceholder: 'APIMart API Key'
+  },
   CUSTOM_PROVIDER
 ]
 
@@ -208,6 +217,15 @@ export const VIDEO_PROVIDERS: ProviderPreset[] = [
     baseUrl: 'https://dashscope.aliyuncs.com/api/v1',
     models: ['wan2.6-t2v', 'wan2.5-t2v-preview'],
     defaultModel: 'wan2.6-t2v'
+  },
+  {
+    id: 'apimart',
+    name: 'APIMart',
+    hint: '异步视频。地址用 https://api.apimart.ai，工作流 ID 填模型名（如 MiniMax-H3）。提交后查询 /v1/tasks/{id}。',
+    baseUrl: 'https://api.apimart.ai',
+    models: ['MiniMax-H3', 'sora-2'],
+    defaultModel: 'MiniMax-H3',
+    keyPlaceholder: 'APIMart API Key'
   },
   CUSTOM_PROVIDER
 ]

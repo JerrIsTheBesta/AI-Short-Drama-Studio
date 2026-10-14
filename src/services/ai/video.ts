@@ -10,7 +10,7 @@
  */
 
 import { getAIMode } from './client'
-import { comfyPromptGenerate, httpCustomMediaGenerate, resolveVideoAdapter } from './adapters'
+import { comfyPromptGenerate, httpCustomMediaGenerate, isApimartHost, resolveVideoAdapter } from './adapters'
 import { autodlVideoProfileId, getVideoConfig, getVideoPromptStyle, getTtsConfig } from './runtime'
 import { generateMockVideo } from './mock'
 import { composeH3VideoPrompt, ensureFl2vaLead, isRef2VA, type H3ImageSlot } from './h3Prompt'
@@ -1060,19 +1060,30 @@ async function realHttpCustomVideo(
 ): Promise<VideoGenOutput> {
   const cfg = getVideoConfig(input.videoProfileId)
   if (!cfg.baseUrl) throw new Error('[video] 未配置自定义视频接口地址')
+  const modelName = String(cfg.workflowId || '').trim()
+  if (isApimartHost(cfg.baseUrl) && !modelName) {
+    throw new Error('[video] APIMart 需要在这条视频接入的工作流 ID 里填写模型名，例如 MiniMax-H3。')
+  }
   const prompt = buildPrompt(input)
   onProgress?.('自定义 HTTP 出视频…')
-  let imageDataUrl: string | undefined
-  if (input.imageBlob) imageDataUrl = await blobToDataUrl(input.imageBlob)
+  const images: string[] = []
+  if (input.imageBlob) images.push(await blobToDataUrl(input.imageBlob))
+  for (const blob of input.referenceImages || []) {
+    images.push(await blobToDataUrl(blob))
+  }
+  const lastFrame = input.lastFrameBlob ? await blobToDataUrl(input.lastFrameBlob) : undefined
   const { blob, mimeType } = await httpCustomMediaGenerate({
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
-    model: cfg.workflowId || 'video',
+    model: modelName || 'video',
     prompt,
     adapter: cfg.adapter,
     extraBody: {
-      ...(imageDataUrl ? { image: imageDataUrl } : {}),
+      ...(images[0] ? { image: images[0] } : {}),
+      ...(images.length ? { images } : {}),
+      ...(lastFrame ? { last_frame: lastFrame } : {}),
       duration: input.duration,
+      aspect_ratio: input.aspectRatio,
       width: input.width,
       height: input.height
     },
