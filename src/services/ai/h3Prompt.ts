@@ -1288,6 +1288,17 @@ function parseH3PromptJson(content: string): { parsed: H3PromptJson; truncated: 
   }
 }
 
+/**
+ * 只有真正的接口故障才应中断优化。模型偶发的 JSON、措辞或导演格式问题
+ * 都可以由本地编译器降级成可提交稿，不能让用户因为质量启发式规则而卡住。
+ */
+function isLLMRequestFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /(?:\b401\b|\b403\b|\b408\b|\b409\b|\b429\b|\b5\d\d\b|鉴权|Authentication|api.?key|rate.?limit|限流|余额|timeout|timed out|网络|network|fetch failed|ECONN|ENOTFOUND|socket)/i.test(
+    message
+  )
+}
+
 /** 把中文场记编译成 H3 官方英文：integrated_multimodal_description + 内部切镜；失败则回退模板。 */
 export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<string> {
   const resolved: H3PromptInput = { ...input, forceIntegrated: input.forceIntegrated !== false }
@@ -1448,13 +1459,9 @@ ${desc || '(empty)'}`
       desc = String(parsed.integrated_multimodal_description || parsed.detailed_description || '').trim()
       sound = String(parsed.overall_soundscape || '').trim()
     }
-    if (!desc || isGenericActionDump(desc) || isLifelessH3Prompt(desc)) {
-      throw new Error('模型两次返回了机械模板稿，已阻止这份低质量提示词进入视频生成。')
-    }
-    const finalDialogueIssue = dialogueTurnIssue(desc, dialogueCues)
-    if (finalDialogueIssue) {
-      throw new Error(`对白调度仍不合格：${finalDialogueIssue}。已阻止多人同时说话的提示词进入视频生成。`)
-    }
+    // 第二稿不再被质量启发式规则硬拦截。它们适合触发一次修稿，但不适合
+    // 判定用户完全无法继续；模型稿只要有正文，就交给后面的确定性清洗器。
+    if (!desc) return composeH3VideoPrompt(resolved)
     // 台词以入口 cueLines / voiceover 为准；禁止因模型乱写 <d> 就强行改成 dialogue
     const trusted = spokenLinesForPrompt(resolved)
     const resolvedWithSpeech: H3PromptInput = {
@@ -1474,12 +1481,10 @@ ${desc || '(empty)'}`
       'N/A',
       resolvedWithSpeech
     )
-    if (isLifelessH3Prompt(assembled)) {
-      throw new Error('提示词存在重复静态运镜或机械时间槽，已阻止提交。')
-    }
     return assembled
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
+    if (!isLLMRequestFailure(error)) return composeH3VideoPrompt(resolved)
     const reason = error instanceof Error ? error.message : String(error || '')
     throw new Error(`没有生成可用的电影化镜头稿：${reason || '请重试'}`)
   }
