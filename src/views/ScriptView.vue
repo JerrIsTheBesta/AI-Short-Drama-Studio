@@ -457,7 +457,8 @@ async function removeProductImage(id: string) {
 
     <header v-else class="page-head">
       <div>
-        <h1>📝 文案准备</h1>
+        <span class="kicker">步骤 1 · 文案准备</span>
+        <h1>文案准备</h1>
         <p>输入主题和文案。电商带货可上传产品图（最多 5 张），分镜会按真实产品来写。</p>
       </div>
       <div class="head-actions">
@@ -761,19 +762,34 @@ async function removeProductImage(id: string) {
   gap: var(--space-4);
 }
 .page-head h1 {
-  font-size: 24px;
-  font-weight: 700;
-  margin: 0 0 var(--space-1);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
 }
 .page-head p {
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--color-text-3);
   margin: 0;
+  line-height: 1.6;
 }
 .head-actions {
   display: flex;
+  align-items: center;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+.kicker {
+  display: inline-block;
+  margin-bottom: 7px;
+  padding: 2px 9px;
+  border: 1px solid rgba(126, 180, 255, 0.3);
+  border-radius: 99px;
+  background: rgba(126, 180, 255, 0.1);
+  color: #a8c0ff;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
 }
 .drama-eyebrow {
   margin-bottom: 6px;

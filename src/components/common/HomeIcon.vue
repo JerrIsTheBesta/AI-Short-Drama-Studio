@@ -18,6 +18,7 @@ defineProps<{
     | 'remake'
     | 'canvas'
     | 'check'
+    | 'script'
   size?: number
 }>()
 </script>
@@ -83,6 +84,9 @@ defineProps<{
     </template>
     <template v-else-if="name === 'canvas'">
       <rect x="3" y="4" width="7" height="6" rx="1.5" /><rect x="14" y="14" width="7" height="6" rx="1.5" /><path d="M10 7h4a3 3 0 0 1 3 3v4" />
+    </template>
+    <template v-else-if="name === 'script'">
+      <path d="M6.5 3.5h7L18 8v12.5a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" /><path d="M13.5 3.5V8H18M9 13h6M9 17h4" />
     </template>
     <template v-else>
       <path d="m5 12 4 4L19 6" />

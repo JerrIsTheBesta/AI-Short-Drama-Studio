@@ -63,6 +63,12 @@ const routes: RouteRecordRaw[] = [
     meta: { step: 'export', label: '7 · 导出' }
   },
   {
+    path: '/scripts',
+    name: 'scripts',
+    component: () => import('@/views/ScriptsView.vue'),
+    meta: { step: null, label: '剧本' }
+  },
+  {
     path: '/drafts',
     name: 'drafts',
     component: () => import('@/views/DraftsView.vue'),

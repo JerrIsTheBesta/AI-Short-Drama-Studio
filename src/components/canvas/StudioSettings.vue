@@ -159,7 +159,7 @@ function patchAdapter(
       />
       <EndpointForm
         title="API 接入"
-        hint="智能体、写剧本、提炼分镜、以及设置页的接入助手，都用当前选中的这一套。"
+        hint="写剧本、提炼分镜、智能体对话都走这一套。不懂选哪个，就在设置页的「接入助手」里把厂商给的信息贴给它。"
         :presets="LLM_PROVIDERS"
         :base-url="settings.config.llm.baseUrl"
         :api-key="settings.config.llm.apiKey"
@@ -180,7 +180,7 @@ function patchAdapter(
     <template v-else-if="module === 'vision'">
       <ProfileLibrary
         title="已保存的视觉接入"
-        hint="看图、质检用。可保存多套，在需要视觉能力的功能里切换。"
+        hint="它让 AI 看得懂图：自动挑出能用的参考图，并检查生成的图片视频有没有跑偏。用得多可以换更强的模型。"
         :profiles="settings.config.visions.map((p) => ({ id: p.id, name: p.name, subtitle: subtitle(p) }))"
         :active-id="settings.config.activeVisionId"
         :providers="VISION_PROVIDERS"
@@ -234,7 +234,7 @@ function patchAdapter(
       />
       <EndpointForm
         title="API 接入"
-        :hint="settings.config.image.provider === 'apimart' ? '只填接口地址和 API Key。默认 https://api.aishuch.com，模型默认 gpt-image-2。文生图和图生图都走同一接口。' : '选接入后填 Key，把要用的模型名加进列表。生成图片时可以直接切换。'"
+        :hint="settings.config.image.provider === 'apimart' ? '只填接口地址和 API Key 就能出图，默认地址 https://api.aishuch.com，默认模型 gpt-image-2。' : '选好厂商，填 API Key，再把要用的模型名加进列表。出图节点里可以随时切换不同的模型。'"
         :presets="IMAGE_PROVIDERS"
         :base-url="settings.config.image.baseUrl"
         :api-key="settings.config.image.apiKey"
@@ -258,7 +258,7 @@ function patchAdapter(
     <template v-else-if="module === 'tts'">
       <ProfileLibrary
         title="已保存的配音接入"
-        hint="后期独立口播。百炼走语音合成接口，不是聊天补全。"
+        hint="后期独立加的人声。下面选的音色是全片默认；某个角色想要别的声音，去画布的角色卡上单独设置。"
         :profiles="settings.config.ttsProfiles.map((p) => ({ id: p.id, name: p.name, subtitle: subtitle(p) }))"
         :active-id="settings.config.activeTtsId"
         :providers="TTS_PROVIDERS"
@@ -274,7 +274,7 @@ function patchAdapter(
       />
       <EndpointForm
         title="API 接入"
-        hint="口播 TTS。配好后可在字幕页和口播节点里选用。"
+        hint="后期独立加人声的接口。选好音色后，字幕页和口播节点都能直接生成。"
         :presets="TTS_PROVIDERS"
         :base-url="settings.config.tts.baseUrl"
         :api-key="settings.config.tts.apiKey"
@@ -318,12 +318,12 @@ function patchAdapter(
       <section class="video">
         <h3>一键出片设置</h3>
         <p class="hint">
-          选择视频模型后，系统会自动使用适合它的参考图数量、关键帧方式、最长时长和提示词格式。
-          普通用户只需填写下面的接口地址、凭证和模型/工作流名称。
+          这张对应关系参考视频模型自动处理好：用哪个模型、用几张参考图、最长能生成几秒、提示词按什么格式写，都不用你操心。
+          普通情况只要填下面的接口地址、凭证和模型（或工作流）名称。
         </p>
         <details class="rule-details">
           <summary>自定义出片规则（高级）</summary>
-          <p class="hint">只有工作流文档明确要求特殊参考图或提示词结构时才需要修改。</p>
+          <p class="hint">只有云平台的文档明确要求特殊处理时才需要改。出问题先跳过这节，保持默认即可。</p>
         <label>参考图方式</label>
         <div class="style-cards">
           <button

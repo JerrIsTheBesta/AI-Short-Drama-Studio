@@ -1,4 +1,5 @@
 export * from './project'
 export * from './asset'
+export * from './scriptLib'
 export * from './pipeline'
 export * from './canvas'

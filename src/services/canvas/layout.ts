@@ -181,14 +181,16 @@ export function rescueStrandedFreeformNodes(nodes: CanvasNode[]): CanvasNode[] |
 }
 
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
-  const freeform = project.pipelineMode === 'img2video'
   const prevList = project.canvas?.nodes ?? []
   const subjects = project.subjects ?? []
   const scenes = project.scenes ?? []
   const shots = project.shots
   const hasPipelineData = subjects.length > 0 || scenes.length > 0 || shots.length > 0
+  // 还没进流水线时只铺用户手动加的节点，不铺空的角色/场景/分镜分组
+  const bare = !hasPipelineData
   const hasScriptNode = prevList.some((n) => n.id === 'script' || n.type === 'script')
-  if (freeform && !hasPipelineData && !hasScriptNode) {
+  // 既没有流水线数据也没有手动加的节点时，保持空画布（由智能体或右键添加来起头）
+  if (!hasPipelineData && !hasScriptNode && !prevList.length) {
     return project.canvas ?? emptyCanvas()
   }
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
@@ -206,7 +208,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     prevList
       .filter((n) => n.type === 'shotVideo')
       .every((n) => n.parentGroupId === 'group-videos')
-  const layoutReady = freeform
+  const layoutReady = bare
     ? shots.length === 0 || (prevList.some((n) => n.id === 'group-videos') && videosHomed)
     : hadGroups &&
       prevList.some((n) => n.id === 'group-audio') &&
@@ -226,7 +228,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const prevScript = prevAny.get('script')
   const scriptW = prevScript?.data.width || SCRIPT_W
   const scriptH = prevScript?.data.height || SCRIPT_H
-  const keepScript = !freeform || hasScriptNode
+  const keepScript = !bare || hasScriptNode
   const scriptPos =
     prevScript && !prevScript.parentGroupId
       ? prevScript.position
@@ -274,15 +276,15 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     x += box.width + COL_GAP
   }
 
-  if (!freeform || subjects.length) pushGroup('group-subjects', '人物角色', 'subject', subBox)
-  if (!freeform || scenes.length) pushGroup('group-scenes', '场景锚点', 'scene', scnBox)
-  if ((!freeform || shots.length) && useStills) {
+  if (!bare || subjects.length) pushGroup('group-subjects', '人物角色', 'subject', subBox)
+  if (!bare || scenes.length) pushGroup('group-scenes', '场景锚点', 'scene', scnBox)
+  if ((!bare || shots.length) && useStills) {
     pushGroup('group-shots', stillGroupLabel, 'shot', shotBox)
   }
-  if (!freeform || shots.length) {
+  if (!bare || shots.length) {
     pushGroup('group-videos', '分镜视频', 'video', vidBox)
   }
-  if (!freeform) {
+  if (!bare) {
     pushGroup('group-audio', '口播', 'audio', audBox)
     pushGroup('group-export', '合成视频', 'export', expBox)
   }
@@ -398,7 +400,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       status: persistStatus(prevVid?.status, Boolean(shot.videoAssetId)),
       parentGroupId: 'group-videos'
     })
-    if (!freeform) {
+    if (!bare) {
       attach('group-audio', {
         id: audId,
         type: 'audio',
@@ -447,7 +449,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         targetHandle: 'image'
       })
     }
-    if (!freeform) {
+    if (!bare) {
       edges.push({
         id: `e-${audId}-export`,
         source: audId,
@@ -465,7 +467,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     }
   })
 
-  if (!freeform) {
+  if (!bare) {
     const hasFinal = Boolean(project.finalVideoAssetId)
     attach('group-export', {
       id: 'export',

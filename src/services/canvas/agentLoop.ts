@@ -77,7 +77,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
   const completed: AgentToolAction[] = []
   const results: AgentToolResult[] = []
   let replanAttempt = 0
-  const maxReplans = options.autonomy === 'autopilot' ? 4 : options.autonomy === 'gated' ? 2 : 1
+  const maxReplans = options.autonomy === 'autopilot' ? 6 : options.autonomy === 'gated' ? 4 : 2
   const dependencyAttempts = new Map<string, number>()
   const failureFingerprints = new Map<string, number>()
   const recoveringSteps = new Set<string>()
@@ -85,7 +85,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
   let finalSay = ''
   let scheduledCalls = estimate.calls
   let scheduledSeconds = estimate.seconds
-  const maxContinuationRounds = options.autonomy === 'autopilot' ? 7 : options.autonomy === 'gated' ? 4 : 0
+  const maxContinuationRounds = options.autonomy === 'autopilot' ? 10 : options.autonomy === 'gated' ? 5 : 2
 
   try {
     while (true) {

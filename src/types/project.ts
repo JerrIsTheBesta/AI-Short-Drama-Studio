@@ -404,6 +404,13 @@ export interface Subject {
   propReferenceAssetIds?: ID[]
   /** 实际发给出图接口的四视图全文。框里有字就原样发送。 */
   sheetPrompt?: string
+  /** 角色音色描述（可选，自然语言）：TTS 语气指令与支持文字描述人声的模型会用 */
+  voicePrompt?: string
+  /** 参考音频资产（可选）。仅支持声音复刻的模型（百炼 Qwen3-TTS-VC）会使用 */
+  voiceRefAssetId?: ID
+  /** 由参考音频复刻出的音色 ID，首次生成口播时自动复刻并回填 */
+  clonedVoiceId?: string
+  clonedVoiceModel?: string
 }
 
 /** 整片锁定的场景锚点图（四宫格：全景 / 主锚 / 地面 / 光线） */

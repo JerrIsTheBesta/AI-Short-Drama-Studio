@@ -13,7 +13,7 @@ import {
 import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
 import { needsPlayReview } from '@/services/canvas/playGate'
-import { extractStageLabel, nextExtractStage, type ExtractStage } from '@/services/canvas/pipeline'
+import { type ExtractStage } from '@/services/canvas/pipeline'
 import { isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
@@ -80,9 +80,6 @@ const waitingReview = computed(() => needsPlayReview(project.current))
 const approved = computed(() => Boolean(project.current?.shots.length) && !waitingReview.value)
 const playReady = computed(() => isPlayReady(project.current?.script))
 const playLabel = computed(() => (playReady.value ? '重新写剧本' : '写剧本'))
-const extractLabel = computed(() => extractStageLabel(project.current))
-const nextStage = computed(() => nextExtractStage(project.current))
-const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
 const canExtractShots = computed(
   () => Boolean((project.current?.subjects ?? []).length && (project.current?.scenes ?? []).length)
 )
@@ -91,6 +88,47 @@ const editing = ref(false)
 const draft = ref('')
 const dirty = ref(false)
 const continueHint = ref('')
+
+/* ── 空剧本：先选「导入」或「生成」── */
+const emptyState = computed(
+  () => !editing.value && !(project.current?.script?.content || '').trim()
+)
+const emptyMode = ref<'pick' | 'gen'>('pick')
+const genTopic = ref('')
+const genBrief = ref('')
+
+watch(emptyState, (empty) => {
+  if (empty) emptyMode.value = 'pick'
+})
+
+async function submitGenerate(ev: Event) {
+  ev.stopPropagation()
+  if (generating.value) return
+  const topic = genTopic.value.trim()
+  const brief = genBrief.value.trim()
+  if (!topic && !brief) {
+    toast.warn('先写点要求或基本内容')
+    return
+  }
+  const p = project.current
+  if (!p) return
+  const base = p.script
+  project.setScript({
+    ...base,
+    id: base?.id ?? `s_${Date.now().toString(36)}`,
+    topic: topic || base?.topic || p.name || '剧本',
+    content: brief,
+    keywords: base?.keywords ?? [],
+    style: base?.style ?? 'cinematic',
+    aspectRatio: base?.aspectRatio ?? p.settings?.aspectRatio ?? '16:9',
+    shotDuration: base?.shotDuration ?? p.settings?.defaultShotDuration ?? 5,
+    playReady: false,
+    createdAt: base?.createdAt ?? Date.now()
+  })
+  if (topic) project.applyPlayTitle(topic)
+  await project.save()
+  await generateThis(ev, 'play')
+}
 
 const markdown = computed(() => {
   if (!project.current) return '# 剧本\n\n*还没有打开项目。*'
@@ -329,7 +367,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             保存{{ dirty ? '*' : '' }}
           </button>
         </template>
-        <template v-else>
+        <template v-else-if="!emptyState">
           <button type="button" class="sdoc-btn" :disabled="generating" @click="importMarkdown" @mousedown.stop>
             导入
           </button>
@@ -356,14 +394,75 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
       @input="dirty = true"
       @mousedown.stop
     />
+    <div v-else-if="emptyState" class="sdoc-empty nowheel nodrag" @mousedown.stop>
+      <template v-if="emptyMode === 'pick'">
+        <p class="empty-title">这个节点还没有剧本</p>
+        <div class="empty-cards">
+          <button type="button" class="empty-card" :disabled="generating" @click="importMarkdown">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 4.5V16M7.5 11 12 15.5 16.5 11" />
+              <path d="M4.5 16.5v2.5a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.5" />
+            </svg>
+            <strong>导入剧本</strong>
+            <span>.md / .txt 文件，也可以直接拖到这张卡片上</span>
+          </button>
+          <button type="button" class="empty-card accent" :disabled="generating" @click="emptyMode = 'gen'">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3.5 13.8 9 19.5 10.8 13.8 12.6 12 18.5 10.2 12.6 4.5 10.8 10.2 9 12 3.5Z" />
+              <path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" />
+            </svg>
+            <strong>AI 生成</strong>
+            <span>写下要求和基本内容，自动写出完整剧本</span>
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="gen-form">
+          <label>要求 / 主题</label>
+          <textarea
+            v-model="genTopic"
+            rows="3"
+            placeholder="想拍什么：题材、风格、时长、大概几场戏……例如「修仙渡劫短剧，8 场，燃向」"
+          />
+          <label>基本内容（可选）</label>
+          <textarea
+            v-model="genBrief"
+            rows="5"
+            placeholder="已有的故事梗概、大纲、人物设定或部分台词，会一起交给模型"
+          />
+          <div class="gen-foot">
+            <label class="model-pick">
+              <span>LLM</span>
+              <select v-model="llmChoice">
+                <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
+                <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
+                  <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">{{ m }}</option>
+                </optgroup>
+              </select>
+            </label>
+            <button type="button" class="ghost" :disabled="generating" @click="emptyMode = 'pick'">返回</button>
+            <button
+              type="button"
+              class="primary"
+              :disabled="generating || !llmModel || (!genTopic.trim() && !genBrief.trim())"
+              @click="submitGenerate"
+            >
+              生成剧本
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
     <div v-else class="sdoc-md nowheel nodrag" :class="{ 'has-panel': selected && panelOpen }" v-html="html" />
 
-    <div v-if="!playReady && !editing" class="sdoc-gate nodrag">
-      <span>导入 .md 剧本，或点「写剧本」。导入后可以提炼角色、场景和分镜。</span>
-      <button type="button" :disabled="generating" @click="importMarkdown" @mousedown.stop>导入 Markdown</button>
+    <div v-if="!playReady && !emptyState && !editing" class="sdoc-gate nodrag">
+      <span>现在还是草稿，不是完整剧本。生成完整剧本后才能提炼角色、场景和分镜。</span>
+      <button type="button" :disabled="generating || !llmModel" @click="generateThis($event, 'play')" @mousedown.stop>
+        生成完整剧本
+      </button>
     </div>
-    <div v-else-if="playReady && isImg2Video && !editing" class="sdoc-gate nodrag">
-      <span>从这份剧本提炼到画布。角色、场景、分镜可以分开选。</span>
+    <div v-else-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
+      <span>从这份剧本提炼到画布。角色、场景、分镜可以分开选，也可以一步一步来。</span>
       <div class="sdoc-extracts">
         <button type="button" :disabled="generating" @click="generateThis($event, 'extract', 'subjects')" @mousedown.stop>
           提炼角色
@@ -382,12 +481,6 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
         </button>
       </div>
     </div>
-    <div v-else-if="playReady && !project.current?.shots.length && !editing" class="sdoc-gate nodrag">
-      <span>按人物、场景、分镜分三步提炼；每一步完成就立即保存，下一步由你确认后再运行。</span>
-      <button type="button" :disabled="generating" @click="generateThis($event, 'extract')" @mousedown.stop>
-        {{ extractLabel }}
-      </button>
-    </div>
     <div v-else-if="waitingReview && !editing" class="sdoc-gate nodrag">
       <span>请先验收这份剧本。可点「编辑」或「续写」后再确认。确认后才做人设、配图、视频。</span>
       <button type="button" @click="approvePlay" @mousedown.stop>确认通过</button>
@@ -405,7 +498,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 
     <transition name="float-down">
       <div
-        v-if="selected && panelOpen && !editing"
+        v-if="selected && panelOpen && !editing && !emptyState"
         class="prompt nodrag nowheel"
         @mousedown.stop
         @click.stop
@@ -450,7 +543,6 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             导入.md
           </button>
           <button
-            v-if="isImg2Video"
             type="button"
             class="ghost"
             :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
@@ -459,7 +551,6 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             提炼角色
           </button>
           <button
-            v-if="isImg2Video"
             type="button"
             class="ghost"
             :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
@@ -468,22 +559,12 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
             提炼场景
           </button>
           <button
-            v-if="isImg2Video"
             type="button"
             class="ghost"
             :disabled="generating || !canExtractShots"
             @click="generateThis($event, 'extract', 'shots')"
           >
             提炼分镜
-          </button>
-          <button
-            v-else-if="nextStage"
-            type="button"
-            class="ghost"
-            :disabled="generating || (!playReady && !(project.current?.script?.content || '').trim())"
-            @click="generateThis($event, 'extract')"
-          >
-            {{ extractLabel }}
           </button>
           <button
             v-if="playReady"
@@ -701,6 +782,148 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   padding: 6px 14px 10px;
   font-size: 11px;
   color: var(--color-error);
+}
+
+/* ── 空剧本：导入 / 生成 ── */
+.sdoc-empty {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 22px;
+}
+.empty-title {
+  margin: 0 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-3);
+  letter-spacing: 0.02em;
+}
+.empty-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+  max-width: 380px;
+}
+.empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 16px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+}
+.empty-card:hover:not(:disabled) {
+  border-color: rgba(126, 180, 255, 0.45);
+  background: rgba(126, 180, 255, 0.06);
+}
+.empty-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.empty-card svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: var(--color-text-3);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.empty-card strong {
+  font-size: 13px;
+  font-weight: 680;
+  color: var(--color-text-1);
+}
+.empty-card span {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-4);
+}
+.empty-card.accent {
+  border-color: rgba(126, 180, 255, 0.35);
+  background: linear-gradient(160deg, rgba(126, 180, 255, 0.1), rgba(167, 139, 250, 0.08));
+}
+.empty-card.accent svg {
+  stroke: #9db8ff;
+}
+.gen-form {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+}
+.gen-form label {
+  display: block;
+  margin: 0 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-3);
+}
+.gen-form textarea {
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  resize: vertical;
+  border: 1px solid var(--color-border);
+  outline: none;
+  border-radius: 9px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12.5px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.gen-form textarea:focus {
+  border-color: rgba(126, 180, 255, 0.55);
+}
+.gen-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-foot .model-pick {
+  flex: 1;
+  min-width: 0;
+}
+.gen-foot .ghost,
+.gen-foot .primary {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gen-foot .ghost {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-2);
+}
+.gen-foot .primary {
+  border: 1px solid rgba(126, 180, 255, 0.6);
+  background: rgba(126, 180, 255, 0.18);
+  color: #cfe0ff;
+}
+.gen-foot .primary:hover:not(:disabled) {
+  background: rgba(126, 180, 255, 0.28);
+}
+.gen-foot .ghost:disabled,
+.gen-foot .primary:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .sdoc-gate {
   display: flex;

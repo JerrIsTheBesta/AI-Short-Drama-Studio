@@ -1,4 +1,10 @@
-import { useProjectStore, useAssetsStore, useSettingsStore, useLibraryStore } from '@/stores'
+import {
+  useProjectStore,
+  useAssetsStore,
+  useSettingsStore,
+  useLibraryStore,
+  useScriptsStore
+} from '@/stores'
 import {
   generateImage,
   generateVideo,
@@ -71,7 +77,7 @@ import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
 import { toDigitalHumanWav } from '@/services/ffmpeg'
-import type { AspectRatio, CanvasNode, ID, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
+import type { AspectRatio, CanvasNode, ID, Project, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
 import {
   isH3VideoFamily,
   normalizeH3GenMode,
@@ -1122,6 +1128,19 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   return compiled
 }
 
+/** 口播「名字：台词」里的说话人 → 匹配角色卡（有语音设置的角色） */
+function speakerSubject(shot: Shot, p: Project): Subject | undefined {
+  const speaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  if (!speaker) return undefined
+  const subjects = p.subjects ?? []
+  const exact = subjects.find((s) => s.name.trim() === speaker)
+  if (exact) return exact
+  return subjects.find((s) => {
+    const name = s.name.trim()
+    return name && (speaker.includes(name) || name.includes(speaker))
+  })
+}
+
 export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   ensureNotCancelled(signal)
   const project = useProjectStore()
@@ -1130,25 +1149,82 @@ export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) =
   if (!needsExternalTts(shot, project.current)) throw new Error('该分镜未选择后期 TTS，不需要生成独立配音')
   const text = spokenTextOnly(shot.voiceover || '')
   if (!text) throw new Error('该分镜没有口播文案')
-  onProgress?.('合成口播...')
-  const result = await generateSpeech({
-    text,
-    voice: project.current.settings.ttsVoice,
-    language: 'Chinese',
-    instruction: `自然、克制的中文短视频旁白；语速按 ${shot.duration} 秒内说完；标点处真实停顿，不要播音腔，不要夸张情绪。`,
-    signal
-  })
-  const quality = await reviewSpeechQuality(result.blob, text, shot.duration)
+  const p = project.current
+  const speaker = speakerSubject(shot, p)
+  let blob: Blob
+  if (speaker?.voiceRefAssetId || speaker?.clonedVoiceId) {
+    // 角色卡带了参考音频：走声音复刻（百炼 Qwen3-TTS-VC），首次自动复刻并回填音色 ID
+    let voiceId = speaker.clonedVoiceId
+    let voiceModel = speaker.clonedVoiceModel || 'qwen3-tts-vc-2026-01-22'
+    if (!voiceId) {
+      onProgress?.(`复刻「${speaker.name}」的音色...`)
+      const sampleBlob = await assets.getBlob(speaker.voiceRefAssetId!)
+      if (!sampleBlob) throw new Error(`「${speaker.name}」的参考音频读取失败，请在角色卡上重新上传`)
+      const cloned = await cloneVoiceFromSample(
+        sampleBlob,
+        `subj${speaker.id.replace(/[^a-z0-9]/gi, '').slice(-10) || 'voice'}`,
+        signal
+      )
+      voiceId = cloned.voiceId
+      voiceModel = cloned.model
+      project.updateSubject(speaker.id, { clonedVoiceId: voiceId, clonedVoiceModel: voiceModel })
+      await project.save()
+    }
+    onProgress?.(`用「${speaker.name}」的音色合成口播...`)
+    blob = await synthesizeClonedSpeech(text, voiceId, voiceModel, signal)
+  } else {
+    onProgress?.('合成口播...')
+    const instruction = [
+      speaker?.voicePrompt?.trim(),
+      `自然、克制的中文短视频旁白；语速按 ${shot.duration} 秒内说完；标点处真实停顿，不要播音腔，不要夸张情绪。`
+    ]
+      .filter(Boolean)
+      .join('；')
+    const result = await generateSpeech({
+      text,
+      voice: p.settings.ttsVoice,
+      language: 'Chinese',
+      instruction,
+      signal
+    })
+    blob = result.blob
+  }
+  const quality = await reviewSpeechQuality(blob, text, shot.duration)
   if (!quality.passed) throw new Error(`配音文件或时长校验未通过：${quality.issues.join('；')}。${quality.retryHint || ''}`)
-  const asset = await assets.add(result.blob, 'audio', 'ai-generated', {
+  const asset = await assets.add(blob, 'audio', 'ai-generated', {
     filename: `voice_${shot.index + 1}_${Date.now().toString(36)}`,
     prompt: text,
-    projectId: project.current.id,
+    projectId: p.id,
     shotId: shot.id
   })
   project.assignShotAudio(shot.id, asset.id)
   await project.save()
   return asset
+}
+
+/**
+ * 把刚写好的剧本存成一份本地 Markdown，并登记进资源库的「剧本」。
+ * 归档失败不能影响生成流程，所以这里只提示不抛错。
+ */
+export async function archivePlayToScriptLibrary(
+  project: Project,
+  options: {
+    mode?: 'write' | 'continue'
+    prompt?: string
+    onLog?: (msg: string) => void
+  } = {}
+): Promise<void> {
+  try {
+    const scripts = useScriptsStore()
+    await scripts.saveFromProject(project, {
+      mode: options.mode ?? 'write',
+      prompt: options.prompt
+    })
+    options.onLog?.('剧本已存入剧本库（本地 Markdown）')
+  } catch (e: any) {
+    console.warn('[script-library] 归档剧本失败', e)
+    options.onLog?.(`剧本没能写入剧本库：${e?.message ?? String(e)}`)
+  }
 }
 
 export async function runGeneratePlay(
@@ -1253,6 +1329,11 @@ export async function runGeneratePlay(
   }
   if (project.current.pipelineMode !== 'img2video') project.setPlayApproved(false)
   await project.save()
+  await archivePlayToScriptLibrary(project.current, {
+    mode: continueMode ? 'continue' : 'write',
+    prompt: brief || opts?.hint,
+    onLog: onProgress
+  })
   if (continueMode) {
     const added = countAddedPlayScenes(previousPlay, run.result.playMarkdown)
     onProgress?.(

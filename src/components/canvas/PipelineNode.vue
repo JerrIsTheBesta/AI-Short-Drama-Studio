@@ -97,6 +97,117 @@ const scene = computed(() =>
     : undefined
 )
 
+/* ── 角色卡语音：音色描述 + 可选参考音频 ── */
+const voicePromptText = computed({
+  get: () => subject.value?.voicePrompt ?? '',
+  set: (v: string) => {
+    if (subject.value) project.updateSubject(subject.value.id, { voicePrompt: v })
+  }
+})
+const voiceRefUrl = ref('')
+const voiceRefName = ref('')
+const voiceRefPlaying = ref(false)
+const voiceRefEl = ref<HTMLAudioElement | null>(null)
+const voiceFileInput = ref<HTMLInputElement | null>(null)
+const voiceUploading = ref(false)
+
+const subjectKindText = computed(() => {
+  const k = subject.value?.kind
+  if (k === 'person') return '人物'
+  if (k === 'animal') return '动物'
+  if (k === 'other') return '物体'
+  return ''
+})
+
+const voiceSummary = computed(() => {
+  const s = subject.value
+  if (!s) return ''
+  if (s.clonedVoiceId) return '音色已复刻'
+  if (s.voiceRefAssetId) return '参考音频已上传'
+  const vp = s.voicePrompt?.trim()
+  if (vp) return vp.length > 20 ? `${vp.slice(0, 20)}…` : vp
+  return '未设置语音'
+})
+const voiceConfigured = computed(() => {
+  const s = subject.value
+  return Boolean(s?.clonedVoiceId || s?.voiceRefAssetId || s?.voicePrompt?.trim())
+})
+
+watch(
+  () => subject.value?.voiceRefAssetId,
+  async (id) => {
+    voiceRefPlaying.value = false
+    if (!id) {
+      voiceRefUrl.value = ''
+      voiceRefName.value = ''
+      return
+    }
+    voiceRefUrl.value = (await assets.getUrl(id)) || ''
+    voiceRefName.value = assets.getMeta(id)?.filename || '参考音频'
+  },
+  { immediate: true }
+)
+
+function pickVoiceRef() {
+  voiceFileInput.value?.click()
+}
+
+async function onVoiceRefChange(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !subject.value) return
+  if (file.size > 10 * 1024 * 1024) {
+    toast.error('参考音频不能超过 10 MB')
+    return
+  }
+  voiceUploading.value = true
+  try {
+    const asset = await assets.add(file, 'audio', 'uploaded', {
+      filename: file.name,
+      projectId: project.current?.id
+    })
+    // 换了样本，之前复刻的音色作废
+    project.updateSubject(subject.value.id, {
+      voiceRefAssetId: asset.id,
+      clonedVoiceId: undefined,
+      clonedVoiceModel: undefined
+    })
+    await project.save()
+    toast.success('参考音频已上传，生成口播时会自动复刻音色')
+  } catch (e: any) {
+    toast.error(e?.message || '上传失败')
+  } finally {
+    voiceUploading.value = false
+  }
+}
+
+function removeVoiceRef() {
+  if (!subject.value) return
+  project.updateSubject(subject.value.id, {
+    voiceRefAssetId: undefined,
+    clonedVoiceId: undefined,
+    clonedVoiceModel: undefined
+  })
+}
+
+async function toggleVoiceRefPlay(ev: Event) {
+  ev.stopPropagation()
+  const a = voiceRefEl.value
+  if (!a) return
+  if (a.paused) {
+    try {
+      await a.play()
+      voiceRefPlaying.value = true
+    } catch {
+      /* ignore */
+    }
+  } else {
+    a.pause()
+    voiceRefPlaying.value = false
+  }
+}
+
 const durationLabel = computed(() => {
   const meta = assetId.value ? assets.getMeta(assetId.value) : undefined
   const actual =
@@ -909,7 +1020,23 @@ const cropStyle = computed(() => ({
       </div>
     </div>
 
-    <div class="pnode-name">
+    <div v-if="type === 'subject' && subject" class="subject-card">
+      <div class="sc-head">
+        <span class="sc-name" :title="title">{{ title }}</span>
+        <span class="sc-role">{{ subject.role || subjectKindText || '角色' }}</span>
+      </div>
+      <p v-if="subject.description" class="sc-desc" :title="subject.description">
+        {{ subject.description }}
+      </p>
+      <div class="sc-voice" :class="{ set: voiceConfigured }">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="9" y="3.5" width="6" height="11" rx="3" />
+          <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5" />
+        </svg>
+        <span>{{ voiceSummary }}</span>
+      </div>
+    </div>
+    <div v-else class="pnode-name">
       <span v-if="kindLabel" class="kind">{{ kindLabel }}</span>
       <span class="name" :title="title">{{ title }}</span>
       <span v-if="isVideoNode && durationLabel" class="len">{{ durationLabel }}</span>
@@ -926,6 +1053,65 @@ const cropStyle = computed(() => ({
         >
           {{ optimizingPrompt ? '优化中…' : '优化提示词' }}
         </button>
+      </div>
+      <div v-if="type === 'subject' && subject" class="voice-sec">
+        <div class="voice-sec-head">
+          <span class="voice-sec-title">角色语音</span>
+          <span class="voice-sec-tag">可选 · 用于口播配音</span>
+        </div>
+        <textarea
+          class="voice-input"
+          rows="2"
+          :value="voicePromptText"
+          placeholder="用一句话描述音色，如：低沉磁性的中年男声，语速偏慢，带一点沙哑"
+          @input="voicePromptText = ($event.target as HTMLTextAreaElement).value"
+        />
+        <div class="voice-ref">
+          <template v-if="voiceRefUrl">
+            <button
+              type="button"
+              class="voice-play"
+              :title="voiceRefPlaying ? '暂停' : '试听参考音频'"
+              @click="toggleVoiceRefPlay"
+            >
+              {{ voiceRefPlaying ? '❚❚' : '▶' }}
+            </button>
+            <span class="voice-ref-name" :title="voiceRefName">{{ voiceRefName }}</span>
+            <span v-if="subject.clonedVoiceId" class="voice-cloned">已复刻</span>
+            <button type="button" class="voice-del" title="移除参考音频" @click="removeVoiceRef">✕</button>
+          </template>
+          <button
+            v-else
+            type="button"
+            class="voice-upload"
+            :disabled="voiceUploading"
+            @click="pickVoiceRef"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V4.5M7.5 9 12 4.5 16.5 9" />
+              <path d="M4.5 16.5v2.5a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.5" />
+            </svg>
+            {{ voiceUploading ? '上传中…' : '上传参考音频' }}
+          </button>
+        </div>
+        <p class="voice-sec-hint">
+          参考音频仅在支持声音复刻的模型上生效（当前为百炼 Qwen3-TTS-VC）；音色描述对普通 TTS 也会生效。口播文案以「角色名：台词」开头时自动套用。
+        </p>
+        <audio
+          v-if="voiceRefUrl"
+          ref="voiceRefEl"
+          :src="voiceRefUrl"
+          preload="auto"
+          class="voice-audio"
+          @ended="voiceRefPlaying = false"
+        />
+        <input
+          ref="voiceFileInput"
+          type="file"
+          accept="audio/*"
+          style="display: none"
+          @change="onVoiceRefChange"
+        />
       </div>
       <textarea
         rows="12"
@@ -1237,6 +1423,234 @@ const cropStyle = computed(() => ({
   padding: 0 10px;
   background: var(--color-bg-1);
   border-radius: 0 0 11px 11px;
+}
+
+/* ── 角色卡 ── */
+.pnode.kind-subject {
+  border-color: rgba(167, 139, 250, 0.28);
+}
+.pnode.kind-subject .pnode-media {
+  border-bottom: 1px solid rgba(167, 139, 250, 0.16);
+}
+.pnode.on.kind-subject {
+  border-color: rgba(167, 139, 250, 0.85);
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.5), var(--shadow-md);
+}
+.subject-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 11px 9px;
+  background:
+    linear-gradient(180deg, rgba(167, 139, 250, 0.07), transparent 42%),
+    var(--color-bg-1);
+  border-radius: 0 0 11px 11px;
+}
+.sc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sc-name {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: 0.01em;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-role {
+  flex-shrink: 0;
+  max-width: 96px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  background: rgba(167, 139, 250, 0.12);
+  color: #c4b5fd;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-voice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border: 1px dashed var(--color-border);
+  color: var(--color-text-4);
+  font-size: 11px;
+}
+.sc-voice svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sc-voice span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-voice.set {
+  border-style: solid;
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.08);
+  color: #6ee7b7;
+}
+
+/* ── 角色语音编辑区（展开面板） ── */
+.voice-sec {
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 10px;
+  background: rgba(167, 139, 250, 0.05);
+}
+.voice-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.voice-sec-title {
+  font-size: 12px;
+  font-weight: 680;
+  color: var(--color-text-1);
+  letter-spacing: 0.02em;
+}
+.voice-sec-tag {
+  font-size: 10px;
+  color: var(--color-text-4);
+}
+.voice-input {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--color-border);
+  outline: none;
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 7px 9px;
+  font-family: inherit;
+}
+.voice-input:focus {
+  border-color: rgba(167, 139, 250, 0.6);
+}
+.voice-ref {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+}
+.voice-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 11px;
+  border: 1px dashed rgba(167, 139, 250, 0.45);
+  border-radius: 8px;
+  background: transparent;
+  color: #c4b5fd;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.voice-upload:hover:not(:disabled) {
+  background: rgba(167, 139, 250, 0.1);
+}
+.voice-upload:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.voice-upload svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.voice-play {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 0 1px 1px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(167, 139, 250, 0.9);
+  color: #fff;
+  font-size: 10px;
+  cursor: pointer;
+}
+.voice-ref-name {
+  min-width: 0;
+  flex: 1;
+  font-size: 11px;
+  color: var(--color-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-cloned {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: rgba(52, 211, 153, 0.14);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  color: #6ee7b7;
+  font-size: 10px;
+  font-weight: 600;
+}
+.voice-del {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 3px 5px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-4);
+  font-size: 11px;
+  cursor: pointer;
+}
+.voice-del:hover {
+  color: var(--color-error);
+  background: rgba(239, 68, 68, 0.12);
+}
+.voice-sec-hint {
+  margin: 7px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--color-text-4);
+}
+.voice-audio {
+  display: none;
 }
 .pnode-name .kind {
   flex-shrink: 0;

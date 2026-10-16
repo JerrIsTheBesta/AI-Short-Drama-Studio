@@ -8,7 +8,7 @@
 
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
+import { useProjectStore, useAssetsStore, useToastStore, useScriptsStore } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -20,6 +20,7 @@ const router = useRouter()
 const project = useProjectStore()
 const assets = useAssetsStore()
 const toast = useToastStore()
+const scripts = useScriptsStore()
 
 const imageUrls = ref<Record<string, string>>({})
 const videoUrls = ref<Record<string, string>>({})
@@ -39,6 +40,7 @@ onMounted(async () => {
   }
   await project.refreshList()
   await assets.refresh()
+  await scripts.refresh()
   await loadAssets()
 })
 
@@ -298,6 +300,23 @@ function copyText(text: string, label: string) {
   )
 }
 
+function scriptSourceLabel(source: string) {
+  return source === 'ai-generated' ? 'AI 生成' : source === 'imported' ? '导入' : '手建'
+}
+
+async function downloadScript(id: string) {
+  const ok = await scripts.download(id)
+  if (ok) toast.success('已导出 Markdown')
+}
+
+async function removeScript(id: string) {
+  const doc = scripts.docs.find((d) => d.id === id)
+  if (!doc) return
+  if (!confirm(`从剧本库删除「${doc.title}」？本地 Markdown 文件也会一起删除。`)) return
+  await scripts.remove(id)
+  toast.success('已删除')
+}
+
 function downloadProjectJson() {
   if (!project.current) return
   const blob = new Blob([JSON.stringify(project.current, null, 2)], {
@@ -429,6 +448,35 @@ function downloadProjectJson() {
               <button class="link-btn" @click="downloadAsset(a.id, a.filename || 'video.mp4')">📥 下载</button>
               <button class="link-btn danger" @click="deleteLibraryAsset(a.id)">🗑 删除</button>
             </div>
+          </div>
+        </div>
+      </div>
+    </GlassCard>
+
+    <!-- 剧本库 -->
+    <GlassCard padding="md" class="section-card">
+      <div class="card-head">
+        <h3>📜 剧本（{{ scripts.docs.length }}）</h3>
+        <div class="head-tools">
+          <button class="mini-btn" @click="router.push('/scripts')">管理剧本 →</button>
+        </div>
+      </div>
+      <div v-if="!scripts.docs.length" class="empty-mini">
+        还没有剧本。让 AI 写一篇，或去「剧本」页导入 Markdown。
+      </div>
+      <div v-else class="script-list">
+        <div v-for="d in scripts.docs" :key="d.id" class="script-row">
+          <div class="script-main">
+            <div class="script-title">{{ d.title }}</div>
+            <div class="script-sub">
+              <Tag size="sm">{{ scriptSourceLabel(d.source) }}</Tag>
+              {{ d.episodeCount }} 集 · {{ d.totalWords }} 字 · {{ fmtTime(d.updatedAt) }}
+            </div>
+          </div>
+          <div class="script-acts">
+            <button class="link-btn" @click="router.push('/scripts')">✎ 编辑</button>
+            <button class="link-btn" @click="downloadScript(d.id)">📥 导出 MD</button>
+            <button class="link-btn danger" @click="removeScript(d.id)">🗑 删除</button>
           </div>
         </div>
       </div>
@@ -824,6 +872,51 @@ function downloadProjectJson() {
 }
 .kv span { color: var(--color-text-3); }
 .kv b { color: var(--color-text-1); font-weight: 500; }
+
+.script-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.script-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  background: var(--color-bg-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+.script-row:hover {
+  border-color: var(--color-border-strong);
+}
+.script-main {
+  flex: 1;
+  min-width: 0;
+}
+.script-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.script-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-text-3);
+  margin-top: 2px;
+}
+.script-acts {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
 
 .shot-list {
   display: flex;

@@ -1,14 +1,15 @@
 /**
  * IndexedDB 存储 —— 项目和素材都放这里
  *
- * 三个 store：
+ * 四个 store：
  * - projects : 项目元数据（不含大文件）
  * - assets   : 素材二进制（按 ID 存 blob）
  * - thumbs   : 缩略图
+ * - scripts  : 剧本库（元数据 + Markdown 正文）
  */
 
 import { toRaw } from 'vue'
-import type { Asset, Project } from '@/types'
+import type { Asset, Project, ScriptDoc } from '@/types'
 
 /** IndexedDB structured clone 不能稳定处理 Vue Proxy，入库前先打成纯对象 */
 function toPlain<T>(value: T): T {
@@ -16,9 +17,9 @@ function toPlain<T>(value: T): T {
 }
 
 const DB_NAME = 'ai-cut-db'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
-export type StoreName = 'projects' | 'assets' | 'thumbs'
+export type StoreName = 'projects' | 'assets' | 'thumbs' | 'scripts'
 
 let _db: IDBDatabase | null = null
 
@@ -36,6 +37,9 @@ export function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('thumbs')) {
         db.createObjectStore('thumbs', { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains('scripts')) {
+        db.createObjectStore('scripts', { keyPath: 'id' })
       }
     }
     req.onsuccess = () => {
@@ -148,6 +152,45 @@ export async function listAssets(): Promise<Asset[]> {
 export async function listLibraryAssets(): Promise<Asset[]> {
   const all = await list<Asset>('assets')
   return all.filter((a) => a.library).sort((a, b) => b.createdAt - a.createdAt)
+}
+
+// ============== 剧本库（Web 端） ==============
+
+interface ScriptRecord {
+  id: string
+  meta: ScriptDoc
+  markdown: string
+}
+
+export async function listScripts(): Promise<ScriptDoc[]> {
+  const rows = await list<ScriptRecord>('scripts')
+  return rows
+    .map((row) => row?.meta)
+    .filter(Boolean)
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+}
+
+export async function getScriptRecord(id: string): Promise<ScriptRecord | undefined> {
+  return get<ScriptRecord>('scripts', id)
+}
+
+export async function putScriptRecord(meta: ScriptDoc, markdown: string): Promise<void> {
+  await put('scripts', { id: meta.id, meta: toPlain(meta), markdown })
+}
+
+export async function putScriptText(id: string, markdown: string): Promise<void> {
+  const existing = await get<ScriptRecord>('scripts', id)
+  if (!existing) return
+  await put('scripts', { ...existing, markdown })
+}
+
+export async function getScriptText(id: string): Promise<string> {
+  const row = await get<ScriptRecord>('scripts', id)
+  return row?.markdown ?? ''
+}
+
+export async function delScript(id: string): Promise<void> {
+  await del('scripts', id)
 }
 
 /** 估算存储用量 */

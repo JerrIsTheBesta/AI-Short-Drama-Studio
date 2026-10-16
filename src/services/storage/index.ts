@@ -7,6 +7,7 @@ import type { Asset, Project } from '@/types'
 import * as idb from './idb'
 import * as fsStore from './fs'
 import * as library from './library'
+import * as scripts from './scripts'
 
 export { setActiveProjectDir, getActiveProjectDir, loadProjectFromDir } from './fs'
 export {
@@ -20,6 +21,16 @@ export {
   saveLibraryFolders,
   updateLibraryAssetMeta
 } from './library'
+export {
+  listScriptDocs,
+  saveScriptMeta,
+  saveScript,
+  saveScriptMarkdown,
+  loadScriptMarkdown,
+  deleteScriptDoc,
+  scriptAbsPath,
+  scriptsDirPath
+} from './scripts'
 
 function useFs() {
   return isDesktop()

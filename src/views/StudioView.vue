@@ -22,7 +22,7 @@ import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
 import FreeformGenNode from '@/components/canvas/FreeformGenNode.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
-import PromptCoach from '@/components/canvas/PromptCoach.vue'
+import CanvasGuide from '@/components/canvas/CanvasGuide.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import { normalizeVideoGenModel, type CanvasNode, type Shot } from '@/types'
@@ -32,12 +32,24 @@ const assets = useAssetsStore()
 const toast = useToastStore()
 const router = useRouter()
 const agentOpen = ref(true)
+const GUIDE_KEY = 'aicut:guide:canvas'
+const guideOpen = ref(localStorage.getItem(GUIDE_KEY) !== 'done')
+function dismissGuide() {
+  guideOpen.value = false
+  try {
+    localStorage.setItem(GUIDE_KEY, 'done')
+  } catch {
+    /* 本地存储不可用时，本次会话内也不再弹 */
+  }
+}
+
 const agentWidth = ref(440)
 const resizingAgent = ref(false)
 const rightOpen = ref(false)
 const optimizingAllVideos = ref(false)
 const optimizeAllProgress = ref('')
-const isImg2Video = computed(() => project.current?.pipelineMode === 'img2video')
+// 合并模式：不再区分自由画布与创作模式，只有这一种画布
+// （保留 img2video 只是老项目的历史字段，不再用于功能分叉）
 
 const AGENT_WIDTH_KEY = 'aicut:agent-chat-width'
 const AGENT_MIN_WIDTH = 300
@@ -231,12 +243,10 @@ onMounted(async () => {
     (project.current.scenes?.length || 0) > 0 ||
     project.current.shots.length > 0 ||
     Boolean(project.current.canvas?.nodes.some((n) => n.type === 'groupFrame'))
-  if (project.current.pipelineMode === 'img2video' && !hasPipeline) {
-    /* 空白画布，右键添加节点 */
-  } else if (!project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')) {
-    project.setCanvas(rebuildCanvasGraph(project.current, false))
-  } else {
-    project.setCanvas(rebuildCanvasGraph(project.current, true))
+  // 合并模式：项目里还没有剧本 / 人物 / 场景 / 分镜时，画布保持空白，由智能体或右键添加来起头
+  const hasGroupFrame = project.current.canvas?.nodes.some((n) => n.type === 'groupFrame')
+  if (hasPipeline || hasGroupFrame) {
+    project.setCanvas(rebuildCanvasGraph(project.current, Boolean(hasGroupFrame)))
   }
   rebindShotScenes()
   pullStrandedFreeformIntoView()
@@ -553,7 +563,7 @@ function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
   if (clickedId) selectedId.value = clickedId
   const nodeId = clickedId || selectedId.value || undefined
   const extra = (canDuplicate(clickedId) ? 36 : 0) + (clickedId && canDeleteNode(clickedId) ? 36 : 0)
-  const extraFree = isImg2Video.value ? 4 * 36 + 10 : 0
+  const extraFree = 4 * 36 + 10
   const w = 216
   const h = 92 + extra + extraFree
   ctxMenu.value = {
@@ -724,12 +734,35 @@ function goClassic() {
       </button>
       <strong>{{ project.current?.name || '画布' }}</strong>
       <span class="dim">{{
-        isImg2Video ? '自由模式' : `${project.current?.shots.length || 0} 个分镜`
+        `${project.current?.shots.length || 0} 个分镜 · ${project.current?.canvas?.nodes.length || 0} 个节点`
       }}</span>
       <span v-if="project.current?.folderPath" class="dim path" :title="project.current.folderPath">
         {{ project.current.folderPath }}
       </span>
       <div class="spacer" />
+      <button class="icon-btn" title="再看一遍新手引导" @click="guideOpen = true">
+        <span class="guide-mark">?</span>
+      </button>
+      <button
+        class="mode-switch-btn script-lib-btn"
+        type="button"
+        title="打开剧本库：所有剧本都存在本地 Markdown，可以编辑、增删集数"
+        @click="router.push('/scripts')"
+      >
+        <CanvasToolbarIcon name="script" :size="15" />
+        剧本
+        <em>→</em>
+      </button>
+      <button
+        class="mode-switch-btn"
+        type="button"
+        title="切到经典分步流程：剧本 → 分镜 → 图片 → 视频 → 剪辑 → 字幕 → 导出"
+        @click="goClassic"
+      >
+        <CanvasToolbarIcon name="steps" :size="15" />
+        经典步骤
+        <em>→</em>
+      </button>
       <button
         class="bulk-optimize-btn"
         type="button"
@@ -754,9 +787,6 @@ function goClassic() {
       <button v-if="isDesktop()" class="icon-btn" title="打开文件夹" @click="openFolder">
         <CanvasToolbarIcon name="folder" />
       </button>
-      <button v-if="!isImg2Video" class="icon-btn" title="经典步骤" @click="goClassic">
-        <CanvasToolbarIcon name="steps" />
-      </button>
       <button class="icon-btn" title="设置" @click="openSettings">
         <CanvasToolbarIcon name="settings" />
       </button>
@@ -770,14 +800,20 @@ function goClassic() {
       </button>
     </header>
     <div class="body">
+      <CanvasGuide
+        v-if="guideOpen"
+        :agent-open="agentOpen"
+        :agent-width="agentWidth"
+        :right-width="rightOpen ? 300 : 0"
+        @done="dismissGuide"
+      />
       <div
         v-if="agentOpen"
         class="agent-shell"
         :class="{ resizing: resizingAgent }"
         :style="{ width: `${agentWidth}px` }"
       >
-        <PromptCoach v-if="isImg2Video" :node="selected" />
-        <AgentChat v-else />
+        <AgentChat :selected-node="selected" />
         <div
           class="agent-resizer"
           role="separator"
@@ -810,11 +846,8 @@ function goClassic() {
           <Background :gap="22" color="rgba(255,255,255,0.08)" />
           <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
-        <div
-          v-if="isImg2Video && !(project.current?.canvas?.nodes.length)"
-          class="empty-hint"
-        >
-          在空白处右键，添加图片、视频、剧本，或角色 / 场景 / 分镜
+        <div v-if="!project.current?.canvas?.nodes.length" class="empty-hint">
+          在左边说一句话让我开工，或在空白处右键添加图片 / 视频 / 剧本 / 角色 / 场景 / 分镜
         </div>
       </div>
       <Teleport to="body">
@@ -845,39 +878,37 @@ function goClassic() {
             </svg>
             {{ ctxMenu.nodeId ? '追加视频节点' : '添加视频节点' }}
           </button>
-          <template v-if="isImg2Video">
-            <div class="ctx-sep" />
-            <button type="button" @mousedown.prevent.stop="addScriptNode">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M7 4.5h7l4 4V19.5H7V4.5Z" />
-                <path d="M14 4.5V9h4.5" />
-                <path d="M9.5 12.5h5M9.5 15.5h5" />
-              </svg>
-              {{ ctxMenu.nodeId ? '追加剧本节点' : '添加剧本节点' }}
-            </button>
-            <button type="button" @mousedown.prevent.stop="addPipelineEntity('subject')">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="8" r="2.6" />
-                <path d="M6.5 18.5c.8-3.2 2.8-4.8 5.5-4.8s4.7 1.6 5.5 4.8" />
-              </svg>
-              {{ ctxMenu.nodeId ? '追加角色节点' : '添加角色节点' }}
-            </button>
-            <button type="button" @mousedown.prevent.stop="addPipelineEntity('scene')">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 16.5 9 11l3.2 3.2 2.3-2.2L20 16.8" />
-                <path d="M4.5 6.5h15v12h-15z" />
-                <path d="M4.5 18.5h15" />
-              </svg>
-              {{ ctxMenu.nodeId ? '追加场景节点' : '添加场景节点' }}
-            </button>
-            <button type="button" @mousedown.prevent.stop="addPipelineEntity('shot')">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="4" y="6.5" width="16" height="11" rx="1.5" />
-                <path d="M8 6.5v11M16 6.5v11M4 10.5h16M4 13.5h16" />
-              </svg>
-              {{ ctxMenu.nodeId ? '追加分镜节点' : '添加分镜节点' }}
-            </button>
-          </template>
+          <div class="ctx-sep" />
+          <button type="button" @mousedown.prevent.stop="addScriptNode">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 4.5h7l4 4V19.5H7V4.5Z" />
+              <path d="M14 4.5V9h4.5" />
+              <path d="M9.5 12.5h5M9.5 15.5h5" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加剧本节点' : '添加剧本节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addPipelineEntity('subject')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="8" r="2.6" />
+              <path d="M6.5 18.5c.8-3.2 2.8-4.8 5.5-4.8s4.7 1.6 5.5 4.8" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加角色节点' : '添加角色节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addPipelineEntity('scene')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 16.5 9 11l3.2 3.2 2.3-2.2L20 16.8" />
+              <path d="M4.5 6.5h15v12h-15z" />
+              <path d="M4.5 18.5h15" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加场景节点' : '添加场景节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addPipelineEntity('shot')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="4" y="6.5" width="16" height="11" rx="1.5" />
+              <path d="M8 6.5v11M16 6.5v11M4 10.5h16M4 13.5h16" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加分镜节点' : '添加分镜节点' }}
+          </button>
           <template v-if="ctxMenu.onNode && (canDuplicate(ctxMenu.nodeId) || canDeleteNode(ctxMenu.nodeId))">
             <div class="ctx-sep" />
             <button
@@ -986,6 +1017,51 @@ function goClassic() {
 .icon-btn.on {
   background: var(--color-bg-3);
   color: var(--color-accent);
+}
+.mode-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid rgba(126, 180, 255, 0.42);
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgba(126, 180, 255, 0.18), rgba(167, 139, 250, 0.14));
+  color: #cbd8ff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  transition: all 0.15s;
+}
+.mode-switch-btn svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.mode-switch-btn em {
+  font-style: normal;
+  opacity: 0.7;
+}
+.mode-switch-btn:hover {
+  border-color: rgba(126, 180, 255, 0.75);
+  background: linear-gradient(135deg, rgba(126, 180, 255, 0.28), rgba(167, 139, 250, 0.2));
+  color: #eaf0ff;
+}
+.script-lib-btn {
+  border-color: rgba(167, 139, 250, 0.5);
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.2), rgba(126, 180, 255, 0.14));
+  color: #ddd6fe;
+}
+.script-lib-btn:hover {
+  border-color: rgba(167, 139, 250, 0.85);
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.34), rgba(126, 180, 255, 0.22));
+  color: #f3efff;
 }
 .bulk-optimize-btn {
   display: inline-flex;
@@ -1106,6 +1182,18 @@ function goClassic() {
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
+}
+.guide-mark {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1.4px solid currentColor;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 .agent-shell {
   position: relative;

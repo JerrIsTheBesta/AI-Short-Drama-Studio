@@ -1,4 +1,4 @@
-import { useProjectStore } from '@/stores'
+import { useProjectStore, useSettingsStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
 import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
@@ -16,6 +16,8 @@ import {
 } from './runner'
 import { nextExtractStage, type ExtractStage } from './pipeline'
 import { revealCanvas } from './canvasBridge'
+import { appendCanvasReferenceSource, canvasNodeProducesImage, resolvedCanvasReferenceAssetIds } from './references'
+import { rebuildCanvasGraph } from './layout'
 import type { AgentTaskGraph, AgentTaskGraphNode } from '@/types/pipeline'
 
 export type AgentToolName =
@@ -44,8 +46,15 @@ export type AgentToolName =
   | 'focus_node'
   | 'create_image_node'
   | 'create_video_node'
+  | 'connect_nodes'
+  | 'delete_node'
+  | 'arrange_canvas'
+  | 'check_project'
   | 'update_node'
   | 'run_node'
+  | 'optimize_node_prompt'
+  | 'remember'
+  | 'forget'
 
 export interface AgentToolAction {
   tool: AgentToolName
@@ -54,6 +63,12 @@ export interface AgentToolAction {
   sceneId?: string
   shotId?: string
   nodeId?: string
+  /** 连线 / 派生新节点的上游节点 id */
+  sourceNodeId?: string
+  /** 连线的下游节点 id */
+  targetNodeId?: string
+  /** 节点显示名（重命名用） */
+  nodeLabel?: string
   visualPrompt?: string
   imagePrompt?: string
   videoPrompt?: string
@@ -366,6 +381,45 @@ function progress(ctx: ToolExecutionContext) {
   }
 }
 
+/** 把两个已有节点连起来（source → target），必要时把上游的产出作为参考图继承给下游 */
+function linkCanvasNodes(sourceId: string, targetId: string): string {
+  const project = useProjectStore()
+  const canvas = project.current?.canvas
+  if (!project.current || !canvas) throw new Error('当前项目没有可用画布')
+  const source = canvas.nodes.find((n) => n.id === sourceId)
+  const target = canvas.nodes.find((n) => n.id === targetId)
+  if (!source) throw new Error(`找不到上游节点 ${sourceId}`)
+  if (!target) throw new Error(`找不到下游节点 ${targetId}`)
+  if (sourceId === targetId) throw new Error('节点不能连自己')
+
+  let refNote = ''
+  if (canvasNodeProducesImage(source) && (target.type === 'imageGen' || target.type === 'videoGen')) {
+    const ok = appendCanvasReferenceSource(project.current, targetId, sourceId)
+    refNote = ok ? '，上游产出已作为参考图传给下游' : '（提示：下游参考图数量已满，只连了线）'
+  }
+
+  const id = `e-${sourceId}-${targetId}-in`
+  const existed = canvas.edges.some((e) => e.id === id)
+  if (!existed) {
+    canvas.edges = [
+      ...canvas.edges,
+      { id, source: sourceId, target: targetId, sourceHandle: 'out', targetHandle: 'in' }
+    ]
+  }
+  return existed
+    ? `${sourceId} → ${targetId} 本来就连着${refNote}`
+    : `已连线 ${sourceId} → ${targetId}${refNote}`
+}
+
+/** 上游节点右侧的空位，已有几个下游就往下错开 */
+function spotNextToSource(sourceId: string, fallbackX: number, fallbackY: number, count: number) {
+  const canvas = useProjectStore().current?.canvas
+  const source = canvas?.nodes.find((n) => n.id === sourceId)
+  if (!source) return { x: fallbackX, y: fallbackY }
+  const siblings = (canvas?.edges ?? []).filter((e) => e.source === sourceId).length
+  return { x: source.position.x + 420, y: source.position.y + siblings * 300 + (count % 2) * 40 }
+}
+
 const definitions: ToolDefinition[] = [
   {
     name: 'seed_script', phase: 0, timeoutMs: 5_000, required: ['text'], estimate: noCost,
@@ -655,18 +709,30 @@ const definitions: ToolDefinition[] = [
       const canvas = project.current?.canvas
       if (!project.current || !canvas) throw new Error('当前项目没有可用画布')
       const count = canvas.nodes.filter((node) => node.type === 'imageGen').length + 1
+      const sourceId = action.sourceNodeId || action.nodeId
       const right = canvas.nodes.reduce((max, node) => Math.max(max, node.position.x), 0)
+      const spot = sourceId
+        ? spotNextToSource(sourceId, right + 340, 120 + ((count - 1) % 4) * 260, count)
+        : { x: right + 340, y: 120 + ((count - 1) % 4) * 260 }
       const id = `imageGen_${Date.now().toString(36)}`
       project.addCanvasNode({
         id,
         type: 'imageGen',
-        position: { x: right + 340, y: 120 + ((count - 1) % 4) * 260 },
+        position: spot,
         data: { label: `图片 ${count}`, prompt: action.text, aspectRatio: project.current.settings.aspectRatio },
         status: 'idle'
       })
       await project.save()
+      let linked = ''
+      if (sourceId) {
+        try {
+          linked = `，并${linkCanvasNodes(sourceId, id)}`
+        } catch (e: any) {
+          linked = `（连线失败：${e?.message || '未知原因'}，可以在画布上手动拉线）`
+        }
+      }
       revealCanvas(id)
-      return `已创建图片节点 ${id}，提示词已写入，可继续 run_node 生成`
+      return `已创建图片节点 ${id}，提示词已写入${linked}，可继续 run_node 生成`
     }
   },
   {
@@ -676,12 +742,16 @@ const definitions: ToolDefinition[] = [
       const canvas = project.current?.canvas
       if (!project.current || !canvas) throw new Error('当前项目没有可用画布')
       const count = canvas.nodes.filter((node) => node.type === 'videoGen').length + 1
+      const sourceId = action.sourceNodeId || action.nodeId
       const right = canvas.nodes.reduce((max, node) => Math.max(max, node.position.x), 0)
+      const spot = sourceId
+        ? spotNextToSource(sourceId, right + 340, 140 + ((count - 1) % 4) * 280, count)
+        : { x: right + 340, y: 140 + ((count - 1) % 4) * 280 }
       const id = `videoGen_${Date.now().toString(36)}`
       project.addCanvasNode({
         id,
         type: 'videoGen',
-        position: { x: right + 340, y: 140 + ((count - 1) % 4) * 280 },
+        position: spot,
         data: {
           label: `视频 ${count}`,
           prompt: action.text,
@@ -691,8 +761,131 @@ const definitions: ToolDefinition[] = [
         status: 'idle'
       })
       await project.save()
+      let linked = ''
+      if (sourceId) {
+        try {
+          linked = `，并${linkCanvasNodes(sourceId, id)}`
+        } catch (e: any) {
+          linked = `（连线失败：${e?.message || '未知原因'}，可以在画布上手动拉线）`
+        }
+      }
       revealCanvas(id)
-      return `已创建视频节点 ${id}，动态提示词已写入，可继续 run_node 生成`
+      return `已创建视频节点 ${id}，动态提示词已写入${linked}，可继续 run_node 生成`
+    }
+  },
+  {
+    name: 'connect_nodes', phase: 2, timeoutMs: 5_000, required: ['sourceNodeId', 'targetNodeId'], estimate: noCost,
+    async execute(action) {
+      const note = linkCanvasNodes(action.sourceNodeId!, action.targetNodeId!)
+      await useProjectStore().save()
+      revealCanvas(action.targetNodeId!)
+      return note
+    }
+  },
+  {
+    name: 'delete_node', phase: 2, timeoutMs: 5_000, required: ['nodeId'], estimate: noCost,
+    async execute(action) {
+      const project = useProjectStore()
+      const canvas = project.current?.canvas
+      const node = canvas?.nodes.find((n) => n.id === action.nodeId)
+      if (!canvas || !node) throw new Error(`找不到画布节点 ${action.nodeId}`)
+      if (node.type !== 'imageGen' && node.type !== 'videoGen') {
+        throw new Error('delete_node 只能删自由图片/视频节点；剧本、人设、分镜节点要在画布上手动删')
+      }
+      const label = node.data.label || node.id
+      for (const other of canvas.nodes) {
+        const sources = other.data.referenceSourceNodeIds ?? []
+        if (sources.includes(node.id)) {
+          other.data.referenceSourceNodeIds = sources.filter((id) => id !== node.id)
+        }
+      }
+      project.removeCanvasNode(node.id)
+      await project.save()
+      return `已删除节点「${label}」，相关连线和其它节点对它的参考图引用也一起清掉了`
+    }
+  },
+  {
+    name: 'arrange_canvas', phase: 6, timeoutMs: 5_000, estimate: noCost,
+    async execute() {
+      const project = useProjectStore()
+      const p = project.current
+      if (!p) throw new Error('当前没有打开的项目')
+      try {
+        p.canvas = rebuildCanvasGraph(p, true)
+      } catch {
+        p.canvas = rebuildCanvasGraph(p, false)
+      }
+      await project.save()
+      return '画布已重新排布（按 剧本 → 人设/场景 → 分镜 的顺序整理）'
+    }
+  },
+  {
+    name: 'check_project', phase: 6, timeoutMs: 5_000, estimate: noCost,
+    async execute() {
+      const project = useProjectStore()
+      const p = project.current
+      if (!p) throw new Error('当前没有打开的项目')
+      const settings = useSettingsStore()
+      const blocking: string[] = []
+      const warnings: string[] = []
+
+      if (!(settings.config.llms ?? []).length) blocking.push('没配 LLM，写剧本、拆节点、优化提示词都做不了')
+      if (!(settings.config.images ?? []).length) blocking.push('没配图像模型，出不了图')
+      if (!(settings.config.videos ?? []).length) blocking.push('没配视频模型，出不了视频')
+
+      const canvas = p.canvas
+      const nodes = canvas?.nodes ?? []
+      const edges = canvas?.edges ?? []
+      const free = nodes.filter((n) => n.type === 'imageGen' || n.type === 'videoGen')
+      for (const n of free) {
+        const name = n.data.label || n.id
+        if (!(n.data.prompt || '').trim()) {
+          warnings.push(`「${name}」还没写提示词，生成会空跑`)
+        }
+        if (n.type === 'videoGen' && !resolvedCanvasReferenceAssetIds(p, n).length) {
+          warnings.push(`「${name}」是图生视频，但没有连上游也没有参考图，需要至少一张`)
+        }
+        if (n.status === 'failed') {
+          warnings.push(`「${name}」上次生成失败：${n.error || '原因不明'}`)
+        }
+        if (!n.data.outputAssetId && n.status !== 'failed') {
+          warnings.push(`「${name}」还没有产物`)
+        }
+      }
+      const connected = new Set<string>()
+      for (const e of edges) {
+        connected.add(e.source)
+        connected.add(e.target)
+      }
+      const orphans = free.filter((n) => !connected.has(n.id))
+      if (orphans.length) {
+        warnings.push(`有 ${orphans.length} 个节点没连线：${orphans.map((n) => n.data.label || n.id).join('、')}`)
+      }
+
+      const subjects = p.subjects ?? []
+      const scenes = p.scenes ?? []
+      if (!p.script?.content?.trim()) warnings.push('还没有剧本')
+      if (subjects.length && subjects.some((s) => !s.designSheetAssetId)) {
+        warnings.push(`有 ${subjects.filter((s) => !s.designSheetAssetId).length} 个角色没画人设图`)
+      }
+      if (scenes.length && scenes.some((s) => !s.plateAssetId)) {
+        warnings.push(`有 ${scenes.filter((s) => !s.plateAssetId).length} 个场景没画底板`)
+      }
+      if (p.shots.length) {
+        const noImg = p.shots.filter((s) => !s.imageAssetId).length
+        const noVid = p.shots.filter((s) => !s.videoAssetId).length
+        if (noImg) warnings.push(`有 ${noImg} 个分镜还没出图`)
+        if (noVid) warnings.push(`有 ${noVid} 个分镜还没出视频`)
+        if (!p.playApproved) warnings.push('剧本/分镜还没验收，流水线下游动作会被拦住')
+      }
+
+      if (!blocking.length && !warnings.length) {
+        return `体检通过。剧本、${subjects.length} 个人物、${scenes.length} 个场景、${(p.shots ?? []).length} 个分镜、画布 ${free.length} 个生成节点都没问题。`
+      }
+      const lines: string[] = []
+      if (blocking.length) lines.push(`【卡住】\n- ${blocking.join('\n- ')}`)
+      if (warnings.length) lines.push(`【待处理】\n- ${warnings.join('\n- ')}`)
+      return lines.join('\n')
     }
   },
   {
@@ -704,11 +897,12 @@ const definitions: ToolDefinition[] = [
       if (node.type !== 'imageGen' && node.type !== 'videoGen') {
         throw new Error('update_node 只修改自由图片/视频节点；分镜节点请用 revise_shot')
       }
-      if (action.text === undefined && action.duration === undefined) {
-        throw new Error('update_node 至少需要 prompt(text) 或 duration')
+      if (action.text === undefined && action.duration === undefined && action.nodeLabel === undefined) {
+        throw new Error('update_node 至少需要 prompt(text)、duration 或 label')
       }
       project.patchCanvasNode(node.id, {
         ...(action.text !== undefined ? { prompt: action.text } : {}),
+        ...(action.nodeLabel !== undefined ? { label: action.nodeLabel.trim() || undefined } : {}),
         ...(action.duration !== undefined
           ? { duration: Math.max(1, Math.min(15, Math.round(action.duration))) }
           : {}),
@@ -724,6 +918,53 @@ const definitions: ToolDefinition[] = [
   {
     name: 'run_node', phase: 2, timeoutMs: 20 * 60_000, required: ['nodeId'], estimate: oneImage,
     async execute(action, ctx) { await runCanvasNode(action.nodeId!, progress(ctx), ctx.signal); return '节点完成' }
+  },
+  {
+    name: 'optimize_node_prompt', phase: 2, timeoutMs: 240_000, required: ['nodeId'], estimate: oneLlm,
+    async execute(action, ctx) {
+      const project = useProjectStore()
+      const node = project.current?.canvas?.nodes.find((item) => item.id === action.nodeId)
+      if (!node) throw new Error(`找不到画布节点 ${action.nodeId}`)
+      if (node.type !== 'imageGen' && node.type !== 'videoGen') {
+        throw new Error('optimize_node_prompt 只支持自由图片/视频节点')
+      }
+      const { optimizeNodePrompt } = await import('@/services/ai/promptCoach')
+      const result = await optimizeNodePrompt(
+        {
+          kind: node.type === 'videoGen' ? 'video' : 'image',
+          nodeLabel: `${node.data.label || node.id} · ${node.type === 'videoGen' ? '图生视频' : '生图'}`,
+          currentPrompt: node.data.prompt || '',
+          userHint: action.text,
+          script: project.current?.script?.content || '',
+          duration: node.data.duration,
+          signal: ctx.signal
+        },
+        (msg) => ctx.onLog(msg)
+      )
+      project.setCanvasNodePrompt(node.id, result.prompt)
+      await project.save()
+      revealCanvas(node.id)
+      return `${result.note}（已写入「${node.data.label || node.id}」）\n\n\`\`\`\n${result.prompt}\n\`\`\``
+    }
+  },
+  {
+    name: 'remember', phase: 6, timeoutMs: 10_000, required: ['text'], estimate: noCost,
+    async execute(action) {
+      const { rememberMemory } = await import('@/services/memory/memoryStore')
+      const scope = /项目|本剧|这部/.test(action.text || '') ? 'project' : 'global'
+      const entry = await rememberMemory(action.text!, { scope })
+      if (!entry) throw new Error('没有可记忆的内容')
+      return `已记住（${scope === 'global' ? '长期' : '本项目'}）：${entry.content}`
+    }
+  },
+  {
+    name: 'forget', phase: 6, timeoutMs: 10_000, required: ['text'], estimate: noCost,
+    async execute(action) {
+      const { forgetMemory } = await import('@/services/memory/memoryStore')
+      const removed = await forgetMemory(action.text!)
+      if (!removed) throw new Error('没有找到匹配的记忆')
+      return `已忘掉：${removed}`
+    }
   }
 ]
 

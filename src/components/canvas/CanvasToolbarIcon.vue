@@ -1,5 +1,19 @@
 <script setup lang="ts">
-defineProps<{ name: 'back' | 'assistant' | 'layout' | 'folder' | 'steps' | 'settings' | 'panel' | 'more' | 'expand' | 'sparkles'; size?: number }>()
+defineProps<{
+  name:
+    | 'back'
+    | 'assistant'
+    | 'layout'
+    | 'folder'
+    | 'steps'
+    | 'settings'
+    | 'panel'
+    | 'more'
+    | 'expand'
+    | 'sparkles'
+    | 'script'
+  size?: number
+}>()
 </script>
 
 <template>
@@ -13,6 +27,7 @@ defineProps<{ name: 'back' | 'assistant' | 'layout' | 'folder' | 'steps' | 'sett
     <template v-else-if="name === 'panel'"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></template>
     <template v-else-if="name === 'more'"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></template>
     <template v-else-if="name === 'sparkles'"><path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3Z" /><path d="m18.5 13 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" /><path d="m5.5 12 .7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2Z" /></template>
+    <template v-else-if="name === 'script'"><path d="M6.5 3.5h7L18 8v12.5a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" /><path d="M13.5 3.5V8H18M9 13h6M9 17h4" /></template>
     <template v-else><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5" /></template>
   </svg>
 </template>

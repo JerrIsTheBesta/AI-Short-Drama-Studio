@@ -33,9 +33,8 @@ defineProps<{
 }
 
 .glass-card-root.hoverable:hover {
-  transform: translateY(-1px);
-  border-color: var(--color-border-strong);
-  box-shadow: var(--shadow-md);
+  border-color: rgba(126, 180, 255, 0.34);
+  background: color-mix(in srgb, var(--color-bg-card) 92%, #7eb4ff 8%);
 }
 
 .glass-card-root.glow {

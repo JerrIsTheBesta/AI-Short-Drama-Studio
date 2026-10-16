@@ -14,8 +14,8 @@ export function isPlayApproved(p: Project | null | undefined): boolean {
   return hasDownstream
 }
 
+/** 有分镜但剧本还没验收时才需要拦；是否真的拦由调用方按「本次动作」决定 */
 export function needsPlayReview(p: Project | null | undefined): boolean {
-  if (p?.pipelineMode === 'img2video') return false
   return Boolean(p?.shots.length) && !isPlayApproved(p)
 }
 

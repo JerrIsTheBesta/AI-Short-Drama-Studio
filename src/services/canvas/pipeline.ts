@@ -248,7 +248,14 @@ export const TOOL_LABEL: Record<string, string> = {
   sync_canvas: '同步画布',
   create_image_node: '创建图片节点',
   create_video_node: '创建视频节点',
+  connect_nodes: '连接画布节点',
+  delete_node: '删除画布节点',
+  arrange_canvas: '整理画布排布',
+  check_project: '项目体检',
   update_node: '修改生成节点',
   run_node: '生成节点',
+  optimize_node_prompt: '优化节点提示词',
+  remember: '记住偏好',
+  forget: '删除记忆',
   focus_node: '定位画布节点'
 }
