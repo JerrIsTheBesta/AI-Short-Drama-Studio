@@ -250,6 +250,14 @@ export interface Script {
    * false/缺省：content 还是草稿；true：可再提炼人物/场景/分镜节点。
    */
   playReady?: boolean
+  /**
+   * 拆分镜的断点标记：按剧情工作包记录已完成的小组结果。
+   * playKey 与剧本正文对应；重跑「拆分镜」时同文本可直接跳过已完成的小组，不再从头消费 token。
+   */
+  shotBatches?: {
+    playKey: string
+    batches: Record<string, Array<Record<string, unknown>>>
+  }
   /** 创建时间 */
   createdAt: number
 }

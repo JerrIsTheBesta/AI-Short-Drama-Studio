@@ -6,7 +6,9 @@ import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/
 import { estimateRequestText } from '@/services/canvas/toolRegistry'
 import { onCanvasActivity, type CanvasActivity } from '@/services/canvas/canvasBridge'
 import { nextPipelineStep } from '@/services/canvas/pipeline'
-import { useProjectStore, useSettingsStore } from '@/stores'
+import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
+import { desktop, isDesktop } from '@/services/desktop'
+import type { AgentAttachment } from '@/services/canvas/attachments'
 import type { TraceRow, TraceStatus } from '@/services/canvas/agentTrace'
 import type { AgentAutonomy, AspectRatio, CanvasNode } from '@/types'
 import AgentMemoryPanel from './AgentMemoryPanel.vue'
@@ -57,6 +59,44 @@ const project = useProjectStore()
 let offActivity: (() => void) | undefined
 const hoverMode = ref<AgentAutonomy | null>(null)
 const settings = useSettingsStore()
+const toast = useToastStore()
+/** 本轮要带上的本地文件附件（文本内容已在选择时读入） */
+const attachments = ref<AgentAttachment[]>([])
+const TEXT_ATTACH_FILTERS = [
+  { name: '文本文件', extensions: ['txt', 'md', 'markdown', 'fountain', 'srt', 'ass', 'lrc', 'json', 'csv'] }
+]
+
+async function pickAttachments() {
+  if (!isDesktop()) {
+    toast.warn('读取本地文件需要桌面端（已安装的应用）')
+    return
+  }
+  try {
+    const files = await desktop().pickFiles(TEXT_ATTACH_FILTERS)
+    if (!files?.length) return
+    for (const p of files) {
+      if (attachments.value.some((a) => a.path === p)) continue
+      try {
+        const raw = await desktop().readText(p)
+        const content = raw.length > 200_000
+          ? `${raw.slice(0, 200_000)}\n\n【内容过长，已截取前 200,000 个字符】`
+          : raw
+        attachments.value.push({ name: p.split(/[\\/]/).pop() || p, path: p, content })
+      } catch (e) {
+        toast.error(`读取失败：${p.split(/[\\/]/).pop() || p}`)
+        console.warn('[agent] 附件读取失败', e)
+      }
+    }
+  } catch (e) {
+    toast.error('选择文件失败')
+    console.warn('[agent] pickFiles 失败', e)
+  }
+}
+
+function removeAttachment(index: number) {
+  attachments.value.splice(index, 1)
+}
+
 let controller: AbortController | null = null
 
 /* ── 生成配置：比例 / 图像模型 / 视频模型，选好即生效，智能体照此执行 ── */
@@ -405,11 +445,15 @@ async function sendText(text: string) {
   const t = text.trim()
   if (!t || busy.value) return
   input.value = ''
-  feed.value.push({ id: `u-${Date.now()}`, type: 'msg', role: 'user', content: t })
+  const attachedNames = attachments.value.map((a) => a.name)
+  const display = attachedNames.length ? `${t}\n\n📎 ${attachedNames.join('、')}` : t
+  const attachOptions = attachments.value.slice()
+  feed.value.push({ id: `u-${Date.now()}`, type: 'msg', role: 'user', content: display })
   await appendAgentMessage('user', t)
+  attachments.value = []
   busy.value = true
   thinking.value = true
-  log.value = '开始…'
+  log.value = attachedNames.length ? `读取附件 ${attachedNames.join('、')}…` : '开始…'
   trace.value = [{ key: 'think', kind: 'think', label: '在想怎么做…', status: 'running' }]
   chips.value = []
   const turnController = new AbortController()
@@ -419,7 +463,8 @@ async function sendText(text: string) {
     const result = await runAgentTurn(messages.value, t, onProgress, {
       signal: turnController.signal,
       autonomy: autonomy.value,
-      selectedNodeId: selectedGenNode.value?.id
+      selectedNodeId: selectedGenNode.value?.id,
+      attachments: attachOptions
     })
     thinking.value = false
     const think = trace.value.find((s) => s.kind === 'think' && s.status === 'running')
@@ -439,6 +484,7 @@ async function sendText(text: string) {
     chips.value = result.chips
   } catch (e: any) {
     thinking.value = false
+    attachments.value = attachOptions
     const cancelled = turnController.signal.aborted || (isAbortError(e) && !isTimeoutAbort(e))
     const content = cancelled
       ? '已停止。已完成的产物会保留，未开始的步骤不会继续。'
@@ -585,6 +631,12 @@ function visibleRows(rows: TraceRow[]) {
         预计 {{ estimate.calls }} 次调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
       </p>
       <div class="box" :class="{ busy }">
+        <div v-if="attachments.length" class="attach-chips">
+          <span v-for="(a, i) in attachments" :key="a.path || a.name" class="attach-chip">
+            📎 {{ a.name }}
+            <button type="button" :disabled="busy" title="移除附件" @click="removeAttachment(i)">×</button>
+          </span>
+        </div>
         <textarea
           v-model="input"
           rows="5"
@@ -593,6 +645,20 @@ function visibleRows(rows: TraceRow[]) {
           @keydown.enter.exact.prevent="send"
         />
         <div class="bar">
+          <div class="bar-pop">
+            <button
+              type="button"
+              class="bar-btn attach-btn"
+              :disabled="busy"
+              title="附加本地文件（txt / md / 剧本等文本），或直接在消息里写文件路径"
+              @click.stop="pickAttachments"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M21 12.5l-8.2 8.2a5.6 5.6 0 0 1-7.9-7.9L13 4.7a3.8 3.8 0 0 1 5.4 5.4l-8.1 8.1a1.9 1.9 0 0 1-2.7-2.7l7.5-7.5" />
+              </svg>
+              <span>附件</span>
+            </button>
+          </div>
           <div class="bar-pop">
             <button
               type="button"
@@ -1148,6 +1214,44 @@ textarea {
 .bar-pop {
   position: relative;
   flex-shrink: 0;
+}
+.attach-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 6px 6px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(126, 180, 255, 0.12);
+  color: #9db9ff;
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.attach-chip button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 1px;
 }
 .bar-btn {
   height: 28px;

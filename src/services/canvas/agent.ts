@@ -7,6 +7,7 @@ import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
 import { runAgentLoop } from './agentLoop'
+import { buildMaterialBlock, type AgentAttachment } from './attachments'
 import { getAgentState } from './taskStore'
 import {
   continueQuestion,
@@ -74,6 +75,8 @@ export interface AgentRunOptions {
   mode?: 'drama' | 'freeform'
   /** 当前在画布上选中的自由生成节点 */
   selectedNodeId?: string
+  /** 用户在对话框附加的本地文件（文本内容已读入） */
+  attachments?: AgentAttachment[]
 }
 
 const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活一边告诉用户画布上发生了什么。
@@ -254,6 +257,11 @@ export async function runAgentTurn(
   }
 
   // ── 意图识别：先判断这句话想干什么，再决定走哪条路 ──
+  // 附件 / 消息里的本地文件路径 → 读成材料块，拼在本轮任务前面。
+  const material = await buildMaterialBlock(userText, options.attachments, (label) =>
+    onEvent({ kind: 'log', label })
+  )
+  if (material) userText = `${material}\n\n${userText}`
   const hasPipeline = hasPipelineData(p0)
   const intent = detectIntent(userText, {
     hasPipeline,

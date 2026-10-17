@@ -166,6 +166,14 @@ function resolveLlmModel(override?: string): string | undefined {
   return useSettingsStore().config.llm.model?.trim() || undefined
 }
 
+/** 剧本正文指纹：断点标记只在同一段剧本上复用，文本一变就作废。 */
+function scriptPlayKey(content: string): string {
+  const text = String(content || '')
+  let hash = 5381
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0
+  return `${text.length}-${(hash >>> 0).toString(36)}`
+}
+
 function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof useProjectStore>['current']>) {
   const subjects = p.subjects ?? []
   const scenes = p.scenes ?? []
@@ -1463,12 +1471,29 @@ export async function runExtractStoryboard(
   }
   const look = lookFromScript(project.current.script)
   const keepApproved = Boolean(stage && isPlayApproved(project.current))
+  // 断点续跑：同一份剧本重跑拆分镜时，复用上次已完成的小组结果，不重复消费 token。
+  const playKey = scriptPlayKey(project.current.script.content || '')
+  const savedBatches = project.current.script.shotBatches
+  const resumeBatches: Array<Record<string, unknown>[] | undefined> | undefined =
+    savedBatches?.playKey === playKey
+      ? Array.from({ length: 64 }, (_, i) => {
+          const rows = savedBatches.batches[String(i)]
+          return Array.isArray(rows)
+            ? (rows.filter((row) => row && typeof row === 'object') as unknown as Record<string, unknown>[])
+            : undefined
+        })
+      : undefined
+  const resumeCount = resumeBatches
+    ? Object.values(resumeBatches).filter((rows) => Array.isArray(rows) && rows.length).length
+    : 0
   onProgress?.(
     extractStartAt === 'subjects'
       ? `${stage ? '重新提取人物' : '先拆人物'}；已有场景和分镜会保留…`
       : extractStartAt === 'scenes'
         ? `${stage ? '重新提取场景描点' : '人物已保存；继续拆场景'}；已有人物和分镜会保留…`
-        : `${stage ? '重新提取分镜' : '人物和场景已保存；继续拆分镜'}；已生成的看板/配图/视频按镜号保留…`
+        : resumeCount
+          ? `${stage ? '重新提取分镜' : '继续拆分镜'}；发现 ${resumeCount} 个已完成的工作包，将直接续用…`
+          : `${stage ? '重新提取分镜' : '人物和场景已保存；继续拆分镜'}；已生成的看板/配图/视频按镜号保留…`
   )
   let finalStagePersisted = false
   const persistStage = async (
@@ -1524,6 +1549,19 @@ export async function runExtractStoryboard(
       existingSubjects,
       existingScenes,
       workflowMode: project.current.script.workflowMode,
+      resumeBatchShots: resumeBatches,
+      onBatchDone: (index, rows) => {
+        if (!project.current?.script) return
+        const script = { ...project.current.script }
+        script.shotBatches = {
+          playKey,
+          batches: {
+            ...(script.shotBatches?.playKey === playKey ? script.shotBatches.batches : {}),
+            [index]: rows
+          }
+        }
+        project.setScript(script)
+      },
       onExtractStage: persistStage
     },
     onProgress,
@@ -1541,6 +1579,8 @@ export async function runExtractStoryboard(
     project.setScript({
       ...project.current.script,
       playReady: true,
+      // 全部小组都已落库，断点标记完成使命，清掉避免旧标记污染下次改稿。
+      shotBatches: undefined,
       ...(look.matched ? { style: look.matched } : {}),
       ...(run.result.aesthetic ? { aesthetic: run.result.aesthetic } : {}),
       ...(run.result.h3Aesthetic ? { h3Aesthetic: run.result.h3Aesthetic } : {}),

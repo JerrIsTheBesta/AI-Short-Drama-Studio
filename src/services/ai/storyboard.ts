@@ -77,6 +77,13 @@ export interface StoryboardInput {
   existingScenes?: Scene[]
   /** 原创电影章节：按场次/蒙太奇拆，不压成短视频口播表。 */
   workflowMode?: Script['workflowMode']
+  /**
+   * 断点续跑：按工作包序号给已完成的分镜结果，执行时直接跳过这些小组，不再调模型。
+   * 数组须与 buildShotWorkBatches 对同一份剧本的切分一致（剧本文本没变时天然一致）。
+   */
+  resumeBatchShots?: Array<Record<string, unknown>[] | undefined>
+  /** 每个小组真实完成（含跳过）时回调，供调用方写断点标记。 */
+  onBatchDone?: (index: number, shots: Record<string, unknown>[], model?: string) => void
 }
 
 function isFilmChapterInput(input: Pick<StoryboardInput, 'workflowMode' | 'content'>): boolean {
@@ -1328,6 +1335,7 @@ ${extractPlayForSceneStage(play)}`
       batchShots[index] = result.shots
       batchModels[index] = result.model
       completed++
+      input.onBatchDone?.(index, result.shots, result.model)
       while (batchShots[persistedPrefix]) persistedPrefix++
       if (persistedPrefix > 0 && index < persistedPrefix) {
         const partial = normalizedFromFinishedBatches(true)
@@ -1350,6 +1358,13 @@ ${extractPlayForSceneStage(play)}`
       workBatches,
       SHOT_BATCH_CONCURRENCY,
       async (batch, index) => {
+        // 断点续跑：这个工作包上次已经完成，直接复用结果，不重复消耗 token。
+        const resumed = input.resumeBatchShots?.[index]
+        if (resumed?.length) {
+          onProgress?.(`↩ ${batch.label} 已有断点结果，直接续用（${resumed.length} 镜）`)
+          await landFinishedBatch(index, { shots: resumed })
+          return
+        }
         try {
           const result = await generateShotWorkBatch(
             input,
