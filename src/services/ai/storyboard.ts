@@ -35,6 +35,7 @@ import {
   extractLocationsFromPlay,
   extractPlayForSceneStage,
   extractSubjectsFromPlay,
+  isFieldLabelName,
   looksLikeFilmChapterPlay
 } from '@/utils/scriptMarkdown'
 
@@ -1974,7 +1975,12 @@ export function normalizeStoryboard(
         : []
   const rawScenes = extractSceneRows(raw)
 
-  const subjects: Subject[] = rawSubjects.slice(0, 8).map((s: any, i: number) => ({
+  /** 模型偶尔会把「一句话故事 / 对抗引擎 / 身材」这类标签当成人物，这里统一剔掉 */
+  const subjectRows = rawSubjects.filter((s: any) => {
+    const n = String(s?.name || '').trim()
+    return n && !isFieldLabelName(n)
+  })
+  const subjects: Subject[] = subjectRows.slice(0, 8).map((s: any, i: number) => ({
     id: `sub_${i + 1}`,
     name: String(s?.name || `角色${i + 1}`).trim() || `角色${i + 1}`,
     kind: asKind(s?.kind),
@@ -2014,7 +2020,7 @@ export function normalizeStoryboard(
   }
 
   const subMap = new Map<string, string>()
-  rawSubjects.forEach((s: any, i: number) => {
+  subjectRows.forEach((s: any, i: number) => {
     const id = subjects[i]?.id
     if (!id) return
     if (s?.id) subMap.set(String(s.id), id)

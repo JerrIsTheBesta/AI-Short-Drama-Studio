@@ -1356,7 +1356,9 @@ Timeline writing standard:
 - Every range must advance the event. No idle posing, no generic “clothes and air move,” and no slideshow-like sequence of reference images.
 
 Rules:
-- Preserve the user's event. Expand what is already implied by the script, but do not invent a different incident.
+- Subject universe lock: the source material and the reference pictures contain the ONLY subjects that may appear. Never add any character, animal, object, or plot event that is not present in them. Never resolve idioms, fables, or cultural associations literally (for example, a rabbit must NEVER gain a tortoise, a race, or any storybook framing unless the source says so). When the source is sparse, animate exactly the referenced subject(s) doing exactly what was asked, inside the referenced setting and style — do not invent narrative context to fill the runtime.
+- Preserve the user's event. Expand only what is already explicitly implied by the script, and never invent a different incident or new characters.
+- STYLE LOCK: when reference pictures are supplied, their art style is authoritative. Match the reference pictures' rendering (medium, palette, texture, character design) exactly. Ignore the Style line above if it conflicts; never switch the referenced subject to a different medium such as live-action, CG, or a generic "cinematic" look.
 - Write direct, decisive filmmaking prose like a director describing the finished moving image. The format is a container, not a prose template.
 - English for action, camera, light, performance. Chinese is allowed ONLY (1) inside <d> for spoken words, and (2) 图N plus 「source names」 in the picture roster.
 - In action prose, use stable romanized names plus (S1), (S2), etc. Keep the same S-number throughout. Do not anonymize a known character as “the man.”
@@ -1371,7 +1373,7 @@ Before returning JSON, silently reject and rewrite your draft if it contains gen
         },
         {
           role: 'user',
-          content: `Style: ${resolved.aesthetic || 'Cinematic'}
+          content: `Style: ${resolved.aesthetic || 'Cinematic'} (when reference pictures are supplied, their art style overrides this line)
 Duration: ${durationText(resolved)}s
 Aspect: ${resolved.aspectRatio || '16:9'} (${String(resolved.aspectRatio || '16:9') === '9:16' ? 'vertical portrait, taller than wide' : String(resolved.aspectRatio || '16:9') === '1:1' ? 'square' : 'horizontal landscape, wider than tall'})
 Camera preference (override it when the event needs a motivated reframe or cut): ${camera}
@@ -1420,7 +1422,7 @@ ${source || '(perform the beat in this location)'}`
             role: 'system',
             content: `Rewrite a rejected shot-video prompt as JSON only: {"integrated_multimodal_description":"...","overall_soundscape":"..."}.
 The rejected draft was lifeless because it used a reusable timing template, repeated static-camera instructions, or failed to preserve the actual event.
-Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue.
+Write the moving image itself. Preserve the exact reference-picture roster and trusted dialogue. Subject universe lock: only subjects present in the source material and reference pictures may appear — never add new characters, animals, or plot events, and never turn idioms or fables into literal content. The visual style must match the reference pictures exactly. Build a concrete cause-and-effect action chain with named props, motivated camera changes, observable performance, environmental reaction, and a visible final state. Choose one to three shots according to the event; never create generic opening/middle/hold slots. Never treat a statue, portrait, reflection, hidden presence, or off-screen identity as a living body. English action prose; Chinese only in the roster and trusted <d> dialogue.
 
 Dialogue is strict but concise turn-taking. Give every line a non-overlapping time range; immediately before every <d>, identify exactly one speaker by stable (S#) plus says/asks/replies/shouts/exclaims. In each range only that named speaker talks while the listener reacts physically. Bare <d> tags are forbidden. Do not bloat the prompt with repeated lip-lock warnings, and do not split the clip merely because the delivery is fast.
 

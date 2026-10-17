@@ -59,16 +59,47 @@ export const ZEALMAN_WORKFLOWS = [
 
 export type ZealmanWorkflow = (typeof ZEALMAN_WORKFLOWS)[number]
 
+export interface ZealmanImageWorkflow {
+  id: string
+  name: string
+  seedKey: string
+  promptKey: string
+  negativeKey: string
+  widthKey: string
+  heightKey: string
+  defaultWidth: number
+  defaultHeight: number
+  defaultNegative: string
+}
+
+/** Zealman 内置文生图工作流。model 字段存工作流 id。 */
+export const ZEALMAN_IMAGE_WORKFLOWS: ZealmanImageWorkflow[] = [
+  {
+    id: 'A01-文生图-Qwen2512高清放大',
+    name: 'A01-文生图-Qwen2512高清放大',
+    seedKey: '3:seed',
+    promptKey: '187:text',
+    negativeKey: '437:text',
+    widthKey: '515:value',
+    heightKey: '516:value',
+    defaultWidth: 1280,
+    defaultHeight: 720,
+    defaultNegative:
+      '低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲'
+  }
+]
+
+export function zealmanImageWorkflowById(id: string): ZealmanImageWorkflow | undefined {
+  return ZEALMAN_IMAGE_WORKFLOWS.find((item) => item.id === id)
+}
+
 export function normalizeZealmanBaseUrl(value: string): string {
   const raw = value.trim().replace(/\/+$/, '')
   if (!raw) return ''
   try {
     const url = new URL(raw)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
-    // 当前这个 Zealman 实例的 API 网关域名以 uu459546 开头；其余用户域名保持原样。
-    if (url.hostname === 'u459546-78656cd2bf79.westd.seetacloud.com') {
-      url.hostname = 'uu459546-78656cd2bf79.westd.seetacloud.com'
-    }
+    // 完全以用户配置的地址为准，不做任何域名改写。
     url.pathname = url.pathname.replace(/\/api(?:\/workflow(?:\/generate)?)?\/?$/i, '') || '/'
     return url.toString().replace(/\/+$/, '')
   } catch {

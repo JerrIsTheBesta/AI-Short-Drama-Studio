@@ -18,8 +18,14 @@ import {
   resolveImageAdapter
 } from './adapters'
 import { apimartGenerateImage, isRelayImageEndpoint } from './apimart'
+import { autodlRequest } from './video'
+import {
+  normalizeZealmanBaseUrl,
+  zealmanImageWorkflowById,
+  ZEALMAN_IMAGE_WORKFLOWS
+} from './zealman'
 import type { VisualStyle, AspectRatio } from '@/types'
-import { abortableDelay } from './abort'
+import { abortableDelay, throwIfAborted } from './abort'
 
 export interface ImageGenInput {
   prompt: string
@@ -420,6 +426,95 @@ async function realLegacyEdit(input: ImageGenInput): Promise<ImageGenOutput> {
   return { blob, mimeType, prompt: input.prompt }
 }
 
+/** Zealman 镜像文生图：POST {base}/api/workflow/generate，轮询 /api/workflow/result。地址完全以用户配置为准。 */
+async function realZealmanImage(
+  input: ImageGenInput,
+  onProgress?: (msg: string) => void
+): Promise<ImageGenOutput> {
+  const cfg = imageConfig(input.model)
+  const root = normalizeZealmanBaseUrl(String(cfg.baseUrl || '').trim())
+  if (!root) throw new Error('[image] Zealman 生图需要先填写镜像 Base URL（设置 → Zealman 镜像）')
+  const workflow = zealmanImageWorkflowById(cfg.model) || ZEALMAN_IMAGE_WORKFLOWS[0]
+  const prompt = buildPrompt(input, Boolean(input.referenceImages?.length)).slice(0, 10000)
+  const width = Math.max(256, Math.round(input.width) || workflow.defaultWidth)
+  const height = Math.max(256, Math.round(input.height) || workflow.defaultHeight)
+  const inputValues: Record<string, string | number> = {
+    [workflow.promptKey]: prompt,
+    [workflow.negativeKey]: workflow.defaultNegative,
+    [workflow.seedKey]: Math.floor(Math.random() * 2_147_483_647),
+    [workflow.widthKey]: width,
+    [workflow.heightKey]: height
+  }
+  onProgress?.(`提交 Zealman 生图任务（${workflow.name}）…`)
+  const submitUrl = `${root}/api/workflow/generate`
+  const submitBody = JSON.stringify({ workflow_id: workflow.id, input_values: inputValues })
+  const postSubmit = (url: string) =>
+    autodlRequest(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: submitBody,
+        signal: input.signal
+      },
+      180_000
+    )
+  let response = await postSubmit(submitUrl)
+  let text = await response.text()
+  // 部分 Zealman/Nginx 部署对结尾斜杠采用严格路由；405 时换一种形式重试一次。
+  if (response.status === 405) {
+    response = await postSubmit(`${submitUrl}/`)
+    text = await response.text()
+  }
+  if (!response.ok) {
+    throw new Error(`[image] Zealman 提交失败 HTTP ${response.status}\n${text.slice(0, 800)}`)
+  }
+  let data: any
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error('[image] Zealman 提交成功但响应不是 JSON')
+  }
+  if (data?.success === false) throw new Error(`[image] Zealman 提交失败：${data?.error || text.slice(0, 800)}`)
+  const promptId = String(data?.prompt_id || '').trim()
+  if (!promptId) throw new Error('[image] Zealman 响应中没有 prompt_id')
+
+  const deadline = Date.now() + 15 * 60 * 1000
+  while (Date.now() < deadline) {
+    throwIfAborted(input.signal)
+    onProgress?.('Zealman 正在生图…')
+    const poll = await autodlRequest(
+      `${root}/api/workflow/result?prompt_id=${encodeURIComponent(promptId)}`,
+      { method: 'GET', signal: input.signal },
+      60_000
+    )
+    const pollText = await poll.text()
+    let pollData: any
+    try {
+      pollData = JSON.parse(pollText)
+    } catch {
+      pollData = null
+    }
+    if (!poll.ok || pollData?.success === false) {
+      throw new Error(`[image] Zealman 查询失败：${pollData?.error || pollText.slice(0, 800)}`)
+    }
+    if (pollData?.pending === false) {
+      const result = Array.isArray(pollData.results)
+        ? pollData.results.find((item: any) => item?.type === 'image' && item?.url)
+        : null
+      if (!result?.url) throw new Error('[image] Zealman 任务已结束，但没有返回图片')
+      const imageUrl = new URL(String(result.url), `${root}/`).toString()
+      onProgress?.('下载 Zealman 生成的图片…')
+      const dl = await fetch(imageUrl, { signal: input.signal })
+      if (!dl.ok) throw new Error(`[image] Zealman 图片下载失败 HTTP ${dl.status}`)
+      const blob = await dl.blob()
+      return { blob, mimeType: blob.type || 'image/png', prompt }
+    }
+    await abortableDelay(1500, input.signal)
+  }
+  throw new Error('[image] Zealman 生图超过 15 分钟，已停止轮询')
+}
+
 export async function generateImage(
   input: ImageGenInput,
   onProgress?: (msg: string) => void
@@ -430,6 +525,10 @@ export async function generateImage(
   if (getAIMode() === 'real') {
     const cfg = imageConfig(input.model)
     const adapterType = resolveImageAdapter(cfg)
+    if (adapterType === 'zealman-workflow') {
+      onProgress?.('Zealman 出图...')
+      return await realZealmanImage(input, onProgress)
+    }
     if (
       adapterType !== 'comfyui-prompt' &&
       adapterType !== 'comfyui-workflow' &&

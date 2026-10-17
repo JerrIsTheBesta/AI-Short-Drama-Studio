@@ -322,7 +322,7 @@ type AutodlHttpResult = {
 }
 
 /** 桌面端走主进程 net.fetch，绕开渲染进程 CORS；浏览器仍用 fetch */
-async function autodlRequest(
+export async function autodlRequest(
   url: string,
   init: {
     method?: string

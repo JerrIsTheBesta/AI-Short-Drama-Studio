@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useSettingsStore, useToastStore } from '@/stores'
-import { ZEALMAN_WORKFLOWS, normalizeZealmanBaseUrl } from '@/services/ai/zealman'
+import { ZEALMAN_IMAGE_WORKFLOWS, ZEALMAN_WORKFLOWS, normalizeZealmanBaseUrl } from '@/services/ai/zealman'
 
 const settings = useSettingsStore()
 const toast = useToastStore()
@@ -15,6 +15,7 @@ function apply() {
     return
   }
   const previous = settings.config.activeVideoId
+  const previousImageId = settings.config.activeImageId
   settings.setZealmanBaseUrl(normalized)
   for (const workflow of ZEALMAN_WORKFLOWS) {
     const profile = settings.config.videos.find(
@@ -36,8 +37,29 @@ function apply() {
     } else settings.addVideo(values)
   }
   if (settings.config.videos.some((item) => item.id === previous)) settings.selectVideo(previous)
+  for (const workflow of ZEALMAN_IMAGE_WORKFLOWS) {
+    const profile = settings.config.images.find(
+      (item) => item.provider === 'zealman' && item.adapter?.type === 'zealman-workflow' && item.model === workflow.id
+    )
+    const values = {
+      name: `Zealman 生图 · ${workflow.name}`,
+      baseUrl: normalized,
+      apiKey: '',
+      model: workflow.id,
+      models: [workflow.id],
+      provider: 'zealman',
+      adapter: { type: 'zealman-workflow' as const }
+    }
+    if (profile) {
+      settings.selectImage(profile.id)
+      settings.patchImage(values)
+    } else {
+      settings.addImage(values)
+    }
+  }
+  if (settings.config.images.some((item) => item.id === previousImageId)) settings.selectImage(previousImageId)
   baseUrl.value = normalized
-  toast.success('Zealman 镜像已配置，内置工作流已加入视频模型列表')
+  toast.success('Zealman 镜像已配置，内置视频工作流和文生图已加入模型列表')
 }
 </script>
 
@@ -54,6 +76,16 @@ function apply() {
         <button type="button" @click="apply">应用配置</button>
       </div>
       <p class="hint">程序会调用 /api/workflow/generate 和 /api/workflow/result，并在任务完成后立即保存视频。</p>
+    </section>
+    <section class="panel">
+      <h2>内置 Zealman 生图</h2>
+      <div class="workflow-list">
+        <article v-for="workflow in ZEALMAN_IMAGE_WORKFLOWS" :key="workflow.id">
+          <strong>{{ workflow.name }}</strong>
+          <span>文生图</span>
+          <small>默认 {{ workflow.defaultWidth }}×{{ workflow.defaultHeight }} · 提交后轮询 /api/workflow/result 取图</small>
+        </article>
+      </div>
     </section>
     <section class="panel">
       <h2>内置 Zealman 工作流</h2>

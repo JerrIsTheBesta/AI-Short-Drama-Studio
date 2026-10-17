@@ -138,7 +138,7 @@ function splitH3(body: string): { name: string; body: string }[] {
   const out: { name: string; body: string[] }[] = []
   let cur: { name: string; body: string[] } | null = null
   for (const line of lines) {
-    const m = line.match(/^###\s+(.+)\s*$/)
+    const m = line.match(/^#{3,4}\s+(.+)\s*$/)
     if (m) {
       if (cur) out.push(cur)
       cur = { name: m[1].trim(), body: [] }
@@ -547,6 +547,27 @@ export function extractLocationsFromPlay(markdown: string): PlayLocationDraft[] 
 
 const SKIP_SUBJECT = /旁白|画外|镜头|蒙太奇|改编|类型|本章|视觉|声音/
 
+/**
+ * 剧本里的结构标签和人物属性名，不是人名。
+ * 故事背景（一句话故事 / 对抗引擎 / 完整梗概）、人物小传的属性（身材 / 身份 / 弧光…）
+ * 一旦被当成角色，就会在「人物角色」里冒出这些莫名其妙的卡片。
+ */
+const FIELD_LABEL_WORDS = [
+  '故事', '背景', '梗概', '对抗', '引擎', '主题', '类型', '基调', '核心', '冲突', '悬念', '钩子', '节拍',
+  '身份', '年龄', '外形', '脸型', '发型', '体型', '身材', '身高', '服装', '服饰', '配饰', '识别点',
+  '性格', '语感', '口音', '欲望', '恐惧', '弱点', '关系', '弧光', '锚点', '状态', '出场', '本片',
+  '建筑', '入口', '出口', '地面', '天气', '光线', '光源', '年代', '肌理', '道具', '环境', '场景', '地点',
+  '原则', '任务', '目标', '阻力', '结果', '场次', '分镜', '对白', '口播', '画面', '声音', '时长',
+  '建议', '时间', '人物', '在场', '备注', '说明', '小结', '总结'
+]
+
+/** 是不是结构/属性标签，而不是角色名 */
+export function isFieldLabelName(name: string): boolean {
+  const n = name.replace(/\s+/g, '')
+  if (!n) return true
+  return FIELD_LABEL_WORDS.some((w) => n.includes(w))
+}
+
 /** 不靠模型：从「## 人物」和对白名抽出角色。 */
 export function extractSubjectsFromPlay(markdown: string): Array<{
   name: string
@@ -570,6 +591,7 @@ export function extractSubjectsFromPlay(markdown: string): Array<{
   const add = (raw: string, description = '', role = '') => {
     const name = raw.replace(/（[^）]+）|\([^)]+\)/g, '').replace(/旁白$/, '').trim()
     if (!name || name.length > 16 || SKIP_SUBJECT.test(name)) return
+    if (isFieldLabelName(name)) return
     const key = name.replace(/\s+/g, '').toLowerCase()
     const ident = description.match(/身份[：:]\s*([^\n]+)/)
     const state = description.match(/跨场状态[变化]*[：:]\s*([^\n]+)/)
@@ -598,9 +620,22 @@ export function extractSubjectsFromPlay(markdown: string): Array<{
   const people = sections.find((s) => s.title === '人物' || s.title.startsWith('人物'))
   if (people) {
     for (const block of splitH3(people.body)) add(block.name, block.body)
+    // 有些剧本不用 ### 小节，而是把人名单独一行加粗：这种行也认
+    for (const line of people.body.split('\n')) {
+      const m = line.match(/^\s*[-*]?\s*\*\*([^*：:\n]{1,16})\*\*\s*$/)
+      if (m) add(m[1])
+    }
   }
-  for (const m of markdown.matchAll(/\*\*([^*：:\n]{1,16})：\*\*/g)) add(m[1])
-  for (const m of markdown.matchAll(/\*\*([^*：:\n]{1,16})\*\*[：:]/g)) add(m[1])
+  /**
+   * 对白名兜底：只认「**人物名：**」后面确实跟着台词的写法
+   * （剧本规范里对白是 `**人物名：**` + 换行 + `「原词」`）。
+   * 这样「**身材：**修长」「**一句话故事：**…」这类标签行不会被误当成人名。
+   */
+  for (const m of markdown.matchAll(
+    /\*\*([^*：:\n]{1,16})[：:]\*\*[ \t]*\n*[ \t]*[「“"『']/g
+  )) {
+    add(m[1])
+  }
   return out
 }
 

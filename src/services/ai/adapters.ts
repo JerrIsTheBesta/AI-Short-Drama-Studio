@@ -109,6 +109,8 @@ export function resolveImageAdapter(ep: EndpointLike): AdapterType {
   if (t === 'http-custom' || t === 'comfyui-prompt' || t === 'openai-images' || t === 'comfyui-workflow') {
     return t
   }
+  // Zealman 生图：接入声明是 zealman-workflow 才走镜像文生图工作流。
+  if (t === 'zealman-workflow' && ep.provider === 'zealman') return 'zealman-workflow'
   if (t === 'openai-compatible') return 'openai-images'
   if (isAutodlHost(ep.baseUrl || '')) return 'comfyui-workflow'
   return 'openai-images'
