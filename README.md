@@ -7,7 +7,7 @@
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-Windows-47848f.svg)](https://www.electronjs.org/)
 
-![剧流 Studio：一键生成 AI 短剧、视频复刻、智能口播和视频剪辑](docs/images/docsimagesopen-source-poster.png.png)
+![剧流 Studio：一键生成 AI 短剧、云算力、ComfyUI、中转站接入、视频复刻、AI 带货口播和视频剪辑](docs/images/github-hero-2026.png)
 
 剧流 Studio 把剧本、角色、场景、分镜、图片、视频、配音、音乐和最终合成放进一张可视化画布。你可以让智能体推进完整创作，也可以随时修改节点、连接素材、替换模型或只重做其中一步。
 
