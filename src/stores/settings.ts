@@ -100,6 +100,8 @@ export interface AppSettings {
   activeVideoId: string
   /** Zealman 镜像独立地址，不与 AutoDL/其它视频 profile 共用。 */
   zealmanBaseUrl: string
+  /** AutoDL 令牌。H3 系列内置工作流共用这一个 Key，用户只填这一处。 */
+  autodlToken: string
   music: ServiceEndpoint
   musics: NamedEndpoint[]
   activeMusicId: string
@@ -410,6 +412,7 @@ function buildDefaults(): AppSettings {
     videos: [videoFirst],
     activeVideoId: videoFirst.id,
     zealmanBaseUrl: '',
+    autodlToken: '',
     music: asEndpoint(musicFirst),
     musics: [musicFirst],
     activeMusicId: musicFirst.id
@@ -487,6 +490,11 @@ function parseSettings(raw: string | null): AppSettings {
       video.list.find((profile) => profile.provider === 'zealman' && !/autodl\.art/i.test(profile.baseUrl || ''))?.baseUrl ||
       ''
     ).trim().replace(/\/+$/, '')
+    const autodlToken = String(
+      parsed.autodlToken ||
+      video.list.find((profile) => isAutodlVideoProfile(profile))?.apiKey ||
+      ''
+    ).trim()
     const music = hydrateNamed(
       parsed.musics,
       {
@@ -520,6 +528,7 @@ function parseSettings(raw: string | null): AppSettings {
       videos: video.list,
       activeVideoId: video.activeId,
       zealmanBaseUrl,
+      autodlToken,
       music: music.active,
       musics: music.list,
       activeMusicId: music.activeId
@@ -984,6 +993,11 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, zealmanBaseUrl: baseUrl.trim().replace(/\/+$/, '') }
   }
 
+  function setAutodlToken(token: string) {
+    touch()
+    config.value = { ...config.value, autodlToken: token.trim() }
+  }
+
   function addVideo(seed: {
     name: string
     baseUrl: string
@@ -1175,6 +1189,7 @@ export const useSettingsStore = defineStore('settings', () => {
     renameTts,
     patchVideo,
     setZealmanBaseUrl,
+    setAutodlToken,
     addVideo,
     selectVideo,
     removeVideo,

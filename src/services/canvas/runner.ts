@@ -76,7 +76,7 @@ import { isNodeRunning, mapPool, withNodeJob, VIDEO_GEN_CONCURRENCY } from './jo
 import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
-import { toDigitalHumanWav } from '@/services/ffmpeg'
+import { toDigitalHumanWav, extractVideoLastFrame } from '@/services/ffmpeg'
 import type { AspectRatio, CanvasNode, ID, Project, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
 import {
   isH3VideoFamily,
@@ -817,14 +817,50 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     return regenerateDigitalHumanShot(shot, onProgress, signal)
   }
   const videoModel = canvasVideoModelForShot(shot)
-  if (shotUsesFl2va(shot, videoModel)) {
-    const firstId = shot.firstFrameAssetId || shot.imageAssetId
-    const lastId = shot.lastFrameAssetId
-    if (!firstId) throw new Error('首尾帧模式需要首帧。请选择首帧，或先给本镜配图。')
-    if (!lastId) throw new Error('首尾帧模式需要尾帧。请选择尾帧。')
+  const chainFl2va =
+    videoModel !== 'wan-prime' &&
+    (project.current.settings.h3ShotChainMode || 'auto') === 'fl2va'
+  const perShotFl2va = shotUsesFl2va(shot, videoModel)
+  if (perShotFl2va || chainFl2va) {
+    const ordered = [...project.current.shots].sort((a, b) => a.index - b.index)
+    const prevShot = ordered.find((item) => item.index === shot.index - 1)
+    const nextShot = ordered.find((item) => item.index === shot.index + 1)
+    // 首帧优先级：手动选的首帧 > 上一镜视频末帧（链模式，保证镜头连续） > 本镜配图
+    let firstBlob: Blob | undefined
+    if (shot.firstFrameAssetId) {
+      firstBlob = await loadRefImageBlob(shot.firstFrameAssetId, '首帧')
+    } else if (chainFl2va && shot.index > 0) {
+      const prevVideoId = prevShot?.videoAssetId
+      const prevVideoBlob = prevVideoId ? await assets.getBlob(prevVideoId) : undefined
+      if (prevVideoBlob) {
+        onProgress?.('截取上一镜视频末帧作为本镜首帧…')
+        firstBlob = await extractVideoLastFrame(prevVideoBlob)
+      } else {
+        onProgress?.('上一镜还没有视频，先落回本镜配图作为首帧。')
+      }
+    }
+    if (!firstBlob && shot.imageAssetId) {
+      firstBlob = await loadRefImageBlob(shot.imageAssetId, '首帧')
+    }
+    if (!firstBlob) {
+      throw new Error(
+        '首尾帧模式需要首帧：上一镜还没有视频，本镜也没有配图。请先生成上一镜视频，或给本镜配图。'
+      )
+    }
+    // 尾帧优先级：手动选的尾帧 > 下一镜配图（链模式，给下一镜留衔接落点）
+    let lastBlob: Blob | undefined
+    if (shot.lastFrameAssetId) {
+      lastBlob = await loadRefImageBlob(shot.lastFrameAssetId, '尾帧')
+    } else if (chainFl2va && nextShot?.imageAssetId) {
+      lastBlob = await loadRefImageBlob(nextShot.imageAssetId, '尾帧')
+    }
+    if (!lastBlob) {
+      // 手动首尾帧模式必须给尾帧；链模式缺尾帧时退回自动出片，不让流程卡死。
+      if (perShotFl2va) throw new Error('首尾帧模式需要尾帧。请选择尾帧。')
+      onProgress?.('没有可用尾帧（下一镜还没配图）；本镜退回自动模式出片。')
+    }
+    if (lastBlob) {
     onProgress?.('读取首帧和尾帧…')
-    const firstBlob = await loadRefImageBlob(firstId, '首帧')
-    const lastBlob = await loadRefImageBlob(lastId, '尾帧')
     const promptStyle = getVideoPromptStyle()
     const cast = subjectsForShot(shot, project.current)
     const scene = sceneForShot(shot, project.current)
@@ -885,6 +921,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     project.updateShot(shot.id, { videoTaskId: undefined })
     await project.save()
     return asset
+    }
   }
   shot = await ensureShotVideoRefs(shot, onProgress, signal)
 

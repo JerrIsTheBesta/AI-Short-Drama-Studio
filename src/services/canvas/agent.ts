@@ -14,7 +14,6 @@ import {
   clarifyMessage,
   isContinueRequest,
   isVagueRequest,
-  isGreetingOrChitchat,
   greetingReply,
   nextPipelineStep,
   extractStageFromText,
@@ -28,7 +27,7 @@ import {
   isFullPipelineRequest,
   needsPlayReview
 } from './playGate'
-import { detectIntent, type AgentIntent } from './intent'
+import { detectIntentSmart, type AgentIntent } from './intent'
 import { buildPlanFromActions } from './planner'
 import {
   forgetMemory,
@@ -232,7 +231,29 @@ export async function runAgentTurn(
   }
 
   const p0 = project.current
-  if (isGreetingOrChitchat(userText)) {
+
+  // ── 意图识别：先判断这句话想干什么，再决定走哪条路 ──
+  // 附件 / 消息里的本地文件路径 → 读成材料块。材料只拼给模型看，不参与意图分类。
+  const baseText = userText
+  const material = await buildMaterialBlock(userText, options.attachments, (label) =>
+    onEvent({ kind: 'log', label })
+  )
+  if (material) userText = `${material}\n\n${userText}`
+  const hasPipeline = hasPipelineData(p0)
+  // 意图分类全部由 LLM 完成（正式模式）；演示模式退回 detectIntent 规则兜底
+  const intent = await detectIntentSmart(
+    baseText,
+    {
+      hasPipeline,
+      project: p0,
+      hasSelectedGenNode: Boolean(options.selectedNodeId)
+    },
+    options.signal
+  )
+  onEvent({ kind: 'intent', label: intent.label })
+
+  // 闲聊 / 打招呼 / 「先看看」「等一下」这类暂停：不进规划
+  if (intent.kind === 'chitchat') {
     const n = nextPipelineStep(p0)
     return {
       reply: greetingReply(p0),
@@ -247,38 +268,16 @@ export async function runAgentTurn(
             ]
     }
   }
-  if (/^(先看看|先看|等一下|先不|不用了)([，,。!！ ]*)$/.test(userText.trim())) {
-    const n = nextPipelineStep(p0)
-    return {
-      reply: n ? `好，你先看画布。想做「${n.label}」时回「继续」。` : '好，你先看画布。',
-      results: [],
-      chips: nextChips(n)
-    }
-  }
-
-  // ── 意图识别：先判断这句话想干什么，再决定走哪条路 ──
-  // 附件 / 消息里的本地文件路径 → 读成材料块，拼在本轮任务前面。
-  const material = await buildMaterialBlock(userText, options.attachments, (label) =>
-    onEvent({ kind: 'log', label })
-  )
-  if (material) userText = `${material}\n\n${userText}`
-  const hasPipeline = hasPipelineData(p0)
-  const intent = detectIntent(userText, {
-    hasPipeline,
-    project: p0,
-    hasSelectedGenNode: Boolean(options.selectedNodeId)
-  })
-  onEvent({ kind: 'intent', label: intent.label })
 
   // 合并模式：不再按项目模式分叉，而是按「这句话 + 画布当前状态」决定走节点路径还是流水线路径
-  const nodePath = resolveNodePath(intent, p0, userText)
+  const nodePath = resolveNodePath(intent, p0, baseText)
   // 只在「这句话明确是单个节点需求」时才收紧工具集；意图含糊时不硬拦，避免模型想做却被静默过滤掉
   const restrictToNodes =
     !hasPipeline && (intent.kind === 'create_asset' || intent.kind === 'prompt_polish')
 
-  // 显式记忆指令：直接写本地记忆，不进任务规划
+  // 显式记忆指令：直接写本地记忆，不进任务规划（按用户原话提取内容，意图已由 LLM 判定）
   if (intent.kind === 'remember') {
-    const req = parseRememberRequest(userText)
+    const req = parseRememberRequest(baseText)
     if (req) {
       const entry = await rememberMemory(req.content, { kind: req.kind, scope: req.scope })
       if (entry) {
@@ -292,7 +291,7 @@ export async function runAgentTurn(
     }
   }
   if (intent.kind === 'forget') {
-    const keyword = parseForgetRequest(userText)
+    const keyword = parseForgetRequest(baseText)
     if (keyword) {
       const removed = await forgetMemory(keyword)
       return {
@@ -302,7 +301,11 @@ export async function runAgentTurn(
       }
     }
   }
-  // 进度查询 / 质检：确定性汇总，不消耗模型调用
+  // 进度查询 / 质检：确定性汇总，不消耗模型调用。
+  // 但带着附件问「状态」时，多半是在问材料本身，交给模型结合材料回答。
+  if (intent.kind === 'status' && material) {
+    return answerQuestion(userText, history, p0, onEvent, options)
+  }
   if (intent.kind === 'status') {
     onEvent({ kind: 'log', label: '正在盘点画布与项目状态' })
     return { reply: statusNotes(p0), results: [], chips: statusChips(p0) }
@@ -313,7 +316,7 @@ export async function runAgentTurn(
   }
   // 选中节点的提示词优化：快路径，不等规划
   if (intent.kind === 'prompt_polish') {
-    const nodeId = options.selectedNodeId || findGenNodeInText(p0, userText)
+    const nodeId = options.selectedNodeId || findGenNodeInText(p0, baseText)
     if (nodeId) {
       const plan0 = {
         say: '按你说的方向加厚这个节点的提示词，只补画面细节，不动原文格式。',
@@ -355,25 +358,26 @@ export async function runAgentTurn(
 
   if (
     !nodePath &&
+    !material &&
     getAIMode() !== 'real' &&
-    isVagueRequest(userText, p0) &&
-    !wantAll(userText) &&
-    !isContinueRequest(userText) &&
-    !isApprovePlayRequest(userText) &&
-    !isNewStoryBrief(userText, p0)
+    isVagueRequest(baseText, p0) &&
+    !wantAll(baseText) &&
+    !isContinueRequest(baseText) &&
+    !isApprovePlayRequest(baseText) &&
+    !isNewStoryBrief(baseText, p0)
   ) {
     onEvent({ kind: 'log', label: '需求不够清楚，先问你几句' })
     return { reply: clarifyMessage(p0), results: [], chips: clarifyChips(p0) }
   }
 
-  const skillPack = skillContextForAgent(skillSelectContext(userText))
+  const skillPack = skillContextForAgent(skillSelectContext(baseText))
   const wantQa = skillPack.selected.some((s) => s.id === 'qa-verify')
 
   let plan: { say: string; actions: any[]; done?: boolean }
 
-  if (isContinueRequest(userText) && !wantAll(userText)) {
+  if (isContinueRequest(baseText) && !wantAll(baseText)) {
     plan = continuePlan(p0)
-  } else if (getAIMode() === 'real' && !isContinueRequest(userText)) {
+  } else if (getAIMode() === 'real' && !isContinueRequest(baseText)) {
     onEvent({ kind: 'think', label: '在想怎么做…' })
     const memoryText = await memoryContextPrompt()
     const chat = history
@@ -388,7 +392,7 @@ export async function runAgentTurn(
         },
         {
           role: 'user',
-          content: `当前项目上下文（按本轮需求摘录的摘要，明细不全；工具执行时读的是实时数据，需要更多信息就用工具查）：\n${projectContextPrompt(userText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。若用户在讲一个和当前剧本无关的新故事，不要沿用旧剧本。需求含糊就提问，不要瞎做。只修改用户点名的范围。${options.selectedNodeId ? `\n用户当前选中的节点：${options.selectedNodeId}（没点名其他节点时默认操作它）` : ''}`
+          content: `当前项目上下文（按本轮需求摘录的摘要，明细不全；工具执行时读的是实时数据，需要更多信息就用工具查）：\n${projectContextPrompt(baseText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。若用户在讲一个和当前剧本无关的新故事，不要沿用旧剧本。需求含糊就提问，不要瞎做。只修改用户点名的范围。${options.selectedNodeId ? `\n用户当前选中的节点：${options.selectedNodeId}（没点名其他节点时默认操作它）` : ''}${material ? `\n\n${material}\n\n上面这些是用户本轮附上的材料（附件 / 本地文件），优先直接使用，不要要求用户重新粘贴。` : ''}`
         },
         ...chat
       ],
@@ -401,23 +405,23 @@ export async function runAgentTurn(
     plan = parseAgentJson(resp.content)
     plan.actions = gateModeActions(
       applyPlayGate(
-        dedupeActions(alignNewStoryActions(sanitizeActions(plan.actions, userText), userText, history)),
-        userText
+        dedupeActions(alignNewStoryActions(sanitizeActions(plan.actions, baseText), baseText, history)),
+        baseText
       ),
       restrictToNodes
     )
   } else {
     if (nodePath) {
-      const nodePlan = freeformHeuristicPlan(userText, options.selectedNodeId)
+      const nodePlan = freeformHeuristicPlan(baseText, options.selectedNodeId)
       // 单节点规则没命中时回退到流水线规则，避免空手而归
-      plan = nodePlan.actions.length ? nodePlan : heuristicPlan(userText)
+      plan = nodePlan.actions.length ? nodePlan : heuristicPlan(baseText)
     } else {
-      plan = heuristicPlan(userText)
+      plan = heuristicPlan(baseText)
     }
     plan.actions = gateModeActions(
       applyPlayGate(
-        dedupeActions(alignNewStoryActions(plan.actions, userText, history)),
-        userText
+        dedupeActions(alignNewStoryActions(plan.actions, baseText, history)),
+        baseText
       ),
       restrictToNodes
     )
@@ -427,10 +431,10 @@ export async function runAgentTurn(
   const hitDownstream = plan.actions.some((a) => isDownstreamAction(a, project.current))
   const gated =
     hitDownstream &&
-    !wantAll(userText) &&
+    !wantAll(baseText) &&
     needsPlayReview(project.current) &&
-    !isApprovePlayRequest(userText) &&
-    !isContinueRequest(userText) &&
+    !isApprovePlayRequest(baseText) &&
+    !isContinueRequest(baseText) &&
     !plan.actions.some(
       (a) => a.tool === 'generate_storyboard' || a.tool === 'generate_play' || a.tool === 'continue_play' || a.tool === 'seed_script'
     )
@@ -486,8 +490,8 @@ export async function runAgentTurn(
           })
           const repaired = parseAgentJson(response.content)
           return applyPlayGate(
-            dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, userText), userText, history)),
-            userText
+            dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, baseText), baseText, history)),
+            baseText
           ).slice(0, 4)
         }
       : undefined,
@@ -512,8 +516,8 @@ export async function runAgentTurn(
           })
           const next = parseAgentJson(response.content)
           const actions = applyPlayGate(
-            dedupeActions(alignNewStoryActions(sanitizeActions(next.actions, userText), userText, history)),
-            userText
+            dedupeActions(alignNewStoryActions(sanitizeActions(next.actions, baseText), baseText, history)),
+            baseText
           ).slice(0, MAX_ACTIONS_PER_TURN)
           return {
             say: next.say,
@@ -564,7 +568,7 @@ export async function runAgentTurn(
     }
   }
 
-  const wrap = wrapUpReply(results, userText, plan.say)
+  const wrap = wrapUpReply(results, baseText, plan.say)
   const qa = wantQa && project.current ? `\n${qaNotes(project.current)}` : ''
   return { reply: (loop.finalSay || wrap.reply) + qa, results, chips: wrap.chips }
 }
@@ -730,7 +734,7 @@ ${memoryText ? `\n${memoryText}` : ''}`
         },
         {
           role: 'user',
-          content: `当前项目状态（仅供参考，不需要操作）：\n${projectContextPrompt(userText)}`
+          content: `当前项目状态（仅供参考，不需要操作）：\n${projectContextPrompt(userText)}\n\n下面是用户本轮的提问与随附材料（附件 / 本地文件）。材料里的内容优先作为回答依据，不要要求用户重新粘贴：\n${userText}`
         },
         ...chat
       ],

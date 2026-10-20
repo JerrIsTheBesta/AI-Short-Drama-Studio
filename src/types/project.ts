@@ -324,6 +324,11 @@ export interface ProjectSettings {
   captionHighlightScale?: number
   /** 口播音色（百炼 qwen-audio-3.0-tts-flash / SpeechSynthesizer） */
   ttsVoice?: string
+  /**
+   * H3 出片生成模式。auto：按每镜自己的参考图/关键帧（默认）；
+   * fl2va：首尾帧链——第 2 镜起自动取上一镜视频末帧作首帧、下一镜配图作尾帧，保证镜头间连续。
+   */
+  h3ShotChainMode?: 'auto' | 'fl2va'
 }
 
 /** 转场类型 */

@@ -53,6 +53,8 @@ function playFingerprint(p: Project | null | undefined): string {
 export function isNewStoryBrief(text: string, p?: Project | null): boolean {
   const t = text.trim()
   if (t.length < 12) return false
+  // 含本地盘符路径的消息是文件操作诉求，不是新故事梗概（防止长路径触发长度兜底）
+  if (/[A-Za-z]:[\\/]/.test(t)) return false
   if (isPipelineCommand(t)) return false
   if (/续写|接着写|再写[一两三四\d]*场|提炼节点|确认通过|第\s*\d+\s*镜/.test(t) && t.length < 40) {
     return false

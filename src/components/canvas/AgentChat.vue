@@ -97,6 +97,25 @@ function removeAttachment(index: number) {
   attachments.value.splice(index, 1)
 }
 
+/** 出片生成模式：自动（默认）/ 首尾帧链（第 2 镜起取上一镜视频末帧作首帧） */
+const shotChainMode = computed<'auto' | 'fl2va'>(
+  () => project.current?.settings.h3ShotChainMode || 'auto'
+)
+const genModeOpen = ref(false)
+
+function chooseShotChainMode(v: 'auto' | 'fl2va') {
+  genModeOpen.value = false
+  const p = project.current
+  if (!p) return
+  p.settings = { ...p.settings, h3ShotChainMode: v }
+  void project.save()
+  toast.success(
+    v === 'fl2va'
+      ? '已切换到首尾帧链：第 2 镜起会自动取上一镜视频末帧往下生成，镜头间保持连续。'
+      : '已切换到自动模式：按每镜自己的参考图出片。'
+  )
+}
+
 let controller: AbortController | null = null
 
 /* ── 生成配置：比例 / 图像模型 / 视频模型，选好即生效，智能体照此执行 ── */
@@ -658,6 +677,41 @@ function visibleRows(rows: TraceRow[]) {
               </svg>
               <span>附件</span>
             </button>
+          </div>
+          <div class="bar-pop">
+            <button
+              type="button"
+              class="bar-btn"
+              :disabled="busy"
+              title="出片生成模式：自动按参考图；首尾帧链取上一镜末帧保证镜头连续"
+              @click.stop="genModeOpen = !genModeOpen; modeOpen = false"
+            >
+              生成模式 · {{ shotChainMode === 'fl2va' ? '首尾帧' : '自动' }}
+              <i />
+            </button>
+            <div v-if="genModeOpen" class="menu" @click.stop>
+              <button
+                type="button"
+                :class="{ on: shotChainMode === 'auto' }"
+                @click="chooseShotChainMode('auto')"
+              >
+                自动模式
+              </button>
+              <button
+                type="button"
+                :class="{ on: shotChainMode === 'fl2va' }"
+                @click="chooseShotChainMode('fl2va')"
+              >
+                首尾帧模式
+              </button>
+              <p class="tip">
+                {{
+                  shotChainMode === 'fl2va'
+                    ? '首尾帧链：第 1 镜用本镜配图起手；第 2 镜起自动截取上一镜视频的最后一帧作首帧，下一镜的配图作尾帧，镜头间画面连续。上一镜还没出视频时先落回本镜配图。'
+                    : '每镜按自己的参考图 / 关键帧出片（默认）。想要镜头之间画面连续就选首尾帧模式。'
+                }}
+              </p>
+            </div>
           </div>
           <div class="bar-pop">
             <button

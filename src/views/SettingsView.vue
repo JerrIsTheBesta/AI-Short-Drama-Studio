@@ -5,6 +5,7 @@ import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore, endpo
 import StudioSettings from '@/components/canvas/StudioSettings.vue'
 import SetupAgent from '@/components/settings/SetupAgent.vue'
 import ZealmanSettings from '@/components/settings/ZealmanSettings.vue'
+import AutodlSettings from '@/components/settings/AutodlSettings.vue'
 import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
@@ -262,8 +263,8 @@ const storagePct = computed(() => {
   return (storage.value.usage / storage.value.quota) * 100
 })
 
-type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'zealman' | 'system'
-const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'zealman', 'system']
+type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'autodl' | 'zealman' | 'system'
+const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'autodl', 'zealman', 'system']
 
 const nav = [
   {
@@ -303,6 +304,12 @@ const nav = [
     lead: '第五步：让静止的画面动起来。这里填图生视频的接口地址、凭证和模型（或工作流）名称。'
   },
   {
+    id: 'autodl' as const,
+    label: 'AutoDL 算力',
+    desc: 'H3 系列图生视频',
+    lead: 'H3 系列（15 秒 / v5 1080p / 首尾帧 / 数字人口播）都走 AutoDL。只需填一个 AutoDL Token，内置工作流自动配好。'
+  },
+  {
     id: 'zealman' as const,
     label: 'Zealman 镜像',
     desc: '内置工作流镜像接口',
@@ -340,6 +347,10 @@ function navReady(id: SettingsSection) {
   if (id === 'image') return endpointReady(c.image)
   if (id === 'tts') return endpointReady(c.tts)
   if (id === 'video') return endpointReady(c.video)
+  if (id === 'autodl') {
+    return Boolean(c.autodlToken?.trim()) &&
+      c.videos.some((item) => item.provider === 'autodl' && item.apiKey?.trim() === c.autodlToken.trim())
+  }
   if (id === 'zealman') return c.videos.some((item) => item.provider === 'zealman' && Boolean(item.baseUrl))
   return false
 }
@@ -359,7 +370,7 @@ function navReady(id: SettingsSection) {
       <nav class="side" aria-label="设置分区">
         <p class="group">AI 能力</p>
         <RouterLink
-          v-for="item in nav.slice(0, 7)"
+          v-for="item in nav.slice(0, 8)"
           :key="item.id"
           :to="`/settings/${item.id}`"
           replace
@@ -432,9 +443,10 @@ function navReady(id: SettingsSection) {
         </section>
 
         <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
+        <AutodlSettings v-if="settings.diskReady && section === 'autodl'" />
         <ZealmanSettings v-if="settings.diskReady && section === 'zealman'" />
         <StudioSettings
-          v-if="settings.diskReady && section !== 'agent' && section !== 'zealman' && section !== 'system'"
+          v-if="settings.diskReady && section !== 'agent' && section !== 'zealman' && section !== 'autodl' && section !== 'system'"
           :module="section"
         />
         <p v-else-if="!settings.diskReady && section !== 'agent' && section !== 'system'" class="loading">

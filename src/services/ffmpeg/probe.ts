@@ -270,3 +270,65 @@ export async function extractVideoThumbnail(blob: Blob): Promise<Blob> {
     URL.revokeObjectURL(url)
   }
 }
+
+/** 提取视频最后一帧（首尾帧连拍模式：上一镜的末帧 = 下一镜的首帧） */
+export async function extractVideoLastFrame(blob: Blob): Promise<Blob> {
+  const typed = playableMediaBlob(blob, 'video')
+  const url = URL.createObjectURL(typed)
+  const v = document.createElement('video')
+  v.muted = true
+  v.playsInline = true
+  v.preload = 'auto'
+  v.src = url
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error('视频元数据超时')), 10000)
+      v.onloadedmetadata = () => {
+        window.clearTimeout(timer)
+        resolve()
+      }
+      v.onerror = () => {
+        window.clearTimeout(timer)
+        reject(new Error('视频加载失败'))
+      }
+    })
+    try {
+      await v.play()
+      v.pause()
+    } catch {
+      /* 有的浏览器不允许自动播放，继续 seek */
+    }
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 1
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('无法绘制末帧')
+    // 末帧附近可能有编码噪声，向前微退半帧并在两个采样点里取非黑的那帧。
+    const candidates = [Math.max(0.04, dur - 0.08), Math.max(0.04, dur - 0.25)]
+    let lastJpeg: Blob | null = null
+    for (const t of candidates) {
+      try {
+        await seekTo(v, t)
+      } catch {
+        continue
+      }
+      if (!v.videoWidth) continue
+      const w = Math.min(1280, v.videoWidth)
+      const ratio = v.videoWidth / v.videoHeight || 16 / 9
+      canvas.width = Math.max(1, Math.round(w))
+      canvas.height = Math.max(1, Math.round(w / ratio))
+      ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
+      const jpeg = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('末帧为空'))), 'image/jpeg', 0.9)
+      })
+      lastJpeg = jpeg
+      if (!canvasIsDark(ctx, canvas.width, canvas.height)) return jpeg
+    }
+    if (lastJpeg) return lastJpeg
+    throw new Error('无法绘制末帧')
+  } finally {
+    v.pause()
+    v.removeAttribute('src')
+    v.load()
+    URL.revokeObjectURL(url)
+  }
+}
