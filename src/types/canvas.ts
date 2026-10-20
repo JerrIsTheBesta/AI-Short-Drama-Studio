@@ -9,6 +9,7 @@ export type CanvasNodeType =
   | 'sceneProps'
   | 'shotBoard'
   | 'shotImage'
+  | 'shotFrames'
   | 'shotVideo'
   | 'audio'
   | 'export'

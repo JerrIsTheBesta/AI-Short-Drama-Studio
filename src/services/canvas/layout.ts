@@ -1,8 +1,8 @@
 import type { CanvasEdge, CanvasGraph, CanvasNode, Project } from '@/types'
-import { emptyCanvas, normalizeVideoGenModel, stillModeForVideoModel, videoStillNeedsCanvas } from '@/types/canvas'
+import { emptyCanvas, normalizeVideoGenModel, stillModeForVideoModel, videoStillNeedsCanvas, type VideoGenModel } from '@/types/canvas'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { boundSubjectIds } from '@/utils/consistency'
-import { stillModeFromNode, stillTypeForMode } from '@/utils/videoStill'
+import { needsShotFrames, shotUsesFrames, stillModeFromNode, stillTypeForMode } from '@/utils/videoStill'
 import { useSettingsStore } from '@/stores/settings'
 
 export const NODE_W = 240
@@ -75,6 +75,15 @@ function fallbackStillMode() {
 function activeVideoProfile() {
   try {
     return useSettingsStore().config.video
+  } catch {
+    return undefined
+  }
+}
+
+/** 「创作偏好」里选的默认视频模型（内置工作流）；没选则 undefined，节点照旧走接入默认 */
+function defaultVideoModelPref(): VideoGenModel | undefined {
+  try {
+    return useSettingsStore().config.defaultVideoModel
   } catch {
     return undefined
   }
@@ -196,9 +205,20 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const hadGroups = prevList.some((n) => n.type === 'groupFrame')
   const shotVideoPrev = prevList.filter((n) => n.type === 'shotVideo')
   const defaultStill = fallbackStillMode()
-  const useStills = shotVideoPrev.length
-    ? shotVideoPrev.some((n) => videoStillNeedsCanvas(stillModeFromNode(n)))
-    : videoStillNeedsCanvas(defaultStill)
+  // 走首尾帧的镜头视频直接吃起始帧/结束帧，不再铺关键帧/看板节点；
+  // 已经画出来的关键帧保留在画布上（不藏用户的图），只是不再要求补。
+  const shotsNeedingStills = shots.filter(
+    (s) => !shotUsesFrames(s, project) || s.imageAssetId || s.boardAssetId
+  )
+  const stillsWanted =
+    shots.length > 0
+      ? shotsNeedingStills.length > 0
+      : (project.settings?.h3ShotChainMode || 'auto') !== 'fl2va'
+  const useStills =
+    stillsWanted &&
+    (shotVideoPrev.length
+      ? shotVideoPrev.some((n) => videoStillNeedsCanvas(stillModeFromNode(n)))
+      : videoStillNeedsCanvas(defaultStill))
   const stillGroupLabel = shotVideoPrev.some((n) => stillModeFromNode(n) === 'storyboard')
     ? '故事看板'
     : '分镜关键帧'
@@ -208,6 +228,12 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     prevList
       .filter((n) => n.type === 'shotVideo')
       .every((n) => n.parentGroupId === 'group-videos')
+  // 首尾帧组只在真的要用首尾帧出片时出现：项目开了首尾帧链，或有镜头手动选了首尾帧。
+  // 它是给视频供图的，所以排在分镜关键帧之后、分镜视频之前。
+  // 口径与「下一步」流水线、智能体判断共用 needsShotFrames，三边必须一致。
+  const needFrames = shots.length > 0 && needsShotFrames(project)
+  // 首次插入这一组时，后面的分组要整体右移，旧坐标会跟新分组撞在一起，只能重排一次。
+  const framesJustAdded = needFrames && !prevList.some((n) => n.id === 'group-frames')
   const layoutReady = bare
     ? shots.length === 0 || (prevList.some((n) => n.id === 'group-videos') && videosHomed)
     : hadGroups &&
@@ -217,7 +243,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       (shots.length === 0 ||
         !useStills ||
         prevList.some((n) => n.type === 'shotBoard' || n.type === 'shotImage'))
-  const prev = new Map((preservePositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
+  const keepPositions = preservePositions && !framesJustAdded
+  const prev = new Map((keepPositions && layoutReady ? prevList : []).map((n) => [n.id, n]))
   const prevAny = new Map(prevList.map((n) => [n.id, n]))
   const nodes: CanvasNode[] = []
   const edges: CanvasEdge[] = []
@@ -252,6 +279,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   const subBox = groupBox(subjects.length, 1, sheetH)
   const scnBox = groupBox(scenes.length, 1, sheetH)
   const shotBox = groupBox(shots.length, 1, shotH)
+  const frameBox = groupBox(shots.length, 1, shotH)
   const vidBox = groupBox(shots.length, 1, shotH)
   const audBox = groupBox(shots.length, 1, AUDIO_NODE_H)
   const expBox = groupBox(1, 2, shotH)
@@ -281,6 +309,9 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   if ((!bare || shots.length) && useStills) {
     pushGroup('group-shots', stillGroupLabel, 'shot', shotBox)
   }
+  if ((!bare || shots.length) && needFrames) {
+    pushGroup('group-frames', '首尾帧', 'frames', frameBox)
+  }
   if (!bare || shots.length) {
     pushGroup('group-videos', '分镜视频', 'video', vidBox)
   }
@@ -294,7 +325,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     const old = prevAny.get(node.id)
     const sameParent = old?.parentGroupId === groupId
     if (
-      preservePositions &&
+      keepPositions &&
       sameParent === false &&
       old &&
       old.parentGroupId === undefined &&
@@ -358,14 +389,17 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     const vidId = `shotVideo:${shot.id}`
     const audId = `audio:${shot.id}`
     const prevVid = prev.get(vidId) || prevAny.get(vidId)
-    const model = normalizeVideoGenModel(prevVid?.data.videoModel)
+    const model = normalizeVideoGenModel(prevVid?.data.videoModel ?? defaultVideoModelPref())
     const resolvedStill =
       prevVid?.data.videoStillMode === 'identity' ||
       prevVid?.data.videoStillMode === 'keyframe' ||
       prevVid?.data.videoStillMode === 'storyboard'
         ? prevVid.data.videoStillMode
         : stillModeForVideoModel(model, activeVideoProfile())
-    const stillType = stillTypeForMode(resolvedStill)
+    // 首尾帧镜头不铺关键帧节点；但这镜如果已经画过关键帧/看板，保留节点不删图
+    const keepExistingStill = Boolean(shot.imageAssetId || shot.boardAssetId)
+    const stillType =
+      shotUsesFrames(shot, project) && !keepExistingStill ? null : stillTypeForMode(resolvedStill)
     const stillId = stillType ? `${stillType}:${shot.id}` : ''
     if (stillType && stillId) {
       const prevStillNode = prev.get(stillId) || prevAny.get(stillId)
@@ -385,6 +419,25 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         parentGroupId: 'group-shots'
       })
     }
+    if (needFrames) {
+      const frameId = `shotFrames:${shot.id}`
+      const prevFrame = prev.get(frameId) || prevAny.get(frameId)
+      attach('group-frames', {
+        id: frameId,
+        type: 'shotFrames',
+        position: cell(i, 0, shotH),
+        data: {
+          shotId: shot.id,
+          label: `${i + 1}. ${shot.title}`,
+          aspectRatio: prevFrame?.data.aspectRatio ?? project.settings.aspectRatio
+        },
+        status: persistStatus(
+          prev.get(frameId)?.status,
+          Boolean(shot.firstFrameAssetId && shot.lastFrameAssetId)
+        ),
+        parentGroupId: 'group-frames'
+      })
+    }
     attach('group-videos', {
       id: vidId,
       type: 'shotVideo',
@@ -392,7 +445,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       data: {
         shotId: shot.id,
         label: `${i + 1}. ${shot.title}`,
-        videoModel: prevVid?.data.videoModel,
+        videoModel: prevVid?.data.videoModel ?? defaultVideoModelPref(),
         videoResolution: prevVid?.data.videoResolution,
         videoStillMode: resolvedStill,
         aspectRatio: prevVid?.data.aspectRatio ?? project.settings.aspectRatio
@@ -418,6 +471,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     }
 
     const visualTarget = stillType && stillId ? stillId : vidId
+    const frameId = needFrames ? `shotFrames:${shot.id}` : ''
     const wanted = boundSubjectIds(shot, subjects).slice(0, 2)
     wanted.forEach((sid, idx) => {
       const src = `subject:${sid}`
@@ -429,6 +483,16 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         sourceHandle: 'out',
         targetHandle: stillType ? (idx === 0 ? 'char1' : 'char2') : 'in'
       })
+      // 首尾帧也要拿同一批人物去合成，所以人物节点同时连到帧节点
+      if (frameId) {
+        edges.push({
+          id: `e-${src}-${frameId}-${idx}`,
+          source: src,
+          target: frameId,
+          sourceHandle: 'out',
+          targetHandle: idx === 0 ? 'char1' : 'char2'
+        })
+      }
     })
     const sceneId = shot.sceneId || scenes[0]?.id
     if (sceneId) {
@@ -438,6 +502,24 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         target: visualTarget,
         sourceHandle: 'out',
         targetHandle: stillType ? 'scene' : 'in'
+      })
+      if (frameId) {
+        edges.push({
+          id: `e-scene-${sceneId}-${frameId}`,
+          source: `scene:${sceneId}`,
+          target: frameId,
+          sourceHandle: 'out',
+          targetHandle: 'scene'
+        })
+      }
+    }
+    if (frameId) {
+      edges.push({
+        id: `e-${frameId}-${vidId}`,
+        source: frameId,
+        target: vidId,
+        sourceHandle: 'out',
+        targetHandle: 'frames'
       })
     }
     if (stillType && stillId) {

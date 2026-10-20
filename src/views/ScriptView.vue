@@ -27,6 +27,11 @@ const content = ref('')
 const style = ref<VisualStyle>('cinematic')
 const aspectRatio = ref<AspectRatio>('16:9')
 const shotDuration = ref(5)
+/** 目标成片总时长（秒）。0 = 不限。决定剧本规模和后面拆多少镜。 */
+const targetDurationSec = ref(0)
+const durationOptions = [30, 40, 60, 90, 120, 180]
+const durationShots = (sec: number) => Math.max(1, Math.ceil(sec / 8))
+const durationScenes = (sec: number) => Math.max(2, Math.min(6, Math.round(sec / 15)))
 const keywords = ref('')
 const productIds = ref<string[]>([])
 const productUrls = ref<Record<string, string>>({})
@@ -106,6 +111,7 @@ onMounted(async () => {
     style.value = s.style
     aspectRatio.value = s.aspectRatio
     shotDuration.value = s.shotDuration
+    targetDurationSec.value = Number(s.targetDurationSec) || 0
     keywords.value = Array.isArray(s.keywords) ? s.keywords.join(', ') : ''
     workflowMode.value = s.workflowMode
     productIds.value = [...(s.referenceAssetIds ?? [])].slice(0, MAX_PRODUCT_IMAGES)
@@ -253,6 +259,7 @@ async function produceSelectedChapters() {
     style: style.value,
     aspectRatio: aspectRatio.value,
     shotDuration: shotDuration.value,
+    targetDurationSec: targetDurationSec.value || undefined,
     workflowMode: 'film-chapter',
     aesthetic: prev?.aesthetic,
     h3Aesthetic: prev?.h3Aesthetic,
@@ -302,6 +309,7 @@ async function saveAndNext() {
     style: style.value,
     aspectRatio: aspectRatio.value,
     shotDuration: shotDuration.value,
+    targetDurationSec: targetDurationSec.value || undefined,
     workflowMode: workflowMode.value,
     aesthetic: prev?.aesthetic,
     h3Aesthetic: prev?.h3Aesthetic,
@@ -716,6 +724,21 @@ async function removeProductImage(id: string) {
         </GlassCard>
 
         <GlassCard padding="md">
+          <h3>🎯 目标成片时长</h3>
+          <select v-model.number="targetDurationSec" class="target-select">
+            <option :value="0">不限（按内容自然长度）</option>
+            <option v-for="s in durationOptions" :key="s" :value="s">{{ s }} 秒</option>
+          </select>
+          <p class="hint">
+            {{
+              targetDurationSec
+                ? `按 ${targetDurationSec} 秒硬控：约 ${durationScenes(targetDurationSec)} 场、${durationShots(targetDurationSec)} 个分镜。写剧本和拆分镜都会照这个预算收着写。`
+                : '不限时长时，剧本会写满完整结构（背景+人物+多场），分镜通常十几到二十几个。要 40 秒这种短片请务必指定。'
+            }}
+          </p>
+        </GlassCard>
+
+        <GlassCard padding="md">
           <h3>分镜时长参考</h3>
           <div class="slider-row">
             <input
@@ -741,6 +764,12 @@ async function removeProductImage(id: string) {
           </div>
           <div class="kv">
             <span>预计总时长</span><b>{{ estimatedDuration }}s</b>
+          </div>
+          <div v-if="targetDurationSec" class="kv">
+            <span>时长预算</span>
+            <b :class="{ over: estimatedDuration > targetDurationSec * 1.25 }">
+              {{ targetDurationSec }}s / {{ durationShots(targetDurationSec) }} 镜
+            </b>
           </div>
         </GlassCard>
       </aside>
@@ -1307,6 +1336,19 @@ async function removeProductImage(id: string) {
   font-size: 11px;
   color: var(--color-text-4);
   margin: 6px 0 0;
+}
+.target-select {
+  width: 100%;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-fill);
+  color: var(--color-text-1);
+  font-size: 12px;
+  padding: 0 8px;
+}
+.kv b.over {
+  color: #ff6b6b;
 }
 .product-row {
   display: flex;

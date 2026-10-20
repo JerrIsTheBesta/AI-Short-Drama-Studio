@@ -4,6 +4,18 @@
  */
 
 import { desktop, isDesktop } from '@/services/desktop'
+import {
+  applyComfyInputs,
+  COMFY_ROLE_LABEL,
+  guessInputMap,
+  isMediaRole,
+  missingRoles,
+  sanitizeInputMap,
+  validateInputMap,
+  type ComfyInputMap,
+  type ComfyInjectValues,
+  type ComfyInputRole
+} from './comfyInputMap'
 import { zealmanWorkflowById } from './zealman'
 
 function timeoutSignal(ms: number): AbortSignal {
@@ -40,8 +52,13 @@ export interface AdapterConfig {
   authHeader?: string
   /** 鉴权前缀，默认 Bearer （Comfy/AutoDL 可设为空串表示原样） */
   authPrefix?: string
-  /** ComfyUI 工作流 JSON 字符串，占位 {{prompt}} / {{image}} / {{negative}} */
+  /** ComfyUI 工作流 JSON 字符串（API Format） */
   workflowTemplate?: string
+  /**
+   * 工作流输入映射：哪个节点的哪个字段接提示词 / 参考图 / 参数。
+   * 由助手读懂工作流后产出并随接入保存；生成时按它确定性注入。
+   */
+  inputMap?: ComfyInputMap
   /** 额外请求头 */
   headers?: Record<string, string>
 }
@@ -621,10 +638,108 @@ export async function httpCustomImageGenerate(opts: {
 }
 
 
-function fillWorkflowTemplate(
-  template: string,
-  vars: Record<string, string>
-): any {
+function bytesToBase64(bytes: Uint8Array): string {
+  let out = ''
+  const chunk = 8192
+  for (let i = 0; i < bytes.length; i += chunk) {
+    out += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(out)
+}
+
+function dataUrlToBytes(dataUrl: string): { bytes: Uint8Array; mime: string } {
+  const m = /^data:([^;,]+)?(;base64)?,/i.exec(dataUrl)
+  if (!m) throw new Error('不是 data URL，无法上传')
+  const head = m[0]
+  const mime = m[1] || 'image/png'
+  if (m[2]) {
+    const bin = atob(dataUrl.slice(head.length))
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return { bytes, mime }
+  }
+  return { bytes: new TextEncoder().encode(decodeURIComponent(dataUrl.slice(head.length))), mime }
+}
+
+function extOfMime(mime: string): string {
+  if (/jpe?g/i.test(mime)) return 'jpg'
+  if (/webp/i.test(mime)) return 'webp'
+  if (/gif/i.test(mime)) return 'gif'
+  if (/mp4|webm/i.test(mime)) return 'mp4'
+  if (/wav/i.test(mime)) return 'wav'
+  if (/mpeg|mp3/i.test(mime)) return 'mp3'
+  return 'png'
+}
+
+function buildMultipart(
+  fields: Record<string, string>,
+  file: { name: string; mime: string; bytes: Uint8Array },
+  fileField = 'image'
+): { bodyBase64: string; contentType: string } {
+  const boundary = `----aicust${Date.now().toString(36)}`
+  const enc = new TextEncoder()
+  const parts: Uint8Array[] = []
+  const push = (s: string) => parts.push(enc.encode(s))
+  for (const [k, v] of Object.entries(fields)) {
+    push(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`)
+  }
+  push(
+    `--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${file.name}"\r\nContent-Type: ${file.mime}\r\n\r\n`
+  )
+  parts.push(file.bytes)
+  push(`\r\n--${boundary}--\r\n`)
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const body = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    body.set(p, off)
+    off += p.length
+  }
+  return { bodyBase64: bytesToBase64(body), contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
+/**
+ * 参考图 / 尾帧 / 音频必须先传到 Comfy，拿到它在 input 目录里的文件名后写进节点。
+ * 直接把 data URL 塞给 LoadImage 是无效的——Comfy 只认自己目录里的文件名。
+ */
+async function uploadComfyMedia(opts: {
+  baseUrl: string
+  dataUrl: string
+  apiKey?: string
+  adapter?: AdapterConfig
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+}): Promise<string> {
+  const { bytes, mime } = dataUrlToBytes(opts.dataUrl)
+  const name = `aicust-${Date.now().toString(36)}.${extOfMime(mime)}`
+  const { bodyBase64, contentType } = buildMultipart({ overwrite: 'true' }, { name, mime, bytes }, 'image')
+  opts.onProgress?.('上传参考图到 ComfyUI…')
+  const res = await providerHttp(joinUrl(trimSlash(opts.baseUrl), '/upload/image'), {
+    method: 'POST',
+    headers: buildAuthHeader(opts.apiKey || '', {
+      ...opts.adapter,
+      authPrefix: opts.adapter?.authPrefix ?? (opts.apiKey ? 'Bearer ' : '')
+    }),
+    bodyBase64,
+    contentType,
+    signal: opts.signal,
+    timeoutMs: 120_000
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`[comfyui] 上传素材失败 ${res.status} ${text.slice(0, 160)}`)
+  let json: any = {}
+  try {
+    json = JSON.parse(text || '{}')
+  } catch {
+    /* 某些网关返回纯文本文件名 */
+  }
+  const filename = String(json.name || json.filename || text.trim().split('\n')[0] || '').replace(/^"|"$/g, '')
+  if (!filename) throw new Error(`[comfyui] 上传成功但未返回文件名：${text.slice(0, 160)}`)
+  return filename
+}
+
+/** 老模板仍支持 {{prompt}} / {{negative}} / {{image}} 占位；没有占位符时交给输入映射处理。 */
+function fillWorkflowTemplate(template: string, vars: Record<string, string>): any {
   let raw = template
   for (const [k, v] of Object.entries(vars)) {
     raw = raw.split(`{{${k}}}`).join(v.replace(/\\/g, '\\\\').replace(/"/g, '\\"'))
@@ -639,6 +754,18 @@ export async function comfyPromptGenerate(opts: {
   prompt: string
   negative?: string
   imageDataUrl?: string
+  /** 尾帧（首尾帧工作流） */
+  imageEndDataUrl?: string
+  /** 蒙版（局部重绘） */
+  maskDataUrl?: string
+  /** 音频（数字人口播） */
+  audioDataUrl?: string
+  seed?: number
+  width?: number
+  height?: number
+  /** 时长（秒）或帧数，由映射决定语义 */
+  duration?: number
+  fps?: number
   adapter?: AdapterConfig
   signal?: AbortSignal
   kind?: 'image' | 'video'
@@ -661,14 +788,36 @@ export async function comfyPromptGenerate(opts: {
 
   if (!adapter.workflowTemplate?.trim()) {
     throw new Error(
-      '[comfyui] 缺少 adapter.workflowTemplate。请在设置页「适配器」粘贴 Comfy API 格式工作流 JSON（可用 {{prompt}} / {{image}} 占位）。应用不会提供假装可用的默认工作流。'
+      '[comfyui] 缺少 adapter.workflowTemplate。请在设置页「适配器」粘贴 Comfy API 格式工作流 JSON，并让助手分析出输入映射。应用不会提供假装可用的默认工作流。'
     )
   }
-  let payload: any = fillWorkflowTemplate(adapter.workflowTemplate, {
-    prompt: opts.prompt,
-    negative: opts.negative || '',
-    image: opts.imageDataUrl || ''
-  })
+  // 老模板带 {{prompt}} 占位：先按占位替换（image 用上传后的文件名，data URL 对 Comfy 无效）
+  const hasPlaceholders = /\{\{(prompt|negative|image)\}\}/.test(adapter.workflowTemplate)
+  let payload: any
+  if (hasPlaceholders) {
+    let uploadedName = ''
+    if (opts.imageDataUrl) {
+      try {
+        uploadedName = await uploadComfyMedia({
+          baseUrl: base,
+          dataUrl: opts.imageDataUrl,
+          apiKey: opts.apiKey,
+          adapter,
+          signal: opts.signal,
+          onProgress: opts.onProgress
+        })
+      } catch (e: any) {
+        throw new Error(`[comfyui] 参考图上传失败：${e?.message || e}`)
+      }
+    }
+    payload = fillWorkflowTemplate(adapter.workflowTemplate, {
+      prompt: opts.prompt,
+      negative: opts.negative || '',
+      image: uploadedName
+    })
+  } else {
+    payload = JSON.parse(adapter.workflowTemplate)
+  }
   if (!payload.prompt && !payload.client_id) {
     // 若模板本身就是 nodes map
     payload = { prompt: payload }
@@ -676,6 +825,66 @@ export async function comfyPromptGenerate(opts: {
   if (!payload.client_id) {
     payload.client_id = `ai-cut-${Date.now().toString(36)}`
   }
+
+  // 按输入映射注入本次的值。映射由助手在校验时读懂工作流得出；缺映射时退回规则识别。
+  let inputMap = adapter.inputMap
+  if (!inputMap || !inputMap.bindings?.length) {
+    inputMap = guessInputMap(payload)
+  }
+  inputMap = validateInputMap(payload, inputMap)
+  const mediaSources: Partial<Record<ComfyInputRole, string>> = {
+    image: opts.imageDataUrl,
+    imageEnd: opts.imageEndDataUrl,
+    mask: opts.maskDataUrl,
+    audio: opts.audioDataUrl
+  }
+  const uploaded: Partial<Record<ComfyInputRole, string>> = {}
+  for (const b of inputMap.bindings) {
+    if (!isMediaRole(b.role)) continue
+    const src = mediaSources[b.role]
+    if (!src) continue
+    const mode = b.mediaMode || 'upload'
+    if (mode !== 'upload') continue
+    if (uploaded[b.role]) continue
+    try {
+      uploaded[b.role] = await uploadComfyMedia({
+        baseUrl: base,
+        dataUrl: src,
+        apiKey: opts.apiKey,
+        adapter,
+        signal: opts.signal,
+        onProgress: opts.onProgress
+      })
+    } catch (e: any) {
+      throw new Error(
+        `[comfyui] ${COMFY_ROLE_LABEL[b.role]}上传失败：${e?.message || e}。该工作流需要先把素材传到 Comfy 的 input 目录。`
+      )
+    }
+  }
+  const values: ComfyInjectValues = {
+    prompt: opts.prompt,
+    negative: opts.negative || '',
+    image: opts.imageDataUrl,
+    imageEnd: opts.imageEndDataUrl,
+    mask: opts.maskDataUrl,
+    audio: opts.audioDataUrl,
+    ...(opts.seed != null ? { seed: opts.seed } : {}),
+    ...(opts.width ? { width: opts.width } : {}),
+    ...(opts.height ? { height: opts.height } : {}),
+    ...(opts.duration ? { length: opts.duration } : {}),
+    ...(opts.fps ? { fps: opts.fps } : {}),
+    uploaded
+  }
+  const { writes, skipped } = applyComfyInputs(payload, inputMap, values)
+  if (!writes.length) {
+    const miss = missingRoles(inputMap)
+    throw new Error(
+      `[comfyui] 工作流没有接到任何本次输入（${skipped.slice(0, 2).join('；') || '映射为空'}）。` +
+        `${miss.includes('prompt') ? '映射里没有正向提示词节点，' : ''}` +
+        '请在接入里点「用助手分析工作流」重新生成输入映射。'
+    )
+  }
+  opts.onProgress?.(`已注入：${writes.slice(0, 3).join('、')}`)
 
   opts.onProgress?.('提交 ComfyUI 队列…')
   const submitUrl = joinUrl(base, submitPath)
@@ -1016,6 +1225,8 @@ export function normalizeAdapterInput(raw: unknown): AdapterConfig | undefined {
   if (o.authHeader != null) adapter.authHeader = String(o.authHeader)
   if (o.authPrefix != null) adapter.authPrefix = String(o.authPrefix)
   if (o.workflowTemplate != null) adapter.workflowTemplate = String(o.workflowTemplate)
+  const map = sanitizeInputMap(o.inputMap)
+  if (map) adapter.inputMap = map
   if (o.headers && typeof o.headers === 'object') {
     adapter.headers = Object.fromEntries(
       Object.entries(o.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)])

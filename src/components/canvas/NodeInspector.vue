@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useProjectStore, useAssetsStore, useToastStore, useSettingsStore } from '@/stores'
 import { llmChoiceKey, llmModelGroups, parseLlmChoiceKey } from '@/stores/settings'
-import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
+import { runCanvasNode, runScriptNode, rewriteShotPerformance, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt, isFl2vaChainActive, regenerateShotFrame } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { applyShotVideoModel, applyShotVideoProfile } from '@/services/canvas/videoModel'
@@ -10,6 +10,7 @@ import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeForShot } from '@/utils/videoStill'
 import { needsPlayReview, PLAY_GATE_MSG } from '@/services/canvas/playGate'
 import { isPlayReady } from '@/services/ai'
+import { shotFrameSendPrompt } from '@/utils/nodePrompt'
 import { scriptFromImportedPlay } from '@/utils/scriptMarkdown'
 import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
@@ -133,6 +134,7 @@ const currentAssetId = computed(() => {
   if (t === 'scene') return scene.value?.plateAssetId
   if (t === 'shotBoard') return shot.value?.boardAssetId
   if (t === 'shotImage') return shot.value?.imageAssetId
+  if (t === 'shotFrames') return shot.value?.firstFrameAssetId || shot.value?.lastFrameAssetId
   if (t === 'shotVideo') return shot.value?.videoAssetId
   if (t === 'audio') return shot.value?.audioAssetId
   if (t === 'imageGen' || t === 'videoGen') return props.node?.data.outputAssetId
@@ -173,6 +175,7 @@ const actionLabel = computed(() => {
         ? '生成配图'
         : '生成四宫格'
   }
+  if (t === 'shotFrames') return again ? '重画首尾帧' : '画首尾帧'
   if (t === 'shotVideo') return again ? '重新生成视频' : '生成视频'
   if (t === 'audio') {
     if (!shot.value || !needsExternalTts(shot.value, project.current)) return '无需独立配音'
@@ -197,9 +200,38 @@ const canExtractShots = computed(
 
 const isImageNode = computed(() => {
   const t = props.node?.type
-  return t === 'subject' || t === 'sceneProps' || t === 'scene' || t === 'shotBoard' || t === 'shotImage'
+  return (
+    t === 'subject' ||
+    t === 'sceneProps' ||
+    t === 'scene' ||
+    t === 'shotBoard' ||
+    t === 'shotImage' ||
+    t === 'shotFrames'
+  )
 })
 const canPickAsset = computed(() => isImageNode.value || props.node?.type === 'imageGen')
+const isVideoNode = computed(() => props.node?.type === 'shotVideo' || props.node?.type === 'videoGen')
+
+/** 本镜说话角色的音色：人物卡上的实时值优先，其次用提炼时绑定的快照 */
+const shotSpeakerVoice = computed(() => {
+  const s = shot.value
+  if (!s) return ''
+  const label = String(s.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+  const subs = project.current?.subjects ?? []
+  const hit = label
+    ? subs.find((x) => x.name.trim() === label) ??
+      subs.find((x) => {
+        const n = x.name.trim()
+        return n && (label.includes(n) || n.includes(label))
+      })
+    : undefined
+  return hit?.voicePrompt?.trim() || s.speakerVoice || ''
+})
+const shotSpeakerName = computed(() => {
+  const s = shot.value
+  if (!s) return ''
+  return String(s.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim() || ''
+})
 
 const showAspect = computed(() => {
   const t = props.node?.type
@@ -295,6 +327,30 @@ const lastFrameId = computed({
   }
 })
 const isH3Fl2va = computed(() => isH3Video.value && h3GenMode.value === 'fl2va')
+/** 项目级「首尾帧链」：整条片按镜号首尾相接，不需要逐镜手动选帧 */
+const fl2vaChain = computed(() => isH3Video.value && isFl2vaChainActive(project.current))
+
+/** 首尾帧节点：两张帧各自的画面词 */
+const startFramePromptValue = computed(() => {
+  const s = shot.value
+  if (!s || !project.current) return ''
+  return s.startFramePrompt?.trim() || shotFrameSendPrompt(s, project.current, 'start')
+})
+const endFramePromptValue = computed(() => {
+  const s = shot.value
+  if (!s || !project.current) return ''
+  return s.endFramePrompt?.trim() || shotFrameSendPrompt(s, project.current, 'end')
+})
+async function redrawFrame(which: 'start' | 'end') {
+  const s = shot.value
+  if (!s || running.value) return
+  try {
+    await regenerateShotFrame(s, which, (msg) => toast.info(msg))
+    toast.success(which === 'start' ? '起始帧已重画' : '结束帧已重画')
+  } catch (e: any) {
+    toast.error(friendlyAiError(e) || '重画失败')
+  }
+}
 
 const canRun = computed(() => {
   if (running.value || gateBlocked.value) return false
@@ -320,6 +376,7 @@ const kindLabel = computed(() => {
   if (t === 'scene') return '场景 · 锚点图'
   if (t === 'shotBoard') return '分镜 · 故事看板'
   if (t === 'shotImage') return videoRequiresStoryboard(project.current) ? '分镜 · 配图' : '分镜 · 四宫格关键帧'
+  if (t === 'shotFrames') return '分镜 · 首尾帧'
   if (t === 'shotVideo') {
     const d = shot.value?.duration
     return d ? `分镜 · 视频 · ${d}s` : '分镜 · 视频'
@@ -849,6 +906,33 @@ async function optimizeVideoPrompt() {
         />
       </template>
 
+      <template v-else-if="node.type === 'shotFrames' && shot">
+        <p class="hint">
+          首尾帧用本镜的人物和场景参考图合成：起始帧画开场那一瞬，结束帧画动作走完的末态。
+          画完的两张直接就是出视频的首帧和尾帧。
+        </p>
+        <div class="lab-row">
+          <label>起始帧画面词</label>
+          <button class="link" type="button" :disabled="running" @click="redrawFrame('start')">重画这一张</button>
+        </div>
+        <textarea
+          rows="9"
+          :value="startFramePromptValue"
+          placeholder="留空则按分镜描述与连续性自动拼"
+          @input="project.updateShot(shot.id, { startFramePrompt: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <div class="lab-row">
+          <label>结束帧画面词</label>
+          <button class="link" type="button" :disabled="running" @click="redrawFrame('end')">重画这一张</button>
+        </div>
+        <textarea
+          rows="9"
+          :value="endFramePromptValue"
+          placeholder="留空则按「起始 → 末态」里的末态自动拼"
+          @input="project.updateShot(shot.id, { endFramePrompt: ($event.target as HTMLTextAreaElement).value })"
+        />
+      </template>
+
       <template v-else-if="node.type === 'shotVideo' && shot">
         <div class="lab-row">
           <label>实际出视频提示词</label>
@@ -902,7 +986,12 @@ async function optimizeVideoPrompt() {
           v-else-if="shot && project.current && stillModeForShot(shot, project.current) === 'keyframe' && !isH3Fl2va && !shot.imageAssetId"
           class="err"
         >这一镜还没有四宫格关键帧，当前模型需要关键帧后再出视频。</p>
-        <p v-else-if="isH3Fl2va && !shot.lastFrameAssetId" class="err">首尾帧模式需要尾帧。请在下方选择尾帧。</p>
+        <p v-else-if="isH3Fl2va && !shot.lastFrameAssetId" class="err">
+          这一镜手动开了首尾帧，还缺尾帧。请在下方选择尾帧。
+        </p>
+        <p v-else-if="fl2vaChain && shot && !isH3Fl2va" class="hint">
+          项目已开启首尾帧链：第 1 镜用本镜配图起手，第 2 镜起自动接上一镜末帧，不用手动选帧。凑不齐首尾帧时会自动退回常规出片，不会卡住生成。
+        </p>
       </template>
 
       <H3GenModeSelect v-if="isH3Video" v-model="h3GenMode" />
@@ -971,6 +1060,24 @@ async function optimizeVideoPrompt() {
           @input="project.updateShot(shot.id, { voiceover: ($event.target as HTMLTextAreaElement).value })"
         />
         <TtsModelSelect v-if="effectiveShotAudioMode(shot) === 'tts'" />
+        <label>说话音色</label>
+        <textarea
+          rows="2"
+          :value="shotSpeakerVoice"
+          :placeholder="
+            shotSpeakerName
+              ? `尚未绑定「${shotSpeakerName}」的音色。在人物卡的「音色描述」里填一句，重跑提炼即自动带入`
+              : '口播写成「人物名：台词」后，会自动带上该角色的音色'
+          "
+          @input="project.updateShot(shot.id, { speakerVoice: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <p class="hint">
+          {{
+            shotSpeakerVoice
+              ? '生成视频和后期配音都会带上这句音色。改人物卡的音色描述会立即覆盖这里。'
+              : '同一角色全片一个声线，填一次就够。'
+          }}
+        </p>
       </template>
 
       <div v-if="historyIds.length" class="hist">
@@ -990,17 +1097,20 @@ async function optimizeVideoPrompt() {
         </div>
       </div>
 
-      <ImageModelSelect v-if="isImageNode" />
-      <VideoModelSelect
-        v-if="node.type === 'shotVideo' || node.type === 'videoGen'"
-        v-model="videoModel"
-        :profile-id="node.data.videoProfileId"
-        @select-profile="onSelectVideoProfile"
-      />
-      <VideoResolutionSeg
-        v-if="(node.type === 'shotVideo' || node.type === 'videoGen') && videoAllows1080p(videoModel) && !isH3Fl2va"
-        v-model="videoResolution"
-      />
+      <div v-if="isImageNode || isVideoNode" class="insp-params">
+        <ImageModelSelect v-if="isImageNode" />
+        <VideoModelSelect
+          v-if="isVideoNode"
+          v-model="videoModel"
+          :profile-id="node.data.videoProfileId"
+          @select-profile="onSelectVideoProfile"
+        />
+        <VideoResolutionSeg
+          v-if="isVideoNode && videoAllows1080p(videoModel) && !isH3Fl2va"
+          v-model="videoResolution"
+          compact
+        />
+      </div>
       <template v-if="node.type === 'script' && isPlayReady(project.current?.script)">
         <label>续写方向（可选）</label>
         <textarea
@@ -1272,6 +1382,12 @@ textarea {
   width: 100%;
   max-width: 220px;
   cursor: default;
+}
+.insp-params {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .hist {
   display: flex;

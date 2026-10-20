@@ -39,6 +39,12 @@ import {
   fetchComfyUserdataWorkflow,
   parseComfyWorkflowJson
 } from '@/services/settings/comfyWorkflows'
+import {
+  analyzeWorkflowWithLlm,
+  describeInputMap,
+  describeWorkflowKind,
+  validateInputMap
+} from '@/services/ai/comfyInputMap'
 
 export interface SetupMessage {
   role: 'user' | 'assistant'
@@ -233,7 +239,11 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
       apiKey: ep.apiKey,
       adapter: ep.adapter
     })
-    const names = res.workflows.slice(0, 30).map((w) => `- ${w.name} (${w.path})`).join('\n')
+    // 带上目录前缀，set_workflow_template 用这个 path 才能取到文件
+    const names = res.workflows
+      .slice(0, 30)
+      .map((w) => `- ${w.name} (${w.root ? `${w.root}/${w.path}` : w.path})`)
+      .join('\n')
     return {
       ok: res.reachable,
       detail: `${res.message}${names ? '\n' + names : ''}`,
@@ -271,6 +281,7 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
     }
     const parsed = parseComfyWorkflowJson(template)
     if (!parsed.ok || !parsed.template) return { ok: false, detail: parsed.detail, kind }
+    const payload = parsed.payload || JSON.parse(parsed.template)
     const adapter = {
       ...(ep.adapter || {}),
       type: 'comfyui-prompt' as const,
@@ -280,7 +291,23 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
     }
     if (kind === 'image') settings.patchImage({ adapter })
     else settings.patchVideo({ adapter })
-    return { ok: true, detail: `已写入 ${kind} 的 workflowTemplate（API Format）`, kind }
+    // 让助手读完节点图，确认提示词 / 参考图该注入到哪个节点，再把映射一起存下来
+    try {
+      const { map, error } = await analyzeWorkflowWithLlm(payload)
+      const checked = validateInputMap(payload, map)
+      const withMap = { ...adapter, inputMap: checked }
+      if (kind === 'image') settings.patchImage({ adapter: withMap })
+      else settings.patchVideo({ adapter: withMap })
+      return {
+        ok: true,
+        detail: checked.bindings.length
+          ? `已写入 ${kind} 的 workflowTemplate，助手判定为${describeWorkflowKind(checked.kind)}，接入输入：${describeInputMap(checked)}${error ? `（${error}）` : ''}`
+          : `已写入 ${kind} 的 workflowTemplate，但助手没定位到可注入的输入节点（${error || '未知原因'}），生成时会跑工作流里写死的内容`,
+        kind
+      }
+    } catch {
+      return { ok: true, detail: `已写入 ${kind} 的 workflowTemplate（助手分析未执行，可在设置页点「用助手分析工作流」）`, kind }
+    }
   }
 
   if (tool === 'add_comfyui') {

@@ -133,7 +133,7 @@ export async function addComfyUiProfiles(input: ComfyQuickAddInput): Promise<Com
   }
 
   notes.push(
-    '出图/出视频前请在「适配器 → workflowTemplate」粘贴 Comfy「Save (API Format)」导出的 JSON（可用 {{prompt}} / {{image}} 占位）。'
+    '出图/出视频前请在「适配器 → workflowTemplate」粘贴 Comfy「Save (API Format)」导出的 JSON，然后让助手分析出输入映射（提示词 / 参考图写到哪个节点）。'
   )
 
   let test: ComfyQuickAddResult['test']

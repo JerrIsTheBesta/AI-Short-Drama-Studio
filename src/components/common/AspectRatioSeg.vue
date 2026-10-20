@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import ParamSelect from '@/components/common/ParamSelect.vue'
 import { useProjectStore } from '@/stores'
 import { ASPECT_PRESETS } from '@/utils/aspect'
 import type { AspectRatio } from '@/types'
@@ -22,17 +23,17 @@ function pick(ar: AspectRatio) {
 </script>
 
 <template>
-  <label v-if="compact" class="ar-compact">
-    <span class="ar-k">比例</span>
-    <select
-      :value="current"
-      @change="pick(($event.target as HTMLSelectElement).value as AspectRatio)"
-    >
-      <option v-for="a in ASPECT_PRESETS" :key="a.value" :value="a.value">
-        {{ a.hint }} {{ a.value }}
-      </option>
-    </select>
-  </label>
+  <ParamSelect
+    v-if="compact"
+    label="比例"
+    width="104px"
+    :model-value="current"
+    @update:model-value="pick($event as AspectRatio)"
+  >
+    <option v-for="a in ASPECT_PRESETS" :key="a.value" :value="a.value">
+      {{ a.hint }} {{ a.value }}
+    </option>
+  </ParamSelect>
   <div v-else class="ar-full">
     <div class="ar-head">画面比例</div>
     <div class="ar-seg">
@@ -55,28 +56,6 @@ function pick(ar: AspectRatio) {
 </template>
 
 <style scoped>
-.ar-compact {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.ar-k {
-  font-size: 11px;
-  color: var(--color-text-3);
-  white-space: nowrap;
-}
-.ar-compact select {
-  height: 28px;
-  min-width: 0;
-  max-width: 118px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
-  border-radius: 8px;
-  padding: 0 6px;
-  font-size: 12px;
-}
 .ar-full {
   display: grid;
   gap: 8px;

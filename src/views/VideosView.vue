@@ -2,9 +2,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { stillModeForShot, shotMissingStill } from '@/utils/videoStill'
+import { needsShotFrames, shotUsesFrames, stillModeForShot, shotMissingStill } from '@/utils/videoStill'
 import { applyShotVideoModel } from '@/services/canvas/videoModel'
-import { generateShotVideo, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
+import { generateShotVideo, generateShotFramePair, isFl2vaChainActive, rewriteShotPerformance, optimizeShotVideoPrompt } from '@/services/canvas/runner'
 import { mapPool, VIDEO_GEN_CONCURRENCY } from '@/services/canvas/jobs'
 import { getVideoPromptStyle } from '@/services/ai/runtime'
 import { effectiveShotAudioMode } from '@/utils/shot'
@@ -72,6 +72,57 @@ const videoPromptPlaceholder = computed(() =>
     ? '每个角色的表情神态、手脚动作、环境怎么动、说什么原词、镜头怎么走。写细才有表现力。'
     : '画面中：站位、发型、衣服、动作、年龄的人是谁。空一行后连续写这一镜怎么演、台词原词、环境动势、镜头怎么收。'
 )
+
+/** 首尾帧模式：项目开了首尾帧链，或有镜头自己选了首尾帧。批量出片只能串行，且要先画帧 */
+const fl2vaChain = computed(() => needsShotFrames(project.current))
+
+/** 还没画首尾帧的镜头（只算走首尾帧的镜头，混合模式下普通镜头不算缺） */
+const shotsWithoutFrames = computed(() =>
+  shots.value.filter(
+    (s) => project.current && shotUsesFrames(s, project.current) && (!s.firstFrameAssetId || !s.lastFrameAssetId)
+  )
+)
+const drawingFrames = ref(false)
+
+/** 按顺序把每一镜的起始帧和结束帧画出来：这一镜起始帧接着上一镜结束帧 */
+async function generateAllFrames() {
+  const targets = [...shotsWithoutFrames.value].sort((a, b) => a.index - b.index)
+  if (!targets.length || drawingFrames.value) return
+  drawingFrames.value = true
+  toast.info(`按镜号串行画 ${targets.length} 个镜头的首尾帧…`, 4000)
+  let done = 0
+  for (const shot of targets) {
+    try {
+      await generateShotFramePair(shot, (msg) => {
+        progress.value[shot.id] = msg
+      })
+      done += 1
+    } catch (e: any) {
+      toast.error(`分镜 ${shot.index + 1} 首尾帧画失败：${e.message}`)
+    } finally {
+      delete progress.value[shot.id]
+    }
+  }
+  drawingFrames.value = false
+  if (done) toast.success(`${done} 个镜头的首尾帧已画好，可以直接出视频了`)
+}
+
+/** 链模式卡住时的逃生开关：一键回到每镜按自己参考图出片的自动模式 */
+function turnOffChain() {
+  const p = project.current
+  if (!p) return
+  p.settings = { ...p.settings, h3ShotChainMode: 'auto' }
+  void project.save()
+  toast.success('已切回自动模式：每镜按自己的参考图出片。')
+}
+
+/** 真正的第 1 镜：删过镜头后 index 不一定连续，按排序后的位置认 */
+const firstShotId = computed(
+  () => [...shots.value].sort((a, b) => a.index - b.index)[0]?.id ?? ''
+)
+function isFirstShot(shot: Shot) {
+  return firstShotId.value !== '' && firstShotId.value === shot.id
+}
 
 const shotsWithoutStill = computed(() =>
   isDigitalHuman.value
@@ -229,7 +280,21 @@ async function generateOne(shot: Shot) {
 }
 
 async function generateAll() {
-  const targets = shots.value.filter((shot) => !shot.videoAssetId && !generating.value.has(shot.id))
+  // 首尾帧模式：视频吃的就是这两张帧。先按镜号补齐，不能整列跳过直接出片。
+  if (fl2vaChain.value && shotsWithoutFrames.value.length) {
+    await generateAllFrames()
+  }
+  // 首尾帧链：第 N 镜首帧 = 第 N-1 镜视频末帧，必须按镜号一镜一镜来，并发会把链打断
+  const chain = isFl2vaChainActive(project.current)
+  const targets = shots.value
+    .filter((shot) => !shot.videoAssetId && !generating.value.has(shot.id))
+    .sort((a, b) => a.index - b.index)
+  if (!targets.length) return
+  if (chain) {
+    toast.info(`首尾帧链模式：${targets.length} 个镜头按顺序串行生成，下一镜首帧取自上一镜末帧。`, 5000)
+    await mapPool(targets, 1, (shot) => generateOne(shot))
+    return
+  }
   await mapPool(targets, VIDEO_GEN_CONCURRENCY, (shot) => generateOne(shot))
 }
 
@@ -275,12 +340,34 @@ function next() {
       <div class="head-actions">
         <GradientButton type="ghost" @click="router.push('/images')">← 上一步</GradientButton>
         <GradientButton
+          v-if="fl2vaChain && !isDigitalHuman"
+          type="ghost"
+          icon="🖼"
+          :loading="drawingFrames"
+          :disabled="shotsWithoutFrames.length === 0"
+          @click="generateAllFrames"
+        >
+          {{
+            drawingFrames
+              ? `画帧中 ${shotsWithoutFrames.length} 镜`
+              : shotsWithoutFrames.length
+                ? `画首尾帧（${shotsWithoutFrames.length} 镜）`
+                : '首尾帧已齐'
+          }}
+        </GradientButton>
+        <GradientButton
           icon="✨"
           :loading="generating.size > 0"
           :disabled="shotsWithoutVideo.length === 0"
           @click="generateAll"
         >
-          {{ generating.size > 0 ? `生成中 ${generating.size}/${shotsWithoutVideo.length}` : '一键生成全部' }}
+          {{
+            generating.size > 0
+              ? `生成中 ${generating.size}/${shotsWithoutVideo.length}`
+              : fl2vaChain
+                ? '按顺序串行生成全部'
+                : '一键生成全部'
+          }}
         </GradientButton>
         <GradientButton icon="→" @click="next">下一步：剪辑</GradientButton>
       </div>
@@ -288,6 +375,17 @@ function next() {
 
     <GlassCard v-if="shotsWithoutStill.length > 0" padding="md" class="warn-card">
       ⚠️ 还有 {{ shotsWithoutStill.length }} 个分镜缺当前模型需要的参考图。H3 只需要人设和场景；万相需要四宫格关键帧。
+    </GlassCard>
+
+    <GlassCard v-if="fl2vaChain && !isDigitalHuman" padding="md" class="chain-card">
+      <div class="chain-row">
+        <span>
+          🔗 首尾帧链：每一镜先用本镜的人物和场景合成「起始帧 → 结束帧」两张图，再用这两张出视频。
+          画布上「首尾帧」那一组就是干这个的，也可以直接点右上角「画首尾帧」。画帧和出片都按镜号串行，
+          因为这一镜的起始帧要接着上一镜的结束帧 —— 并发会把衔接丢掉。凑不齐首尾帧的镜头会自动退回常规出片，不会卡住。
+        </span>
+        <button class="chain-off" @click="turnOffChain">切回自动模式</button>
+      </div>
     </GlassCard>
 
     <EmptyState
@@ -309,6 +407,11 @@ function next() {
           <div class="shot-title">{{ shot.title }}</div>
           <Tag v-if="shot.videoAssetId" type="success" size="sm">已完成</Tag>
           <Tag v-else-if="generating.has(shot.id)" type="warning" size="sm">生成中</Tag>
+          <Tag
+            v-else-if="fl2vaChain && isFirstShot(shot) && !shot.firstFrameAssetId && !shot.imageAssetId"
+            type="warning"
+            size="sm"
+          >无首帧·常规出片</Tag>
           <Tag v-else-if="shotH3Mode(shot) === 'fl2va' && !shot.lastFrameAssetId" type="error" size="sm">缺尾帧</Tag>
           <Tag
             v-else-if="shotH3Mode(shot) !== 'fl2va' && project.current && stillModeForShot(shot, project.current) === 'storyboard' && !shot.boardAssetId"
@@ -541,6 +644,39 @@ function next() {
   border-color: var(--color-warning);
   color: var(--color-warning);
   background: rgba(245, 158, 11, 0.1);
+}
+.chain-card {
+  margin-bottom: var(--space-4);
+  border-color: var(--color-info, #60a5fa);
+  color: var(--color-text-2);
+  background: rgba(96, 165, 250, 0.1);
+  line-height: 1.6;
+}
+
+.chain-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.chain-row span {
+  flex: 1;
+}
+
+.chain-off {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chain-off:hover {
+  background: var(--color-fill-hover, rgba(255, 255, 255, 0.06));
+  color: var(--color-text-1);
 }
 
 .grid {

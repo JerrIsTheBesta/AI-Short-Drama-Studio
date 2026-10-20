@@ -2,7 +2,7 @@ import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
-import { shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
+import { needsShotFrames, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
@@ -86,11 +86,13 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
 3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本。写剧本、改编、续写必须按 ai-short-film-screenwriter 的故事引擎、改编硬约束、节拍、AI 制作约束和逐场规则来；成稿前自检。必须含一句话故事、对抗引擎、完整梗概、人物小传（主角/对手/关键亲人，含欲望恐惧弧光）、环境与场景、每场场次任务、分场动作和对白；禁止口播/画面/时长四格表；禁止把传说压成高潮切片；禁止默片，相认/唤名/对峙/问答必须有出镜对白往来；不创建人物/场景/分镜节点。用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
+3c. 时长是硬预算，不是修辞：用户说了「约 40 秒」「40 秒短剧」「1 分钟」这类目标成片时长，seed_script 和 generate_play 的 text 必须原样带上这句时长（系统按它反推剧本场次、正文字数和分镜数量；丢了就会拆出二十几镜、成片几分钟）。用户要短片却没说时长，在 say 里问清目标时长再动手。
 4. 已有完整剧本时：
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
    - 用户明确说「重新写剧本」，或在讲一个和当前剧本无关的新故事（新题材、新人物、新画风）→ 必须先 seed_script（text=用户这几轮的故事原文，含画风时长题材人物），再 generate_play。禁止 continue_play，禁止拿旧剧本当草稿。
 5. 批量、耗时、不可逆的生成（补齐全部人设图 / 全部场景 / 全部关键帧 / 全部视频 / 全部配音）默认一次做一小批，做完在 say 里点明下一步，用户说「继续 / 全流程」再往下；其余所有操作——建节点、连线、删节点、改提示词、重命名、重跑单个节点、重排画布、体检——用户说一次就一次做完，不要分批磨。
 6. 普通创作不生成故事看板，用人设图和场景图画「这一镜正在发生的事件」关键帧，再出视频。AI 短剧才走故事看板。
+6b. 首尾帧这一站不能被跳过：只要画布上有「首尾帧」分组（项目开了首尾帧链，或某个镜头自己选了首尾帧模式），出视频前必须先给每个镜头画起始帧和结束帧（generate_all_frames 一次补齐，或按镜 generate_shot_frames），画完才 generate_video / generate_all_videos。顺序是：人设 → 场景 →（走首尾帧的镜头跳过关键帧/看板）→ 首尾帧 → 视频。禁止从场景锚点/关键帧直接跳到视频：没画帧，视频根本拿不到首尾帧，这个模式等于白开。画帧失败不要卡住流程，记一笔后照常出片。
 7. 分镜节点未验收时禁止生成故事看板或视频。用户说「确认通过」才 approve_play；说「继续」= 验收并做下一步。这条只管流水线动作，不拦手动添加节点、单个自由节点生成、改提示词。
 8. 一次最多 12 个 actions。能用工具完成的请求必须实际操作画布，不要只回复教程。先修改节点提示词，再按用户要求生成对应图片或视频；每批执行后依据新的资产状态验收，禁止无意义重复成功工具。新建自由节点时本批只 create，下一轮从最新画布取得真实 nodeId 后再 run_node，禁止臆造 ID。
 9. 画布不分模式：同一张画布既能跑剧本流水线（seed_script / generate_play / extract_cast / …），也能只操作单个生成节点（create_image_node / create_video_node / update_node / run_node）。按用户这句话选——说了剧本、分镜、人设、场景就走流水线；只说「画一张…」「做个 8 秒视频」「把这个节点改一下」就只做单个节点。单个节点的操作可以直接做完并生成。
@@ -114,6 +116,8 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "generate_all_scenes" }
 { "tool": "generate_all_boards" }
 { "tool": "generate_all_images" }
+{ "tool": "generate_shot_frames", "shotId": "shot_xxx" }
+{ "tool": "generate_all_frames" }
 { "tool": "generate_all_videos" }
 { "tool": "generate_all_audio" }
 { "tool": "sync_canvas" }
@@ -1179,6 +1183,9 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     !p.script?.playReady
   const playReady = Boolean(p.script?.playReady && p.script.content?.trim())
   const newStory = isNewStoryBrief(t, p)
+  // 首尾帧链模式：出视频前要先给每镜合成「起始帧 + 结束帧」两张图
+  // 判断口径与画布分组、流水线下一步共用 needsShotFrames，避免三边不一致
+  const chainFrames = needsShotFrames(p)
 
   if (newStory) {
     actions.push({ tool: 'seed_script', text: t })
@@ -1212,6 +1219,10 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
       const shot = p.shots[i] ?? p.shots.find((s) => s.index === i)
       if (!shot) continue
       if (askedVideo && !askedImage && !askedPanel) {
+        // 首尾帧链：先用这一镜的人物和场景画出起始帧和结束帧，再拿这两张出视频
+        if (chainFrames && !shot.firstFrameAssetId && !shot.lastFrameAssetId) {
+          actions.push({ tool: 'generate_shot_frames', shotId: shot.id })
+        }
         actions.push({ tool: 'generate_video', shotId: shot.id })
       } else if (askedAudio && !askedImage && !askedVideo && !askedPanel) {
         actions.push({ tool: 'generate_audio', shotId: shot.id })
@@ -1225,6 +1236,7 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
   } else {
     if (askedPanel) actions.push({ tool: 'generate_all_boards' })
     if (askedImage) actions.push({ tool: 'generate_all_images' })
+    if (chainFrames) actions.push({ tool: 'generate_all_frames' })
     if (askedVideo) actions.push({ tool: 'generate_all_videos' })
     if (askedAudio) actions.push({ tool: 'generate_all_audio' })
   }
@@ -1247,6 +1259,9 @@ function heuristicPlan(userText: string): { say: string; actions: any[] } {
     }
     if (shotsMissingStoryboard(p).length && !actions.some((a) => a.tool === 'generate_all_boards')) {
       actions.push({ tool: 'generate_all_boards' })
+    }
+    if (chainFrames && !actions.some((a) => a.tool === 'generate_all_frames')) {
+      actions.push({ tool: 'generate_all_frames' })
     }
     if (!actions.some((a) => a.tool === 'generate_all_videos')) {
       actions.push({ tool: 'generate_all_videos' })

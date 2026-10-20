@@ -78,6 +78,11 @@ export interface StoryboardInput {
   /** 原创电影章节：按场次/蒙太奇拆，不压成短视频口播表。 */
   workflowMode?: Script['workflowMode']
   /**
+   * 用户要的成片总时长（秒）。这是分镜数量的硬预算：
+   * 剧本和分镜都按它反推规模，避免「要 40 秒却拆出 20 镜」。
+   */
+  targetDurationSec?: number
+  /**
    * 断点续跑：按工作包序号给已完成的分镜结果，执行时直接跳过这些小组，不再调模型。
    * 数组须与 buildShotWorkBatches 对同一份剧本的切分一致（剧本文本没变时天然一致）。
    */
@@ -92,6 +97,36 @@ function isFilmChapterInput(input: Pick<StoryboardInput, 'workflowMode' | 'conte
 
 function shotDurationLimit(input: Pick<StoryboardInput, 'maxShotDuration'>): number {
   return Math.max(5, Math.min(30, Math.round(Number(input.maxShotDuration) || 15)))
+}
+
+/** 从用户原话里认「约 40 秒 / 40s / 时长 40 秒钟」这类目标总时长。认不出返回 0。 */
+export function extractTargetDurationSec(...texts: Array<string | undefined | null>): number {
+  for (const text of texts) {
+    const raw = String(text || '').trim()
+    if (!raw) continue
+    const patterns = [
+      /(?:目标|成片|总时长|全片|整片|视频|时长|控制在|大约|大概|约|总计)\s*(\d{1,4})\s*(?:秒|秒钟|s\b)/i,
+      /(\d{1,4})\s*(?:秒|秒钟|s\b)\s*(?:的|左右|以内)?\s*(?:短剧|短片|视频|成片|短电影)/i
+    ]
+    for (const re of patterns) {
+      const m = raw.match(re)
+      const n = m ? Number(m[1]) : 0
+      if (n >= 10 && n <= 1800) return n
+    }
+  }
+  return 0
+}
+
+/**
+ * 目标总时长 → 分镜数硬预算。
+ * 按「单镜平均 8 秒（不超过模型单镜上限）」折算，最少 1 镜。
+ * 40 秒 → 5 镜；60 秒 → 8 镜；120 秒 → 15 镜。
+ */
+export function shotBudgetFromDuration(targetSec: number | undefined, maxShotSec?: number): number {
+  const target = Number(targetSec) || 0
+  if (target < 10) return 0
+  const perShot = Math.max(5, Math.min(Number(maxShotSec) || 10, 8))
+  return Math.max(1, Math.ceil(target / perShot))
 }
 
 function isLongFormPlay(input: Pick<StoryboardInput, 'workflowMode' | 'content'>, play = ''): boolean {
@@ -118,6 +153,11 @@ export interface StoryboardShot {
   voiceover: string
   audioMode?: ShotAudioMode
   speakerHint?: string
+  /**
+   * 本镜说话角色的音色描述。从人物节点的 voicePrompt 自动绑定，
+   * 生成视频和后期配音时都会带上，保证同一角色全片一个声线。
+   */
+  speakerVoice?: string
   /** 时长（秒，5-10） */
   duration: number
   /** 镜头运动 */
@@ -449,11 +489,17 @@ async function repairStoryboardOnce(
     input.mode === 'extract'
       ? '输入已是完整剧本，只修提炼结果：不要改口播原意，不要另起故事。人物章每一个 ### 都必须建档——若只是对已有角色的称呼（如哥哥），把这个词写进该人物的 name/role/description；若人物表里确实有这个角色，必须单独建档。已故角色用遗物、画像或闪回入镜即可；活人对手必须有对峙或可见压力镜。每个已建档人物必须出现在至少一镜（本人、遗物、画像或可见压力）：subjectIds 挂上，visualPrompt / videoPrompt 写名字。禁止因为「这集没站在镜头正中」就把父亲、哥哥、对手从人物表删掉。禁止只做人物卡、分镜里却换成路人或「一个男人」。'
       : '每个出场人物都在 subjects 单独建档，不能合并成一个“主角”。'
+  const repairTargetSec =
+    Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
+  const repairShotCap = shotBudgetFromDuration(repairTargetSec, input.maxShotDuration)
+  const durationBlock = repairTargetSec
+    ? `\n【成片时长硬约束】用户要的是 ${repairTargetSec} 秒成片，全片镜头数不得超过 ${repairShotCap} 个。超了就把相邻、同地点、同组人物的镜头合并成长镜头（靠运镜与画内调度表达，不靠切镜），而不是删掉关键剧情；每镜 duration 可在 3–${shotDurationLimit(input)} 秒内调整，总和贴近 ${repairTargetSec} 秒。`
+    : ''
   const repair = await callLLM({
     messages: [
       {
         role: 'system',
-          content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。不新增用户没说的产品、人物、数字或事实；只补用户本次内容边界内已经出现或明确蕴含的事件过程，禁止续写边界之外的后果。\n${extractHint}\n${NARRATIVE_CONTINUITY_RULES}\n${SPEAKER_STAGING_RULES}\n如果问题指出重大事件被压扁或相邻镜头断层，可以拆分、插入或重排断层附近的镜头，补足本集边界内的可见过程与反应；只局部修相关段落，其他合格镜头保持原意。若用户指定停在悬念点，就停在那里，不得为了闭环继续讲下一步。每个新增镜头也必须写全 continuity，格式为“承接上一镜的明确末态 → 本镜可见变化 → 留给下一镜的明确末态”。\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按语义段落分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。不要机械地一镜只放一句：同一人物、同一表达意图的连续 2-4 个短句优先合在一个 7-10 秒镜头里，短促反应或转场才保留一句；总字数仍不得超过 duration*4。voiceover 保留“人物名：台词”便于识别说话人，真正送入 H3 时会自动去掉人物名前缀。\n说话镜头先判断动作、空间关系、环境信息和情绪节奏，再选景别。表情是叙事重点且不需交代环境时可以收近；需要保留递物、争执、问答、人物距离、环境压力或集体反应时，应使用合适的中景、双人或多人同框。特写只是可选倾向，禁止把每个说话镜头机械切成特写；但要写清谁在说、其他人如何反应，不能所有人同时张嘴。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${videoPerformanceSpec(getVideoPromptStyle())}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
+          content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。${durationBlock}不新增用户没说的产品、人物、数字或事实；只补用户本次内容边界内已经出现或明确蕴含的事件过程，禁止续写边界之外的后果。\n${extractHint}\n${NARRATIVE_CONTINUITY_RULES}\n${SPEAKER_STAGING_RULES}\n如果问题指出重大事件被压扁或相邻镜头断层，可以拆分、插入或重排断层附近的镜头，补足本集边界内的可见过程与反应；只局部修相关段落，其他合格镜头保持原意。若用户指定停在悬念点，就停在那里，不得为了闭环继续讲下一步。每个新增镜头也必须写全 continuity，格式为“承接上一镜的明确末态 → 本镜可见变化 → 留给下一镜的明确末态”。\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按语义段落分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。不要机械地一镜只放一句：同一人物、同一表达意图的连续 2-4 个短句优先合在一个 7-10 秒镜头里，短促反应或转场才保留一句；总字数仍不得超过 duration*4。voiceover 保留“人物名：台词”便于识别说话人，真正送入 H3 时会自动去掉人物名前缀。\n说话镜头先判断动作、空间关系、环境信息和情绪节奏，再选景别。表情是叙事重点且不需交代环境时可以收近；需要保留递物、争执、问答、人物距离、环境压力或集体反应时，应使用合适的中景、双人或多人同框。特写只是可选倾向，禁止把每个说话镜头机械切成特写；但要写清谁在说、其他人如何反应，不能所有人同时张嘴。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${videoPerformanceSpec(getVideoPromptStyle())}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
       },
       {
         role: 'user',
@@ -570,8 +616,12 @@ function splitLongStoryBeat(text: string, maxChars: number): string[] {
 /**
  * 先在本地按场次和剧情段落切工作包，避免把整份剧本交给一个模型。
  * 每个工作包只允许产出 1–3 镜；并发数由调用方限制为 3。
+ *
+ * targetBatches：期望的工作包总数。给了这个值就不再按固定字数切，
+ * 而是把切分口径放宽到「正文总长 / 期望包数」，让包数收敛到目标。
+ * 不传时保持原来的 1100 字 / 4 段口径。
  */
-function buildShotWorkBatches(play: string): ShotWorkBatch[] {
+function buildShotWorkBatches(play: string, targetBatches?: number): ShotWorkBatch[] {
   const normalized = String(play || '').replace(/\r\n?/g, '\n').trim()
   if (!normalized) return []
   const headingRe = /^#{1,4}\s+(.+)$/gm
@@ -596,12 +646,45 @@ function buildShotWorkBatches(play: string): ShotWorkBatch[] {
       text: normalized.slice(heading.bodyStart, heading.end).trim()
     }))
 
-  const sections = scenes.length ? scenes : [{ title: '完整剧情', text: normalized }]
+  let sections = scenes.length ? scenes : [{ title: '完整剧情', text: normalized }]
+
+  // 场次比期望包数还多时，先把相邻场次并成一组——工作包数永远不会少于场次数，
+  // 不合并的话长剧本照样拆出十几个小组。
+  const wanted0 = Math.floor(Number(targetBatches) || 0)
+  if (wanted0 > 0 && sections.length > wanted0) {
+    const per = Math.ceil(sections.length / wanted0)
+    const merged: Array<{ title: string; text: string }> = []
+    for (let i = 0; i < sections.length; i += per) {
+      const chunk = sections.slice(i, i + per)
+      merged.push({
+        title: chunk.length > 1 ? `${chunk[0].title} 等 ${chunk.length} 场` : chunk[0].title,
+        text: chunk.map((s) => s.text).join('\n\n')
+      })
+    }
+    sections = merged
+  }
+
+  // 切分口径：默认 1100 字 / 4 段；给了期望包数就按正文总长摊平，使包数收敛到目标。
+  let maxChars = SHOT_BATCH_MAX_CHARS
+  let maxParagraphs = SHOT_BATCH_MAX_PARAGRAPHS
+  const wanted = Math.floor(Number(targetBatches) || 0)
+  if (wanted > 0) {
+    const bodyLen = sections.reduce((sum, s) => sum + s.text.length, 0)
+    const roughChars = Math.ceil(bodyLen / wanted)
+    if (roughChars > maxChars) maxChars = Math.ceil(roughChars * 1.12)
+    const totalParas = sections.reduce(
+      (sum, s) => sum + s.text.split(/\n\s*\n+/).filter((p) => p.trim()).length,
+      0
+    )
+    const roughParas = Math.ceil(totalParas / wanted)
+    if (roughParas > maxParagraphs) maxParagraphs = roughParas + 1
+  }
+
   const drafts: Array<{ label: string; excerpt: string }> = []
   for (const section of sections) {
     const paragraphs = section.text
       .split(/\n\s*\n+/)
-      .flatMap((paragraph) => splitLongStoryBeat(paragraph, SHOT_BATCH_MAX_CHARS))
+      .flatMap((paragraph) => splitLongStoryBeat(paragraph, maxChars))
       .filter(Boolean)
     let current = ''
     let paragraphCount = 0
@@ -617,10 +700,7 @@ function buildShotWorkBatches(play: string): ShotWorkBatch[] {
     }
     for (const paragraph of paragraphs.length ? paragraphs : [section.text]) {
       const next = current ? `${current}\n\n${paragraph}` : paragraph
-      if (
-        current &&
-        (next.length > SHOT_BATCH_MAX_CHARS || paragraphCount >= SHOT_BATCH_MAX_PARAGRAPHS)
-      ) {
+      if (current && (next.length > maxChars || paragraphCount >= maxParagraphs)) {
         flush()
       }
       current = current ? `${current}\n\n${paragraph}` : paragraph
@@ -644,8 +724,21 @@ async function generateShotWorkBatch(
   subjectNames: string[],
   sceneNames: string[],
   directives: string,
-  retry = false
+  retry = false,
+  /** 本工作包的镜数配额（全片预算分摊后）；不给则退回 1–3 镜。 */
+  shotBudget?: number,
+  /** 全片镜数预算，用于向模型交代「这就是总数，不许超」。 */
+  totalShotBudget?: number,
+  targetDurationSec?: number
 ): Promise<{ shots: Record<string, unknown>[]; model?: string }> {
+  const limit = Math.max(
+    1,
+    Math.min(SHOTS_PER_BATCH, Math.round(Number(shotBudget) || SHOTS_PER_BATCH))
+  )
+  const budgetLine =
+    totalShotBudget && totalShotBudget > 0
+      ? `\n【镜数硬上限】全片成片目标 ${targetDurationSec || '?'} 秒，只批 ${totalShotBudget} 个镜头；本工作包最多 ${limit} 镜，绝对不许超。先把本段所有动作与对白压缩进这 ${limit} 个镜头：同一地点、同一组人物的连续动作合并成一个长镜头，靠运镜和画内调度表达，不要靠切镜。`
+      : ''
   const parseBatch = (content: string): Record<string, unknown>[] => {
     try {
       const raw = parseJsonRobust(content)
@@ -656,14 +749,14 @@ async function generateShotWorkBatch(
           : []
       if (rows.length) {
         return rows
-          .slice(0, SHOTS_PER_BATCH)
+          .slice(0, limit)
           .filter((item: unknown) => item && typeof item === 'object') as Record<string, unknown>[]
       }
     } catch {
       /* 兼容普通聊天模型返回的自然语言分镜表。 */
     }
     return parseOutlineText(content)
-      .slice(0, SHOTS_PER_BATCH)
+      .slice(0, limit)
       .map((outline) => outlineToRawShot(outline))
   }
   const ask = async () =>
@@ -671,20 +764,20 @@ async function generateShotWorkBatch(
       messages: [
         {
           role: 'system',
-          content: `你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${SHOTS_PER_BATCH} 个真正能拍的连续镜头，绝对不得超过 ${SHOTS_PER_BATCH} 个。
+          content: `你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
 忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
 visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频时间轴，从0秒到本镜结束按实际拍点分2–5段。每段写清谁行动、谁说话、其他人如何占位和反应、表情变化以及一个有动机的运镜，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要机械等分时间。
 每镜要写清景别和人物空间关系。人物看场景内的人或物，不看镜头。
-优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字、从0秒覆盖到结束的2-5段电影化时间轴","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${SHOTS_PER_BATCH} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
+优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字、从0秒覆盖到结束的2-5段电影化时间轴","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${limit} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
         },
         {
           role: 'user',
           content: `工作包：${batch.label}
 已有人物：${subjectNames.join('、') || '（按原文识别）'}
 已有地点：${sceneNames.join('、') || '（按原文识别）'}
-当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。按完整动作与对白决定时长，可在 3–${shotDurationLimit(input)} 秒调整；同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头，不要机械拆成两个 5 秒镜头。
+当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。按完整动作与对白决定时长，可在 3–${shotDurationLimit(input)} 秒调整；同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头，不要机械拆成两个 5 秒镜头。${budgetLine}
 ${directives ? `\n全片约束（只用于保真）：\n${directives}\n` : ''}
 ${batch.previousHint ? `上一工作包末尾（只用于承接，不要重复拍）：\n${batch.previousHint}\n` : ''}
 本工作包剧本原文：
@@ -1201,7 +1294,8 @@ async function realStoryboard(
       }
     }
 
-    const subjectSystem = `你是人物设定提炼子智能体。只从完整剧本「## 人物」提炼每一个独立小节，以及会实际入镜、入遗物/画像、或形成可见压力的人物、动物、产品或关键主体，不写场景，不拆分镜，不提炼资产图或道具清单。已故父亲、未到场的对手只要人物章有 ### 就必须建档，不要因为本集没站在镜头正中而删掉。忠实保留剧本称呼；有名字又有身份称呼时，name 用最常在对白和场记里出现的短名，role 写全身份和别称，便于另一智能体用名字或身份绑定。人物外貌必须具体到年龄、脸型、发型、体型、服装、鞋、配饰和稳定辨识点，不允许只写“主角”。description 只锁身份外貌，不要写他所在的地点或天气：后续角色设计图一律画在无缝纯白背景的四视图上。stateVariants 写清本章内会变的东西：衣服干湿、污渍、饥饿、跛行、手里的食物；没有变化就写单一状态。${productNote}\n只输出 JSON：{"subjects":[{"name":"短名","kind":"person|animal|other","description":"具体外貌锁定，不含场景","role":"身份、剧情作用和别称","stateVariants":"本集内状态变化，没有写单一状态","fromReference":false}]}。输出前自行检查：人物章每一个 ### 都单独建档；有台词、有动作或被镜头看见的人不能并成路人。`
+    const subjectSystem = `你是人物设定提炼子智能体。只从完整剧本「## 人物」提炼每一个独立小节，以及会实际入镜、入遗物/画像、或形成可见压力的人物、动物、产品或关键主体，不写场景，不拆分镜，不提炼资产图或道具清单。已故父亲、未到场的对手只要人物章有 ### 就必须建档，不要因为本集没站在镜头正中而删掉。忠实保留剧本称呼；有名字又有身份称呼时，name 用最常在对白和场记里出现的短名，role 写全身份和别称，便于另一智能体用名字或身份绑定。人物外貌必须具体到年龄、脸型、发型、体型、服装、鞋、配饰和稳定辨识点，不允许只写“主角”。description 只锁身份外貌，不要写他所在的地点或天气：后续角色设计图一律画在无缝纯白背景的四视图上。stateVariants 写清本章内会变的东西：衣服干湿、污渍、饥饿、跛行、手里的食物；没有变化就写单一状态。${productNote}
+voicePrompt 是这个角色开口说话时的音色与表达，必须自动写、不许空着：kind 为 person 的角色都要写，按「年龄性别 + 音色质地（沙哑/清亮/温吞/鼻音重等）+ 语速与力度 + 情绪基调 + 身份口音或口头习惯」写成一句中文，25–60 字，能直接当配音导演给演员的指令。同一个角色全片只写一条，不要每场换声线；动物和产品（kind 为 animal/other）写空字符串。\n只输出 JSON：{"subjects":[{"name":"短名","kind":"person|animal|other","description":"具体外貌锁定，不含场景","role":"身份、剧情作用和别称","stateVariants":"本集内状态变化，没有写单一状态","voicePrompt":"说话时的音色与表达，非人物写空","fromReference":false}]}。输出前自行检查：人物章每一个 ### 都单独建档；有台词、有动作或被镜头看见的人不能并成路人；每个 person 角色都有 voicePrompt。`
 
     const sceneSystem = `你是场景与视觉设定提炼子智能体。只提炼本集会拍到的**地点**，不写人物，不拆分镜。
 地点来源优先：剧本「## 环境与场景」下的地点；其次场记行「内景｜地点｜天气」或「外景｜地点｜」。同一地点只建一条，不要按「场景一、场景二」每场复制一条。
@@ -1304,14 +1398,30 @@ ${extractPlayForSceneStage(play)}`
     const sceneNames = extractSceneRows(scenePart.raw)
       .map((item: { name?: unknown }) => String(item?.name || '').trim())
       .filter(Boolean)
-    const workBatches = buildShotWorkBatches(play)
+    // 目标总时长 → 全片镜数预算 → 工作包数。没有目标时长时退回按字数切。
+    const targetDurationSec =
+      Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
+    const totalShotBudget = shotBudgetFromDuration(targetDurationSec, shotDurationLimit(input))
+    const targetBatches = totalShotBudget ? Math.max(1, Math.ceil(totalShotBudget / SHOTS_PER_BATCH)) : 0
+    const workBatches = buildShotWorkBatches(play, targetBatches)
     if (!workBatches.length) throw new Error('剧本正文为空，无法拆分镜')
     onProgress?.(
-      `已拆成 ${workBatches.length} 个剧情工作包；每包最多 ${SHOTS_PER_BATCH} 镜，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
+      totalShotBudget
+        ? `目标成片 ${targetDurationSec} 秒 → 预算 ${totalShotBudget} 镜 → 拆成 ${workBatches.length} 个工作包，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
+        : `已拆成 ${workBatches.length} 个剧情工作包；每包最多 ${SHOTS_PER_BATCH} 镜，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
     )
     const directives = extractPlayDirectives(play)
     const batchShots: Array<Record<string, unknown>[] | undefined> = new Array(workBatches.length)
     const batchModels: Array<string | undefined> = new Array(workBatches.length)
+    // 按「剩余预算 / 剩余包数」给每个工作包配额，保证全片不超总镜数。
+    const perBatchBudget = (index: number) => {
+      if (!totalShotBudget) return undefined
+      const rest = workBatches.length - index
+      if (rest <= 0) return 1
+      const used = batchShots.slice(0, index).reduce((sum, rows) => sum + (rows?.length || 0), 0)
+      const remaining = Math.max(1, totalShotBudget - used)
+      return Math.max(1, Math.min(SHOTS_PER_BATCH, Math.ceil(remaining / rest)))
+    }
     const failed: Array<{ index: number; label: string; error: string }> = []
     let completed = 0
     let persistedPrefix = 0
@@ -1372,7 +1482,11 @@ ${extractPlayForSceneStage(play)}`
             batch,
             subjectNames,
             sceneNames,
-            directives
+            directives,
+            false,
+            perBatchBudget(index),
+            totalShotBudget || undefined,
+            targetDurationSec || undefined
           )
           await landFinishedBatch(index, result)
         } catch (error) {
@@ -1397,16 +1511,19 @@ ${extractPlayForSceneStage(play)}`
         throwIfAborted(input.signal)
         const batch = workBatches[item.index]
         try {
-          const result = await generateShotWorkBatch(
-            input,
-            parallelModel,
-            batch,
-            subjectNames,
-            sceneNames,
-            directives,
-            true
-          )
-          await landFinishedBatch(item.index, result)
+        const result = await generateShotWorkBatch(
+          input,
+          parallelModel,
+          batch,
+          subjectNames,
+          sceneNames,
+          directives,
+          true,
+          perBatchBudget(item.index),
+          totalShotBudget || undefined,
+          targetDurationSec || undefined
+        )
+        await landFinishedBatch(item.index, result)
         } catch (error) {
           if (isAbortError(error) && !isTimeoutAbort(error)) throw error
           failed.push({
@@ -1421,6 +1538,13 @@ ${extractPlayForSceneStage(play)}`
     }
 
     let rawShots = batchShots.flatMap((rows) => rows || [])
+    // 兜底：模型超发时按预算截断，宁可少一镜也不让成片时长失控。
+    if (totalShotBudget && rawShots.length > totalShotBudget) {
+      onProgress?.(
+        `⚠ 模型给出 ${rawShots.length} 镜，超出 ${targetDurationSec} 秒的 ${totalShotBudget} 镜预算，按剧本顺序保留前 ${totalShotBudget} 镜`
+      )
+      rawShots = rawShots.slice(0, totalShotBudget)
+    }
     if (!rawShots.length) {
       throw new Error(`所有分镜小组均失败。人物和场景已保留；请重试拆分镜。${failed[0]?.error ? `首个错误：${failed[0].error}` : ''}`)
     }
@@ -1497,8 +1621,15 @@ ${extractPlayForSceneStage(play)}`
     return { result: parsed, model: usedModel }
   }
 
+  const budgetSec =
+    Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
+  const budgetShots = shotBudgetFromDuration(budgetSec, input.maxShotDuration)
+  const budgetLine = budgetShots
+    ? `\n【镜数硬上限】用户要的是 ${budgetSec} 秒成片，全片只批 ${budgetShots} 个镜头，绝对不许超。同一地点、同一组人物的连续动作合并成长镜头，靠运镜和画内调度表达，不靠切镜。`
+    : ''
+
   const userText = extractMode
-    ? `下面是已经写好的完整剧本。请**忠实提炼**成画布节点 JSON（subjects / scenes / shots），不要重写故事、不要另起炉灶。
+    ? `下面是已经写好的完整剧本。请**忠实提炼**成画布节点 JSON（subjects / scenes / shots），不要重写故事、不要另起炉灶。${budgetLine}
 
 完整剧本：
 """
@@ -1514,7 +1645,7 @@ ${stylePriority}
 ${productNote}
 
 要求：人物/场景/分场与剧本一一对应；剧本对白原词必须进入对应镜头 voiceover（写成「人物名：台词」），禁止改成成年旁白，禁止清空成默片；同一人物同一意图的连续 2-4 个短句尽量合在一镜，不要机械拆成“一镜一句”；visualPrompt 按剧本「画面」写成静帧可画描述；videoPrompt 从0秒到镜头结束按剧情拍点分2–5段，逐段写谁从什么状态开始、看见什么、做什么、谁说原词、其他人怎样占位和反应、情绪怎样变化、镜头怎样运动并落下。不要机械等分，不要套「禁止呆脸空眼」这种话。说话时是否收近服从画面感、动作、空间关系与情绪节奏：需要强调表情时可用近景/特写，需要保留关系或环境时继续用中景、双人或多人同框；不要把每个说话镜头机械切成特写。禁止抄 visualPrompt。直接输出 JSON。`
-    : `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。
+    : `按编剧手册把这段文案拆成能拍的分镜。口播要能念，画面用中文白话写给摄像，别写英文提示词沙拉。${budgetLine}
 
 事实保真：不得新增原文没有的价格、参数、功效、人物关系、品牌承诺或剧情结论。原文含数字、专有名词时必须原样保留。信息不够就用画面承接，不要编事实填空。
 
@@ -1578,6 +1709,7 @@ ${videoPerformanceSpec(getVideoPromptStyle())}
       "description": "<外貌锁定，写成能去夜市买同款：年龄、发型、衣服、鞋、疤或习惯动作；不要写地点天气，角色设计图是纯白背景四视图>",
       "role": "<这人在片里干什么>",
       "stateVariants": "<会不会换衣服；不会就写单一状态>",
+      "voicePrompt": "<这人开口说话时的音色与表达：年龄性别、音色质地、语速力度、情绪基调、口音或口头习惯；25-60 字中文，能当配音导演指令；animal/other 写空字符串>",
       "props": "<身上穿戴和随身物：包、证件、平板、鞋、帽子等，没有写无>",
       "fromReference": false
     }
@@ -1678,6 +1810,20 @@ function asKind(v: unknown): Subject['kind'] {
   return v === 'animal' || v === 'other' || v === 'person' ? v : 'person'
 }
 
+/**
+ * 人物音色描述归一化。非人物一律清空；
+ * 人物漏写时补一条通用兜底，保证「每个会说话的角色都有声线」，不会每镜一个声音。
+ */
+function normalizeVoicePrompt(v: unknown, kind: Subject['kind']): string | undefined {
+  if (kind !== 'person') return undefined
+  const text = String(v || '').trim()
+  return text || FALLBACK_VOICE_PROMPT
+}
+
+/** 通用兜底声线：模型漏写 voicePrompt 时用，避免同一角色每镜声音漂移。 */
+export const FALLBACK_VOICE_PROMPT =
+  '自然口语的中文对白声线，语速中等、气息平稳，情绪贴合本场剧情，不要播音腔'
+
 function spokenSentenceCount(text: string): number {
   const body = (text || '').replace(/^[^：:\n]{1,12}[：:]\s*/, '').trim()
   if (!body) return 0
@@ -1696,13 +1842,67 @@ function voiceoverSpeakerLabels(text: string): string[] {
   return labels
 }
 
+/** 口播里的「名字：台词」标签 → 角色卡。名字对不上再退回包含匹配。 */
+export function matchSpeakerSubject(
+  label: string,
+  subjects: Array<{ id: string; name: string; voicePrompt?: string }>
+): { id: string; name: string; voicePrompt?: string } | undefined {
+  const key = String(label || '').trim()
+  if (!key) return undefined
+  const exact = subjects.find((s) => s.name.trim() === key)
+  if (exact) return exact
+  return subjects.find((s) => {
+    const name = s.name.trim()
+    return name && (key.includes(name) || name.includes(key))
+  })
+}
+
+/**
+ * 把人物节点的音色描述绑到分镜上。
+ * 每镜按口播里的说话人找到角色，把 Subject.voicePrompt 写进 Shot.speakerVoice，
+ * 生成视频和后期配音都读这一份，保证同一角色全片一个声线。
+ * 返回成功绑定的镜数。
+ */
+export function bindShotVoiceHints<
+  T extends { voiceover?: string; speakerVoice?: string }
+>(
+  shots: T[],
+  subjects: Array<{ id: string; name: string; voicePrompt?: string }>
+): number {
+  if (!shots.length || !subjects.length) return 0
+  let bound = 0
+  for (const shot of shots) {
+    const voiceover = String(shot.voiceover || '').trim()
+    // 没有口播的镜头不绑声线：空镜不需要说话人。
+    if (!voiceover) continue
+    const labels = voiceoverSpeakerLabels(voiceover)
+    const picked: string[] = []
+    for (const label of labels) {
+      const subject = matchSpeakerSubject(label, subjects)
+      const voice = subject?.voicePrompt?.trim()
+      if (voice && !picked.includes(voice)) picked.push(voice)
+    }
+    if (picked.length) {
+      shot.speakerVoice = picked.join('；')
+      bound++
+    }
+  }
+  return bound
+}
+
 export function storyboardQualityIssues(
   result: StoryboardResult,
-  input: Pick<StoryboardInput, 'content' | 'topic'>
+  input: Pick<StoryboardInput, 'content' | 'topic' | 'targetDurationSec'>
 ): string[] {
   const issues: string[] = []
   if (!result.shots.length) issues.push('严重：没有生成任何分镜')
-  if (result.shots.length > 12) issues.push('分镜超过 12 个，短视频节奏失控')
+  const targetSec = Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
+  const shotCap = shotBudgetFromDuration(targetSec) || 12
+  if (result.shots.length > shotCap) {
+    issues.push(
+      `分镜 ${result.shots.length} 个，超出${targetSec ? `「${targetSec} 秒」对应的 ${shotCap}` : shotCap}镜预算，短视频节奏失控`
+    )
+  }
   if (
     result.subjects?.length === 1 &&
     result.subjects[0]?.name === '主角' &&
@@ -1729,8 +1929,7 @@ export function storyboardQualityIssues(
   ) {
     issues.push('严重：分镜标题缺失或重复；每镜必须使用不同的内容标题，不能统一写“镜头”')
   }
-  const targetMatch = `${input.topic}\n${input.content}`.match(/(?:约|大约|控制在)?\s*(\d{1,3})\s*秒/)
-  const targetDuration = targetMatch ? Number(targetMatch[1]) : 0
+  const targetDuration = targetSec
   const totalDuration = result.shots.reduce((sum, shot) => sum + shot.duration, 0)
   if (targetDuration >= 10 && Math.abs(totalDuration - targetDuration) > Math.max(5, targetDuration * 0.25)) {
     issues.push(`总时长 ${totalDuration} 秒，与用户目标 ${targetDuration} 秒偏差过大`)
@@ -2002,6 +2201,7 @@ export function normalizeStoryboard(
     description: String(s?.description || '').trim(),
     role: optStr(s?.role),
     stateVariants: optStr(s?.stateVariants),
+    voicePrompt: normalizeVoicePrompt(s?.voicePrompt, asKind(s?.kind)),
     fromReference: Boolean(s?.fromReference)
   }))
 
@@ -2140,6 +2340,7 @@ export function normalizeStoryboard(
       voiceover,
       audioMode,
       speakerHint: optStr(s?.speakerHint),
+      speakerVoice: optStr(s?.speakerVoice),
       duration: clampShotDuration(s?.duration, voiceover, i, options.maxShotDuration),
       cameraMovement: normalizeCameraMovement(s?.cameraMovement),
       subjectIds,
@@ -2154,6 +2355,9 @@ export function normalizeStoryboard(
   })
 
   const boundShots = bindCastIntoShots(shots, subjects)
+  // 角色音色绑到分镜：每镜按口播说话人取人物卡的 voicePrompt，
+  // 生成视频与后期配音都读这份，保证同一角色全片一个声线。
+  bindShotVoiceHints(boundShots, subjects)
 
   const look = lookFromTexts(style, options.topic, options.content, options.keywords)
   const styleCn = styleLabel(look.matched ?? style)
@@ -2331,6 +2535,7 @@ export function storyboardToShots(
     voiceover: cleanShotVoiceover(s.voiceover),
     audioMode: s.audioMode,
     speakerHint: s.speakerHint,
+    speakerVoice: s.speakerVoice,
     duration: s.duration,
     cameraMovement: s.cameraMovement,
     subjectIds: s.subjectIds,
@@ -2664,6 +2869,19 @@ const SCREENWRITER_LANDING = `写故事时必须遵循「AI 短剧与 AI 短电�
 分场标题仍用「## 场景N｜标题」和「内景或外景｜地点｜天气时辰」，对白用「**人物名：**」加原词。场次内部按编剧手册写目标/阻力/结果、现在时可见动作和克制镜头，不要改成无法提炼的格式。
 硬性禁止：把传说/IP 压成两人高潮切片；把「控制角色数量」理解成删除对手和关键亲人；用「本片从某一帧开始」代替完整梗概；把短剧/短电影写成默片或把前情塞进成年旁白。`
 
+/**
+ * 目标成片时长 → 剧本规模约束。
+ * 这是控制分镜数量的最上游闸门：剧本写多长，后面就拆多少个镜。
+ */
+function playScaleBrief(targetSec: number | undefined): string {
+  const target = Number(targetSec) || 0
+  if (target < 10) return ''
+  const scenes = Math.max(2, Math.min(6, Math.round(target / 15)))
+  const chars = Math.max(400, Math.round(target * 18))
+  const lines = Math.max(4, Math.round(target / 5))
+  return `目标成片时长：${target} 秒（硬约束，必须照它定规模）。按 ${target} 秒反推：分场不超过 ${scenes} 场；分场正文（不含人物小传与环境清单）控制在 ${chars} 字以内；对白总量控制在 ${lines} 句以内。宁可写短、写透，也不要铺场面——多写一场，后面分镜就超预算、成片就拖长。`
+}
+
 async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {
   const directorPlaybook = getSkillBody('storyboard-director')
   const screenwriterPlaybook = getSkillBody('ai-short-film-screenwriter')
@@ -2677,6 +2895,9 @@ async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayD
   const continueMode = input.playMode === 'continue'
   const existingPlay = continueMode ? (input.content || '').trim() : ''
   const hint = (input.continueHint || '').trim()
+  const targetSec =
+    Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content, hint)
+  const scaleBrief = playScaleBrief(targetSec)
 
   const messages: LLMMessage[] = continueMode
     ? [
@@ -2731,7 +2952,7 @@ ${hint || '顺着已经发生的事再写 2–3 场，把故事往下推，不�
 """
 ${existingPlay || '（空）'}
 """
-比例：${input.aspectRatio}；单场节奏参考约 ${input.shotDuration} 秒。`
+比例：${input.aspectRatio}；单场节奏参考约 ${input.shotDuration} 秒。${scaleBrief ? `\n${scaleBrief}\n续写后全片仍要落在上述时长预算内，不要因为续写而把规模撑大。` : ''}`
         }
       ]
     : [
@@ -2746,7 +2967,7 @@ ${directorPlaybook}
 ${NARRATIVE_CONTINUITY_RULES}
 ${SPEAKER_STAGING_RULES}
 
-你这一步**只写完整剧本**，不要输出 subjects/scenes/shots JSON，也不要写英文 videoPrompt。
+你这一步**只写完整剧本**，不要输出 subjects/scenes/shots JSON，也不要写英文 videoPrompt。用户给定目标成片时长时，它是硬约束：先按时长定场次、正文长度和对白句数，再写故事，不要先写长再指望后面砍。
 目标：一份能直接给人读的 Markdown 剧本，方便用户改字；下一轮才会从剧本提炼画布节点。
 传说/IP/完整短片必须写全对抗引擎与关键人物，禁止压成两人高潮切片。有人物交流的场必须有出镜对白，禁止默片，禁止用成年旁白复述前情。
 
@@ -2781,7 +3002,7 @@ ${input.topic || '（未填）'}
 ${input.content?.trim() || '（没写正文）'}
 """
 ${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
-比例：${input.aspectRatio}；建议时长按内容来，单场不必强行 ${input.shotDuration} 秒。`
+比例：${input.aspectRatio}。${scaleBrief ? `\n${scaleBrief}` : `建议时长按内容来，单场不必强行 ${input.shotDuration} 秒。`}`
         }
       ]
 

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore, useToastStore } from '@/stores'
-import { runCanvasNode, optimizeShotVideoPrompt } from '@/services/canvas/runner'
+import { runCanvasNode, optimizeShotVideoPrompt, regenerateShotFrame, grabVideoLastFrameNode } from '@/services/canvas/runner'
 import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { cssAspectRatio } from '@/services/canvas/layout'
@@ -15,6 +15,7 @@ import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
+import ParamSelect from '@/components/common/ParamSelect.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
@@ -24,8 +25,8 @@ import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
-import { fillEmptyGeneratePrompt } from '@/utils/nodePrompt'
-import { friendlyAiError } from '@/services/ai/abort'
+import { fillEmptyGeneratePrompt, shotFrameSendPrompt } from '@/utils/nodePrompt'
+import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
 import {
   normalizeH3GenMode,
@@ -234,6 +235,7 @@ const kindLabel = computed(() => {
   if (type.value === 'scene') return '锚点图'
   if (type.value === 'shotBoard') return '看板'
   if (type.value === 'shotImage') return videoRequiresStoryboard(project.current) ? '配图' : '四宫格'
+  if (type.value === 'shotFrames') return '首尾帧'
   if (type.value === 'shotVideo') return '视频'
   if (type.value === 'audio') return '口播'
   if (type.value === 'export') return '合成'
@@ -251,6 +253,8 @@ const assetId = computed(() => {
   if (!shot.value) return undefined
   if (type.value === 'shotBoard') return shot.value.boardAssetId
   if (type.value === 'shotImage') return shot.value.imageAssetId
+  // 首尾帧节点有两张产出，单图预览取起始帧
+  if (type.value === 'shotFrames') return shot.value.firstFrameAssetId || shot.value.lastFrameAssetId
   if (type.value === 'shotVideo') return shot.value.videoAssetId
   if (type.value === 'audio') return shot.value.audioAssetId
   return undefined
@@ -266,7 +270,12 @@ const mediaAspect = computed(() => {
 
 const status = computed(() => nodeMeta.value?.status ?? 'idle')
 const generating = computed(() => isNodeRunning(props.id))
-const hasAsset = computed(() => Boolean(assetId.value))
+// 首尾帧要两张都画出来才算完成，只有起始帧时节点仍显示未生成
+const hasAsset = computed(() =>
+  type.value === 'shotFrames'
+    ? Boolean(shot.value?.firstFrameAssetId && shot.value?.lastFrameAssetId)
+    : Boolean(assetId.value)
+)
 const gateBlocked = computed(
   () =>
     type.value !== 'script' &&
@@ -276,6 +285,7 @@ const gateBlocked = computed(
 )
 
 const isVideoNode = computed(() => type.value === 'shotVideo' || type.value === 'final')
+const isFrameNode = computed(() => type.value === 'shotFrames')
 const isImageNode = computed(
   () =>
     type.value === 'shotImage' ||
@@ -333,12 +343,28 @@ const showPrompt = computed(
   () =>
     type.value === 'shotImage' ||
     type.value === 'shotBoard' ||
+    type.value === 'shotFrames' ||
     type.value === 'shotVideo' ||
     type.value === 'subject' ||
     type.value === 'sceneProps' ||
     type.value === 'scene' ||
     type.value === 'audio'
 )
+
+/** 首尾帧的两张图各有一个 URL，节点上并排显示 */
+const frameUrls = ref({ start: '', end: '' })
+async function loadFrames() {
+  const s = shot.value
+  if (!s) {
+    frameUrls.value = { start: '', end: '' }
+    return
+  }
+  const [a, b] = await Promise.all([
+    s.firstFrameAssetId ? assets.getUrl(s.firstFrameAssetId) : Promise.resolve(undefined),
+    s.lastFrameAssetId ? assets.getUrl(s.lastFrameAssetId) : Promise.resolve(undefined)
+  ])
+  frameUrls.value = { start: a || '', end: b || '' }
+}
 
 const extraRefIds = computed({
   get(): ID[] {
@@ -413,6 +439,7 @@ const genLabel = computed(() => {
   if (type.value === 'shotImage') {
     return again ? '重新生成' : videoRequiresStoryboard(project.current) ? '生成配图' : '生成四宫格'
   }
+  if (type.value === 'shotFrames') return again ? '重画首尾帧' : '画首尾帧'
   if (type.value === 'shotVideo') return again ? '重新生成' : '生成视频'
   if (type.value === 'audio') {
     if (!shot.value || !needsExternalTts(shot.value, project.current)) return ''
@@ -427,6 +454,13 @@ const genLabel = computed(() => {
 const { findNode, removeSelectedNodes } = useVueFlow()
 
 watch(assetId, () => loadMedia(), { immediate: true })
+watch(
+  () => [shot.value?.firstFrameAssetId, shot.value?.lastFrameAssetId],
+  () => {
+    if (type.value === 'shotFrames') void loadFrames()
+  },
+  { immediate: true }
+)
 watch(
   // 必须把每一项作为独立 source。若用 getter 每次返回一个新数组，回写提示词后
   // 即使数组内容完全相同也会被判定为变化，从而递归触发本 watcher。
@@ -469,6 +503,13 @@ watch(
 
 const durationOptions = computed(() => videoDurationOptions(videoModel.value))
 
+const shotDurationValue = computed(() =>
+  Math.min(
+    videoMaxSeconds(videoModel.value),
+    Math.max(videoMinSeconds(videoModel.value), Math.round(Number(shot.value?.duration) || 5))
+  )
+)
+
 function setShotDuration(raw: number) {
   if (!shot.value) return
   const min = videoMinSeconds(videoModel.value)
@@ -476,6 +517,49 @@ function setShotDuration(raw: number) {
   const d = Math.min(max, Math.max(min, Math.round(Number(raw) || shot.value.duration || min)))
   project.updateShot(shot.value.id, { duration: d })
 }
+
+/** 只重画一张帧（起始帧或结束帧），另一张不动 */
+async function redrawFrame(which: 'start' | 'end') {
+  if (generating.value || toolBusy.value || !shot.value) return
+  moreOpen.value = false
+  try {
+    await regenerateShotFrame(
+      shot.value,
+      which,
+      (msg) => {
+        toolBusy.value = msg
+      },
+      undefined
+    )
+    await loadFrames()
+    toast.success(which === 'start' ? '起始帧已重画' : '结束帧已重画')
+  } catch (e: any) {
+    toast.error(friendlyAiError(e) || '重画失败')
+  } finally {
+    toolBusy.value = ''
+  }
+}
+
+const startFramePromptValue = computed({
+  get() {
+    const s = shot.value
+    if (!s || !project.current) return ''
+    return s.startFramePrompt?.trim() || shotFrameSendPrompt(s, project.current, 'start')
+  },
+  set(v: string) {
+    if (shot.value) project.updateShot(shot.value.id, { startFramePrompt: v })
+  }
+})
+const endFramePromptValue = computed({
+  get() {
+    const s = shot.value
+    if (!s || !project.current) return ''
+    return s.endFramePrompt?.trim() || shotFrameSendPrompt(s, project.current, 'end')
+  },
+  set(v: string) {
+    if (shot.value) project.updateShot(shot.value.id, { endFramePrompt: v })
+  }
+})
 
 function dismissPanel() {
   moreOpen.value = false
@@ -517,6 +601,8 @@ async function loadMedia() {
     videoUrl.value = ''
     mediaUrl.value = (await assets.getUrl(id)) || ''
   }
+  // 首尾帧有两张图，跟着一起刷新
+  if (type.value === 'shotFrames') await loadFrames()
 }
 
 defineExpose({ loadMedia })
@@ -560,8 +646,9 @@ async function generateThis(ev?: Event, hd = false) {
     )
     await loadMedia()
     if (hd) toast.success('已按更高分辨率重新生成')
-  } catch {
-    /* 节点上会显示失败 */
+  } catch (e: any) {
+    // 节点上只有一个小红点，失败原因必须直接弹出来，否则表现为「点了生成，什么都没出来」
+    if (shouldToastAiError(e)) toast.error(friendlyAiError(e) || '生成失败')
   } finally {
     toolBusy.value = ''
   }
@@ -652,6 +739,28 @@ function startCrop() {
   trimOn.value = false
   cropOn.value = true
   crop.value = { x: 0.08, y: 0.08, w: 0.84, h: 0.84 }
+}
+
+/** 截取视频最后一帧 → 在视频旁边落一个图片节点，可以拿去当下一镜首帧或参考图 */
+async function grabLastFrame() {
+  if (toolBusy.value) return
+  if (!assetId.value) {
+    toast.warn('先生成视频再截取尾帧')
+    return
+  }
+  cropOn.value = false
+  trimOn.value = false
+  toolBusy.value = '截取尾帧…'
+  try {
+    await grabVideoLastFrameNode(props.id, (msg) => {
+      toolBusy.value = msg
+    })
+    toast.success('尾帧已截出，放在视频右侧的图片节点里')
+  } catch (e: any) {
+    toast.error(e?.message || '截取尾帧失败')
+  } finally {
+    toolBusy.value = ''
+  }
 }
 
 function startTrim() {
@@ -870,11 +979,12 @@ const cropStyle = computed(() => ({
 <template>
   <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating || !!toolBusy }]">
     <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
-    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
-    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
-    <Handle v-if="type === 'shotBoard' || type === 'shotImage'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
+    <Handle v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'" id="scene" type="target" :position="Position.Left" :style="{ top: '72%' }" class="hndl" />
     <Handle v-if="type === 'shotImage' && videoRequiresStoryboard(project.current)" id="board" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
-    <Handle v-if="type === 'shotVideo'" id="image" type="target" :position="Position.Left" class="hndl" />
+    <Handle v-if="type === 'shotVideo'" id="image" type="target" :position="Position.Left" :style="{ top: '30%' }" class="hndl" />
+    <Handle v-if="type === 'shotVideo'" id="frames" type="target" :position="Position.Left" :style="{ top: '70%' }" class="hndl" />
 
     <transition name="float-up">
       <div v-if="selected && panelOpen" class="toolbar-wrap nodrag nowheel" @mousedown.stop @click.stop>
@@ -887,6 +997,15 @@ const cropStyle = computed(() => ({
           </button>
           <button v-if="isVideoNode && hasAsset" type="button" :disabled="!!toolBusy" @click="startTrim">
             <span>🎞</span>剪辑
+          </button>
+          <button
+            v-if="isVideoNode && hasAsset"
+            type="button"
+            :disabled="!!toolBusy"
+            title="截取视频最后一帧，在旁边生成一张图片节点"
+            @click="grabLastFrame"
+          >
+            <span>◫</span>截取尾帧
           </button>
           <button v-if="genLabel" type="button" :disabled="generating || gateBlocked || !!toolBusy" @click="generateThis">
             <span>↺</span>{{ hasAsset ? '重绘' : genLabel }}
@@ -968,6 +1087,31 @@ const cropStyle = computed(() => ({
           ▶
         </button>
       </template>
+      <div v-else-if="type === 'shotFrames'" class="frame-pair">
+        <div class="fp-cell">
+          <img v-if="frameUrls.start" :src="frameUrls.start" alt="起始帧" />
+          <div v-else class="fp-ph">＋</div>
+          <span class="fp-tag">起</span>
+          <button
+            v-if="frameUrls.start && !generating && !toolBusy"
+            class="fp-redo"
+            title="重画起始帧"
+            @click.stop="redrawFrame('start')"
+          >↺</button>
+        </div>
+        <span class="fp-arrow">→</span>
+        <div class="fp-cell">
+          <img v-if="frameUrls.end" :src="frameUrls.end" alt="结束帧" />
+          <div v-else class="fp-ph">＋</div>
+          <span class="fp-tag">末</span>
+          <button
+            v-if="frameUrls.end && !generating && !toolBusy"
+            class="fp-redo"
+            title="重画结束帧"
+            @click.stop="redrawFrame('end')"
+          >↺</button>
+        </div>
+      </div>
       <img v-else-if="mediaUrl" :src="mediaUrl" alt="" />
       <div
         v-else
@@ -1057,7 +1201,7 @@ const cropStyle = computed(() => ({
       <div v-if="type === 'subject' && subject" class="voice-sec">
         <div class="voice-sec-head">
           <span class="voice-sec-title">角色语音</span>
-          <span class="voice-sec-tag">可选 · 用于口播配音</span>
+          <span class="voice-sec-tag">提炼人物时自动生成 · 出镜对白与配音都用它</span>
         </div>
         <textarea
           class="voice-input"
@@ -1113,7 +1257,27 @@ const cropStyle = computed(() => ({
           @change="onVoiceRefChange"
         />
       </div>
+      <div v-if="isFrameNode && shot" class="fp-prompts">
+        <p class="fp-tip">
+          两张帧各用一段画面词：起始帧画开场那一瞬，结束帧画动作走完的末态。画的时候会带上本镜的人物和场景参考图。
+        </p>
+        <label>起始帧画面词</label>
+        <textarea
+          rows="6"
+          :value="startFramePromptValue"
+          placeholder="留空则按分镜描述与连续性自动拼"
+          @input="startFramePromptValue = ($event.target as HTMLTextAreaElement).value"
+        />
+        <label>结束帧画面词</label>
+        <textarea
+          rows="6"
+          :value="endFramePromptValue"
+          placeholder="留空则按「起始 → 末态」里的末态自动拼"
+          @input="endFramePromptValue = ($event.target as HTMLTextAreaElement).value"
+        />
+      </div>
       <textarea
+        v-else
         rows="12"
         :value="promptValue"
         :placeholder="promptHint"
@@ -1136,7 +1300,7 @@ const cropStyle = computed(() => ({
         v-model:extra-ids="extraRefIds"
       />
       <div class="prompt-foot">
-        <ImageModelSelect v-if="isImageNode" />
+        <ImageModelSelect v-if="isImageNode || isFrameNode" />
         <VideoModelSelect
           v-else-if="type === 'shotVideo'"
           v-model="videoModel"
@@ -1146,7 +1310,7 @@ const cropStyle = computed(() => ({
         <span v-if="type === 'shotVideo' && videoStillHint" class="still-hint">{{ videoStillHint }}</span>
         <span v-else>{{ metaLine }}</span>
         <AspectRatioSeg
-          v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotVideo'"
+          v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames' || type === 'shotVideo'"
           v-model="nodeAspectRatio"
           compact
         />
@@ -1155,14 +1319,16 @@ const cropStyle = computed(() => ({
           v-model="videoResolution"
           compact
         />
-        <label v-if="type === 'shotVideo' && shot" class="dur-edit">
-          <select
-            :value="Math.min(videoMaxSeconds(videoModel), Math.max(videoMinSeconds(videoModel), Math.round(Number(shot.duration) || 5)))"
-            @change="setShotDuration(Number(($event.target as HTMLSelectElement).value))"
-          >
-            <option v-for="n in durationOptions" :key="n" :value="n">{{ n }} 秒</option>
-          </select>
-        </label>
+        <ParamSelect
+          v-if="type === 'shotVideo' && shot"
+          class="dur-edit"
+          width="76px"
+          title="时长"
+          :model-value="String(shotDurationValue)"
+          @update:model-value="setShotDuration(Number($event))"
+        >
+          <option v-for="n in durationOptions" :key="n" :value="String(n)">{{ n }} 秒</option>
+        </ParamSelect>
         <button
           v-if="genLabel"
           class="go"
@@ -1384,6 +1550,105 @@ const cropStyle = computed(() => ({
 .ph.text {
   font-size: 13px;
   font-weight: 600;
+}
+
+/* 首尾帧节点：起始帧 → 结束帧并排 */
+.frame-pair {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 2px;
+}
+.fp-cell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.2);
+}
+.fp-cell img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.fp-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-4);
+  font-size: 18px;
+}
+.fp-tag {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.6;
+}
+.fp-redo {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.frame-pair:hover .fp-redo {
+  opacity: 1;
+}
+.fp-redo:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+.fp-arrow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 11px;
+}
+.fp-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fp-prompts label {
+  color: var(--color-text-2);
+  font-size: 11px;
+}
+.fp-prompts textarea {
+  min-height: 72px;
+}
+.fp-tip {
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 1.6;
 }
 .audio-card {
   position: absolute;

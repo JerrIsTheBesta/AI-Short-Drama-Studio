@@ -239,6 +239,7 @@ const genOpen = ref(false)
 const genTopic = ref('')
 const genBrief = ref('')
 const genStyle = ref<VisualStyle>('cinematic')
+const genDuration = ref(0)
 const generating = ref(false)
 const genProgress = ref('')
 let genAbort: AbortController | null = null
@@ -247,6 +248,12 @@ const styleOptions = (Object.keys(VISUAL_STYLE_LABEL) as VisualStyle[]).map((key
   value: key,
   label: VISUAL_STYLE_LABEL[key]
 }))
+
+/* 目标成片时长：直接决定剧本规模和后面拆多少镜 */
+const durationOptions = [30, 40, 60, 90, 120, 180]
+const durationScenes = (sec: number) => Math.max(2, Math.min(6, Math.round(sec / 15)))
+const durationChars = (sec: number) => Math.max(400, Math.round(sec * 18))
+const durationShots = (sec: number) => Math.max(1, Math.ceil(sec / 8))
 
 const genChoice = computed({
   get() {
@@ -294,6 +301,7 @@ async function submitGenerate() {
         style: genStyle.value,
         shotDuration: 5,
         aspectRatio: '16:9',
+        targetDurationSec: genDuration.value || undefined,
         playMode: 'write',
         model: llmModel.value
       },
@@ -646,6 +654,20 @@ onMounted(async () => {
               :disabled="generating"
             />
             <div class="gen-row">
+              <div class="gen-field">
+                <label class="gen-label">目标成片时长</label>
+                <select v-model.number="genDuration" class="gen-input" :disabled="generating">
+                  <option :value="0">不限（按内容自然长度）</option>
+                  <option v-for="s in durationOptions" :key="s" :value="s">{{ s }} 秒</option>
+                </select>
+                <p class="gen-hint">
+                  {{
+                    genDuration
+                      ? `剧本按 ${genDuration} 秒定规模：约 ${durationScenes(genDuration)} 场、${durationChars(genDuration)} 字正文，后面约拆 ${durationShots(genDuration)} 镜`
+                      : '不限时长时剧本会写满完整结构，分镜也会更多'
+                  }}
+                </p>
+              </div>
               <div class="gen-field">
                 <label class="gen-label">画风</label>
                 <select v-model="genStyle" class="gen-input" :disabled="generating">
@@ -1287,6 +1309,12 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.gen-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-3, #8a93a6);
+  line-height: 1.45;
 }
 .gen-progress {
   margin: 6px 0 0;

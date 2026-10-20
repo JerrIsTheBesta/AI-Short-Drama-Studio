@@ -8,6 +8,8 @@ import { onCanvasActivity, type CanvasActivity } from '@/services/canvas/canvasB
 import { nextPipelineStep } from '@/services/canvas/pipeline'
 import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { desktop, isDesktop } from '@/services/desktop'
+import { autodlVideoProfileId } from '@/services/ai/runtime'
+import type { VideoGenModel } from '@/types'
 import type { AgentAttachment } from '@/services/canvas/attachments'
 import type { TraceRow, TraceStatus } from '@/services/canvas/agentTrace'
 import type { AgentAutonomy, AspectRatio, CanvasNode } from '@/types'
@@ -194,6 +196,8 @@ const activeImageLabel = computed(() => {
   return p ? `${p.name} · ${p.model}` : '图像模型'
 })
 const activeVideoLabel = computed(() => {
+  const d = videoDefault.value
+  if (d) return VIDEO_WORKFLOW_OPTIONS.find((w) => w.value === d)?.name || '视频模型'
   const p = activeVideo.value
   return p ? p.name : '视频模型'
 })
@@ -231,7 +235,33 @@ function pickImage(id: string) {
 }
 
 function pickVideo(id: string) {
+  // 选了具体接入就回到「跟随接入」模式，清掉内置工作流默认
+  settings.selectVideoModelDefault(undefined)
   settings.selectVideo(id)
+}
+
+/** 与视频节点下拉同款的内置工作流（用设置里的 AutoDL 令牌），创作偏好里也能直接选 */
+const VIDEO_WORKFLOW_OPTIONS: { value: VideoGenModel; name: string; desc: string }[] = [
+  { value: 'h3', name: 'H3 v5 · 15 秒', desc: 'AutoDL · 人设+场景参考图直接生成' },
+  { value: 'h3-v5', name: 'H3 v5 · 10 秒 · 1080p', desc: 'AutoDL · 画质升级版' },
+  { value: 'wan-prime', name: '万相 3.0 Prime', desc: '需四宫格关键帧' }
+]
+const videoDefault = computed(() => settings.config.defaultVideoModel)
+
+function pickVideoWorkflow(model: VideoGenModel) {
+  settings.selectVideoModelDefault(model)
+  // H3 系列内置工作流用 AutoDL 令牌：顺手把当前接入切到 AutoDL，免得提交时还指着别家
+  if (model !== 'wan-prime') {
+    const autodlId = autodlVideoProfileId()
+    if (autodlId) settings.selectVideo(autodlId)
+  }
+}
+
+/** 与节点下拉一致：给接入线路带上服务商标签 */
+function videoProfileTag(p: { provider?: string; baseUrl?: string; adapter?: { type?: string } }): string {
+  const zealman = p.provider === 'zealman' || p.adapter?.type === 'zealman-workflow'
+  const autodl = !zealman && (p.provider === 'autodl' || /autodl\.art/i.test(p.baseUrl || ''))
+  return zealman ? 'Zealman' : autodl ? 'AutoDL' : ''
 }
 
 const MODES: { id: AgentAutonomy; label: string; desc: string }[] = [
@@ -707,7 +737,7 @@ function visibleRows(rows: TraceRow[]) {
               <p class="tip">
                 {{
                   shotChainMode === 'fl2va'
-                    ? '首尾帧链：第 1 镜用本镜配图起手；第 2 镜起自动截取上一镜视频的最后一帧作首帧，下一镜的配图作尾帧，镜头间画面连续。上一镜还没出视频时先落回本镜配图。'
+                    ? '首尾帧链：第 1 镜用本镜配图起手；第 2 镜起自动截取上一镜视频的最后一帧作首帧，下一镜的配图作尾帧，镜头间画面连续。因为下一镜要等上一镜出片，批量出片会自动改成按镜号串行（一次一镜）。凑不齐首尾帧的镜头会自动退回常规出片，不会卡住生成。'
                     : '每镜按自己的参考图 / 关键帧出片（默认）。想要镜头之间画面连续就选首尾帧模式。'
                 }}
               </p>
@@ -784,6 +814,22 @@ function visibleRows(rows: TraceRow[]) {
                 <div class="pref-models">
                   <p class="pref-k">模型选择</p>
                   <template v-if="prefTab === 'video'">
+                    <p class="pref-g">工作流（用设置里的 AutoDL 令牌）</p>
+                    <button
+                      v-for="w in VIDEO_WORKFLOW_OPTIONS"
+                      :key="w.value"
+                      type="button"
+                      class="pref-model"
+                      :class="{ on: videoDefault === w.value }"
+                      @click="pickVideoWorkflow(w.value)"
+                    >
+                      <span class="pref-radio" />
+                      <span class="pref-model-text">
+                        <b>{{ w.name }}</b>
+                        <small>{{ w.desc }}</small>
+                      </span>
+                    </button>
+                    <p class="pref-g">已配置的视频接入</p>
                     <p v-if="!videoProfiles.length" class="pref-empty">
                       还没有视频模型，去「设置」里添加一个
                     </p>
@@ -792,12 +838,12 @@ function visibleRows(rows: TraceRow[]) {
                       :key="p.id"
                       type="button"
                       class="pref-model"
-                      :class="{ on: p.id === activeVideo?.id }"
+                      :class="{ on: !videoDefault && p.id === activeVideo?.id }"
                       @click="pickVideo(p.id)"
                     >
                       <span class="pref-radio" />
                       <span class="pref-model-text">
-                        <b>{{ p.name }}</b>
+                        <b>{{ videoProfileTag(p) ? `${videoProfileTag(p)} · ${p.name}` : p.name }}</b>
                         <small>{{ videoSub(p) }}</small>
                       </span>
                     </button>
@@ -1206,17 +1252,16 @@ function visibleRows(rows: TraceRow[]) {
 .chips button {
   margin: 0;
   padding: 5px 12px;
-  border: 1px solid var(--color-border);
+  border: none;
   border-radius: 99px;
   background: transparent;
-  color: var(--color-text-2);
+  color: var(--color-text-3);
   font-size: 11px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s, color 0.15s;
 }
 .chips button:hover {
-  border-color: rgba(126, 180, 255, 0.5);
-  background: rgba(126, 180, 255, 0.08);
+  background: var(--color-fill-hover);
   color: var(--color-text-1);
 }
 
@@ -1311,10 +1356,10 @@ textarea {
   height: 28px;
   margin: 0;
   min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: none;
   border-radius: 8px;
-  background: var(--color-fill);
-  color: var(--color-text-2);
+  background: transparent;
+  color: var(--color-text-3);
   font-size: 11px;
   cursor: pointer;
   display: inline-flex;
@@ -1323,6 +1368,18 @@ textarea {
   padding: 0 8px;
   white-space: nowrap;
   overflow: hidden;
+  transition: background-color 0.15s, color 0.15s;
+}
+.bar-btn:hover:not(:disabled) {
+  background: var(--color-fill-hover);
+  color: var(--color-text-1);
+}
+.bar-btn:active:not(:disabled) {
+  background: var(--color-fill-strong);
+}
+.bar-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .bar-btn i {
   width: 0;
@@ -1423,6 +1480,18 @@ textarea {
   font-weight: 650;
   letter-spacing: 0.04em;
   color: var(--color-text-4);
+}
+
+/* 偏好面板里的分组小标题（视频工作流 / 已配置接入） */
+.pref-g {
+  margin: 10px 4px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--color-text-4);
+}
+.pref-g:first-child {
+  margin-top: 2px;
 }
 .pref-empty {
   margin: 4px;

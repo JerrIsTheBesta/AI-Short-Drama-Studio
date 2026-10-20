@@ -84,6 +84,11 @@ export interface Shot {
   audioMode?: ShotAudioMode
   /** H3 说话人音色与表达方式，例如“年轻女声 / 温柔自然” */
   speakerHint?: string
+  /**
+   * 本镜说话角色的音色描述。拆分镜时从人物节点（Subject.voicePrompt）自动绑定，
+   * 生成视频与后期配音都会带上；手改人物卡音色后重跑生成会自动更新。
+   */
+  speakerVoice?: string
   /** 时长（秒，5-10 之间） */
   duration: number
   /** 镜头运动：推/拉/摇/移/固定/环绕 */
@@ -141,6 +146,16 @@ export interface Shot {
   firstFrameAssetId?: ID
   /** 首尾帧模式的尾帧 */
   lastFrameAssetId?: ID
+  /**
+   * 首帧专用画面词：这一镜开场那一瞬的画面（构图、人物起始状态、光线）。
+   * 为空时按分镜描述与连续性自动拼，可在节点上改。
+   */
+  startFramePrompt?: string
+  /**
+   * 尾帧专用画面词：这一镜结束那一瞬的画面（动作完成后的末态）。
+   * 为空时按连续性里的「末态」自动拼，可在节点上改。
+   */
+  endFramePrompt?: string
   /** 分镜级参考图（图生图/图像编辑用，0-N 张素材 ID） */
   referenceAssetIds?: ID[]
   /** 本镜生成时不要再用的参考图（含自动带上的人设/场景/看板） */
@@ -227,6 +242,11 @@ export interface Script {
   aspectRatio: AspectRatio
   /** 每个分镜目标时长 */
   shotDuration: number
+  /**
+   * 用户要的成片总时长（秒）。是剧本规模与分镜数量的硬预算；
+   * 0 / undefined 表示没指定，按内容自然长度走。
+   */
+  targetDurationSec?: number
   /** 独立制作手册；电影章节与普通短视频、视频复刻互不串线 */
   workflowMode?: 'film-chapter'
   /**

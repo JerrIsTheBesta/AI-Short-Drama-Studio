@@ -119,6 +119,7 @@ async function generate() {
         shotDuration: project.current.script.shotDuration,
         aspectRatio: project.current.settings.aspectRatio,
         keywords: project.current.script.keywords,
+        targetDurationSec: project.current.script.targetDurationSec || undefined,
         productImages
       },
       (msg) => toast.info(msg, 2000)

@@ -32,6 +32,8 @@ export const DOWNSTREAM_TOOLS = new Set([
   'generate_all_boards',
   'generate_shot_image',
   'generate_all_images',
+  'generate_shot_frames',
+  'generate_all_frames',
   'generate_video',
   'generate_all_videos',
   'generate_audio',

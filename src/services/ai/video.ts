@@ -62,6 +62,8 @@ export interface VideoGenInput {
   voiceMode?: 'dialogue' | 'voiceover' | 'none'
   /** 说话人音色/身份提示（不含台词） */
   speakerHint?: string
+  /** 说话角色的音色描述（中文，来自人物节点 voicePrompt），出镜对白与画外音都会带上 */
+  speakerVoice?: string
   /** H3 官方多图提示词中的实际人物、场景与图片职责。 */
   speakerName?: string
   sceneName?: string
@@ -434,14 +436,18 @@ async function dashscopeRequest(
 }
 
 function autodlResolution(input: VideoGenInput): string {
-  const quality =
-    input.videoModel === 'h3-v5' &&
-    input.h3GenMode !== 'fl2va' &&
-    normalizeVideoResolution(input.videoResolution, 'h3-v5') === '1080p'
+  // 各工作流的 resolution 枚举以 AutoDL 目录声明为准（2026-10-20 核对）：
+  // 首尾帧 b99_002 只有 736p 三档；普通工作流是 480p/768p(/1080p) + 竖/横/(1:1)。
+  const isFl2va = input.h3GenMode === 'fl2va'
+  const quality = isFl2va
+    ? '736p'
+    : input.videoModel === 'h3-v5' && normalizeVideoResolution(input.videoResolution, 'h3-v5') === '1080p'
       ? '1080p'
       : '768p'
   const ratio = String(input.aspectRatio || '')
   if (ratio === '9:16') return `${quality}竖`
+  // 数字人口播工作流没有 (1:1) 档，1:1 退化成横
+  if (ratio === '1:1' && !input.audioSync) return `${quality}(1:1)`
   if (isLandscapeAspect(ratio) || ratio === '1:1') return `${quality}横`
   const landscape = (input.width || 0) >= (input.height || 0)
   return landscape ? `${quality}横` : `${quality}竖`
@@ -671,10 +677,10 @@ async function realWorkflowVideo(
       resolution
     }
     if (isFl2va) {
+      // b99_002 首尾帧工作流只声明 first_frame/last_frame（另加 prompt/duration/resolution/seed），
+      // 多传 ref_image_* 会被网关以「存在未定义的参数」直接打回，不要双写。
       body.first_frame = dataUrls[0]
       body.last_frame = dataUrls[1]
-      body.ref_image_0 = dataUrls[0]
-      body.ref_image_1 = dataUrls[1]
     } else {
       dataUrls.forEach((url, index) => {
         body[`ref_image_${index}`] = url
@@ -1032,6 +1038,7 @@ function buildPrompt(input: VideoGenInput): string {
           voiceover: input.voiceover,
           voiceMode: input.voiceMode,
           speakerHint: input.speakerHint,
+          speakerVoice: input.speakerVoice,
           speakerName: input.speakerName,
           sceneName: input.sceneName,
           sceneDescription: input.sceneDescription,
@@ -1242,9 +1249,13 @@ async function realComfyNativeVideo(
   const prompt = buildPrompt(input)
   let imageDataUrl: string | undefined
   if (input.imageBlob) imageDataUrl = await blobToDataUrl(input.imageBlob)
+  let imageEndDataUrl: string | undefined
+  if (input.lastFrameBlob) imageEndDataUrl = await blobToDataUrl(input.lastFrameBlob)
+  let audioDataUrl: string | undefined
+  if (input.audioBlob) audioDataUrl = await blobToDataUrl(input.audioBlob)
   if (!cfg.adapter?.workflowTemplate?.trim()) {
     throw new Error(
-      '[video] 自建 ComfyUI 需要在接入的 adapter.workflowTemplate 里提供完整 /prompt JSON（可用 {{prompt}} / {{image}} 占位）。AutoDL 云端请用 comfyui-workflow 适配器。'
+      '[video] 自建 ComfyUI 需要在接入的 adapter.workflowTemplate 里粘贴 Comfy「Save (API Format)」导出的 JSON，并让助手分析出输入映射（首帧 / 提示词写到哪个节点）。AutoDL 云端请用 comfyui-workflow 适配器。'
     )
   }
   const { blob, mimeType } = await comfyPromptGenerate({
@@ -1252,6 +1263,8 @@ async function realComfyNativeVideo(
     apiKey: cfg.apiKey,
     prompt,
     imageDataUrl,
+    imageEndDataUrl,
+    audioDataUrl,
     adapter: cfg.adapter,
     signal: input.signal,
     kind: 'video',

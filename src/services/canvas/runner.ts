@@ -27,6 +27,9 @@ import {
   reviewSpeechQuality,
   analyzeRemakeVideo,
   remakeShotsFromAnalysis,
+  extractTargetDurationSec,
+  bindShotVoiceHints,
+  FALLBACK_VOICE_PROMPT,
   DIGITAL_HUMAN_VISUAL_LOCK,
   DIGITAL_HUMAN_AESTHETIC,
   DIGITAL_HUMAN_AUDIO_DESCRIPTION,
@@ -44,7 +47,7 @@ import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime
 import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneAssetForShot, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
-import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
+import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard, needsShotFrames, shotUsesFrames } from '@/utils/videoStill'
 import {
   extractPlayDirectives,
   extractSceneSlice
@@ -55,8 +58,8 @@ import {
   pushHistory,
   resolveH3VoiceMode
 } from '@/utils/shot'
-import { rebuildCanvasGraph } from './layout'
-import { emitCanvasActivity } from './canvasBridge'
+import { rebuildCanvasGraph, absoluteCanvasPosition, nextFreeformPosition, NODE_W } from './layout'
+import { emitCanvasActivity, revealCanvas, selectCanvasNode } from './canvasBridge'
 import { extractStageLabel, extractStageNoun, nextExtractStage, type ExtractStage } from './pipeline'
 import { friendlyAiError } from '@/services/ai/abort'
 import { lookFromScript, lookFromTexts, styleLabel, inferVisualStyleFromText } from '@/utils/visualStyle'
@@ -67,6 +70,8 @@ import {
   sceneSendPrompt,
   shotImageSendPrompt,
   defaultShotImagePrompt,
+  shotFrameSendPrompt,
+  shotVoiceBlock,
   subjectSendPrompt,
   videoSendPrompt,
   shotDirectorBrief
@@ -588,6 +593,212 @@ function refreshShot(shotId: string): Shot {
   return shot
 }
 
+/** 本镜出场人物 + 所在场景的参考图，用来合成首尾帧。看板模式再带上故事看板。 */
+async function collectFrameRefBlobs(
+  shot: Shot,
+  project: Project,
+  onProgress?: (msg: string) => void
+): Promise<{ blobs: Blob[]; labels: string[] }> {
+  const assets = useAssetsStore()
+  const library = useLibraryStore()
+  // 帧图要的是「这一格画面长什么样」，所以用完整参考包（四视图 + 道具 + 场景底板），
+  // 不用四宫格关键帧 —— 那是网格版式，拿来当首尾帧会把宫格画进去。
+  const bundle = collectShotRefIds(shot, project)
+  const blobs: Blob[] = []
+  const labels: string[] = []
+  for (let i = 0; i < bundle.ids.length; i++) {
+    const blob = (await assets.getBlob(bundle.ids[i])) || (await library.getBlob(bundle.ids[i]))
+    if (!blob) continue
+    blobs.push(blob)
+    labels.push(bundle.labels[i])
+  }
+  if (!blobs.length) {
+    onProgress?.('没有人物/场景参考图，先按分镜描述直接画帧。')
+  }
+  return { blobs, labels }
+}
+
+/** 画一张帧图并落到资源库 */
+async function renderShotFrame(
+  shot: Shot,
+  which: 'start' | 'end',
+  blobs: Blob[],
+  labels: string[],
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const prompt = shotFrameSendPrompt(shot, project.current, which)
+  const look = lookFromScript(project.current.script)
+  const aspectRatio = shotNodeAspect(project.current, shot.id, 'shotImage')
+  const size = imageGenSize('shot', aspectRatio)
+  const word = which === 'start' ? '起始帧' : '结束帧'
+  onProgress?.(`画这一镜的${word}（${blobs.length} 张人物/场景参考）...`)
+  const fail = (e: any) => {
+    const reason = friendlyAiError(e) || e?.message || '未知原因'
+    // 把失败定位到「第几镜的哪一张帧」，否则节点上只显示一句笼统的失败
+    return new Error(`第 ${shot.index + 1} 镜${word}没画出来：${reason}`)
+  }
+  let result
+  try {
+    result = await generateImage(
+      {
+        prompt,
+        style: look.style,
+        width: size.width,
+        height: size.height,
+        aspectRatio,
+        referenceImages: blobs.length ? blobs : undefined,
+        referenceLabels: labels.length ? labels : undefined,
+        model: imageModelForProject(project.current.pipelineMode),
+        signal
+      },
+      onProgress
+    )
+  } catch (e: any) {
+    throw fail(e)
+  }
+  onProgress?.(`校验${word}文件...`)
+  const quality = await reviewImageQuality(result.blob, prompt, signal)
+  if (!quality.passed) throw fail(new Error(`${word}文件无效：${quality.issues.join('；')}`))
+  try {
+    const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+      filename: `shot${shot.index + 1}_${which}frame_${Date.now().toString(36)}`,
+      prompt,
+      projectId: project.current.id,
+      shotId: shot.id
+    })
+    return asset
+  } catch (e: any) {
+    throw fail(e)
+  }
+}
+
+/**
+ * 首尾帧：用本镜的人物 + 场景，专门合成「开始这一帧」和「结束这一帧」。
+ * 结束帧把刚画好的起始帧也当参考图，保证同一镜内脸、服装、机位、光线一致；
+ * 起始帧则把上一镜的结束帧带上，让镜与镜之间接着走。
+ */
+export async function generateShotFramePair(
+  shot: Shot,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const rebound = boundSubjectIds(shot, project.current.subjects ?? [])
+  if (rebound.length) {
+    project.updateShot(shot.id, { subjectIds: rebound })
+    shot = refreshShot(shot.id)
+  }
+  // 补依赖只为了让帧图更准，不是画帧的前提：哪一张没补上都只记一笔，照常画帧。
+  // 以前这里一失败整对帧就没了，界面上表现为「点了生成、什么都没出来」。
+  // 首尾帧镜头不补故事看板——视频吃的就是这两张帧，看板在这条链路里是多余的。
+  try {
+    if (videoRequiresStoryboard(project.current) && !shotUsesFrames(shot, project.current) && !shot.boardAssetId) {
+      await generateShotBoard(shot, onProgress, signal)
+      shot = refreshShot(shot.id)
+    } else {
+      for (const sub of subjectsForShot(shot, project.current)) {
+        const latest = (project.current.subjects ?? []).find((item) => item.id === sub.id) || sub
+        if (latest.designSheetAssetId) continue
+        onProgress?.(`先补「${latest.name}」角色设计图…`)
+        await generateSubjectSheet(latest, onProgress, signal)
+      }
+      const scene = sceneAssetForShot(shot, project.current)
+      if (scene && !scene.plateAssetId) {
+        onProgress?.(`先补场景「${scene.name}」…`)
+        await generateScenePlate(scene, onProgress, signal)
+      }
+      shot = refreshShot(shot.id)
+    }
+  } catch (e: any) {
+    onProgress?.(`依赖没补齐（${friendlyAiError(e) || e?.message || '未知原因'}），先按现有参考画帧。`)
+    shot = refreshShot(shot.id)
+  }
+  const { blobs, labels } = await collectFrameRefBlobs(shot, project.current, onProgress)
+
+  // 起始帧：带上上一镜的结束帧，衔接从上一镜的画面接着走
+  const ordered = [...project.current.shots].sort((a, b) => a.index - b.index)
+  const pos = ordered.findIndex((item) => item.id === shot.id)
+  const prevShot = pos > 0 ? ordered[pos - 1] : undefined
+  const prevTailId = pos > 0 ? prevShot?.lastFrameAssetId : undefined
+  const startBlobs = [...blobs]
+  const startLabels = [...labels]
+  if (prevTailId) {
+    const tail = await tryLoadRefImageBlob(prevTailId)
+    if (tail) {
+      startBlobs.push(tail)
+      startLabels.push('the last frame of the previous shot; continue from this exact framing and lighting')
+    }
+  }
+  const startAsset = await renderShotFrame(shot, 'start', startBlobs, startLabels, onProgress, signal)
+  project.updateShot(shot.id, { firstFrameAssetId: startAsset.id })
+  shot = refreshShot(shot.id)
+  await project.save()
+
+  // 结束帧：把刚画好的起始帧放进去，锁住同一镜的人物、机位和光线
+  const startBlob = await assets.getBlob(startAsset.id)
+  const endBlobs = startBlob ? [...blobs, startBlob] : [...blobs]
+  const endLabels = [
+    ...labels,
+    'the first frame of this same shot; keep identical camera, lens, outfit and lighting'
+  ]
+  const endAsset = await renderShotFrame(shot, 'end', endBlobs, endLabels, onProgress, signal)
+  const patch: Partial<Shot> = { lastFrameAssetId: endAsset.id }
+  if (!shot.startFramePrompt?.trim()) patch.startFramePrompt = shotFrameSendPrompt(shot, project.current, 'start')
+  if (!shot.endFramePrompt?.trim()) patch.endFramePrompt = shotFrameSendPrompt(shot, project.current, 'end')
+  project.updateShot(shot.id, patch)
+  await project.save()
+  onProgress?.('起始帧和结束帧都已生成，可以直接出视频了。')
+  return { first: startAsset, last: endAsset }
+}
+
+/** 只重画一张帧（起始帧或结束帧） */
+export async function regenerateShotFrame(
+  shot: Shot,
+  which: 'start' | 'end',
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  shot = refreshShot(shot.id)
+  const { blobs, labels } = await collectFrameRefBlobs(shot, project.current, onProgress)
+  if (which === 'end') {
+    const firstId = shot.firstFrameAssetId
+    const first = firstId ? await tryLoadRefImageBlob(firstId) : undefined
+    if (first) {
+      blobs.push(first)
+      labels.push('the first frame of this same shot; keep identical camera, lens, outfit and lighting')
+    }
+  } else {
+    const ordered = [...project.current.shots].sort((a, b) => a.index - b.index)
+    const pos = ordered.findIndex((item) => item.id === shot.id)
+    const prevTailId = pos > 0 ? ordered[pos - 1]?.lastFrameAssetId : undefined
+    const tail = prevTailId ? await tryLoadRefImageBlob(prevTailId) : undefined
+    if (tail) {
+      blobs.push(tail)
+      labels.push('the last frame of the previous shot; continue from this exact framing and lighting')
+    }
+  }
+  const asset = await renderShotFrame(shot, which, blobs, labels, onProgress, signal)
+  const old = which === 'start' ? shot.firstFrameAssetId : shot.lastFrameAssetId
+  if (old && old !== asset.id) await assets.remove(old).catch(() => undefined)
+  project.updateShot(
+    shot.id,
+    which === 'start' ? { firstFrameAssetId: asset.id } : { lastFrameAssetId: asset.id }
+  )
+  await project.save()
+  return asset
+}
+
 async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const project = useProjectStore()
   if (!project.current) throw new Error('没有打开的项目')
@@ -609,11 +820,12 @@ async function ensureShotVideoRefs(shot: Shot, onProgress?: (msg: string) => voi
     }
   }
   shot = refreshShot(shot.id)
+  // 走首尾帧的镜头视频直接吃起始帧/结束帧，出片前不再补关键帧/看板
   const stillMode = stillModeForShot(shot, project.current)
-  if (stillMode === 'storyboard' && !shot.boardAssetId) {
+  if (!shotUsesFrames(shot, project.current) && stillMode === 'storyboard' && !shot.boardAssetId) {
     onProgress?.('先补本镜故事看板…')
     await generateShotBoard(shot, onProgress, signal)
-  } else if (stillMode === 'keyframe' && !shot.imageAssetId) {
+  } else if (!shotUsesFrames(shot, project.current) && stillMode === 'keyframe' && !shot.imageAssetId) {
     onProgress?.('先生成本镜四宫格关键帧…')
     await generateShotImage(shot, onProgress, signal)
   }
@@ -752,6 +964,17 @@ async function loadRefImageBlob(id: ID, label: string): Promise<Blob> {
   return blob
 }
 
+/** 软读取参考图：图丢了/读不出来就当没有，不抛错。用于「有就用、没有就降级」的场景。 */
+async function tryLoadRefImageBlob(id: ID): Promise<Blob | undefined> {
+  const assets = useAssetsStore()
+  const library = useLibraryStore()
+  try {
+    return (await assets.getBlob(id)) || (await library.getBlob(id)) || undefined
+  } catch {
+    return undefined
+  }
+}
+
 function canvasVideoNodeForShot(shot: Shot) {
   return useProjectStore().current?.canvas?.nodes.find(
     (n) => n.type === 'shotVideo' && n.data.shotId === shot.id
@@ -759,7 +982,12 @@ function canvasVideoNodeForShot(shot: Shot) {
 }
 
 function canvasVideoModelForShot(shot: Shot): VideoGenModel {
-  return normalizeVideoGenModel(canvasVideoNodeForShot(shot)?.data.videoModel)
+  const nodeModel = canvasVideoNodeForShot(shot)?.data.videoModel
+  if (nodeModel) return normalizeVideoGenModel(nodeModel)
+  // 节点没单独选过时，跟「创作偏好」里选的默认视频模型走
+  const preferred = useSettingsStore().config.defaultVideoModel
+  if (preferred) return normalizeVideoGenModel(preferred)
+  return normalizeVideoGenModel(undefined)
 }
 
 function canvasVideoResolutionForShot(shot: Shot, videoModel: VideoGenModel): VideoResolution {
@@ -776,6 +1004,8 @@ function storyboardVideoModel(): VideoGenModel {
   const p = useProjectStore().current
   const existing = p?.canvas?.nodes.find((node) => node.type === 'shotVideo')
   if (existing?.data.videoModel) return normalizeVideoGenModel(existing.data.videoModel)
+  const preferred = useSettingsStore().config.defaultVideoModel
+  if (preferred) return normalizeVideoGenModel(preferred)
   const cfg = useSettingsStore().config.video
   const marker = `${cfg.provider || ''} ${cfg.workflowId || ''} ${cfg.adapter?.type || ''}`.toLowerCase()
   if (/dashscope|wan/.test(marker)) return 'wan-prime'
@@ -785,6 +1015,174 @@ function storyboardVideoModel(): VideoGenModel {
 
 function shotUsesFl2va(shot: Shot, videoModel: VideoGenModel): boolean {
   return videoModel !== 'wan-prime' && normalizeH3GenMode(shot.h3GenMode) === 'fl2va'
+}
+
+/**
+ * 项目级「首尾帧链」是否开启。
+ * 这个模式下第 N 镜的首帧来自第 N-1 镜视频的末帧，所以镜头之间必须串行：
+ * 并发提交时上一镜还没出片，首帧只能落回本镜配图，连续性直接断掉。
+ */
+export function isFl2vaChainActive(project?: { settings?: { h3ShotChainMode?: 'auto' | 'fl2va' } } | null): boolean {
+  return (project?.settings?.h3ShotChainMode || 'auto') === 'fl2va'
+}
+
+/** 首尾帧链：本镜出片成功后，把末帧固化成下一镜的首帧（不覆盖用户手动指定的首帧）。 */
+async function chainLastFrameToNextShot(
+  shot: Shot,
+  videoAssetId: ID,
+  onProgress?: (msg: string) => void
+) {
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  if (!p) return
+  const ordered = [...p.shots].sort((a, b) => a.index - b.index)
+  const next = ordered.find((s) => s.index === shot.index + 1)
+  if (!next) return
+  // 用户自己挑过的首帧不动；上一次自动固化的末帧已经过期（本镜重跑过），要换掉
+  const existing = next.firstFrameAssetId
+  if (existing) {
+    const meta = assets.getMeta(existing)
+    const autoChained = Boolean(meta && /^shot\d+_lastframe_/.test(meta.filename || ''))
+    if (!autoChained) return
+    await assets.remove(existing).catch(() => undefined)
+  }
+  const blob = await assets.getBlob(videoAssetId)
+  if (!blob) return
+  try {
+    onProgress?.('截取本镜末帧，接到下一镜首帧…')
+    const frame = await extractVideoLastFrame(blob)
+    const asset = await assets.add(frame, 'image', 'ai-generated', {
+      filename: `shot${shot.index + 1}_lastframe_${Date.now().toString(36)}`,
+      projectId: p.id,
+      shotId: shot.id
+    })
+    project.updateShot(next.id, { firstFrameAssetId: asset.id })
+    await project.save()
+    onProgress?.(`第 ${next.index + 1} 镜首帧已用第 ${shot.index + 1} 镜末帧`)
+  } catch (e: any) {
+    // 抽帧失败不影响本镜结果，下一镜仍会实时从上一镜视频里截
+    onProgress?.(`末帧固化失败，下一镜出片时会实时截取：${e?.message || e}`)
+  }
+}
+
+/** 把画布节点按镜号排序，保证首尾帧链从第一镜开始依次推进 */
+function sortNodeIdsByShotIndex(p: Project, ids: string[]): string[] {
+  const indexByShot = new Map(p.shots.map((s) => [s.id, s.index]))
+  const rank = (id: string) => {
+    const node = p.canvas?.nodes?.find((n) => n.id === id)
+    const sid = node?.data?.shotId
+    const idx = sid ? indexByShot.get(sid) : undefined
+    return idx ?? Number.MAX_SAFE_INTEGER
+  }
+  return [...ids].sort((a, b) => rank(a) - rank(b))
+}
+
+/** 这张图还被别处用着吗？决定「重截尾帧」时旧图能不能顺手清掉。 */
+function assetStillInUse(p: Project, assetId: ID): boolean {
+  for (const n of p.canvas?.nodes ?? []) {
+    if (n.data.outputAssetId === assetId) return true
+    if ((n.data.referenceAssetIds ?? []).includes(assetId)) return true
+    if (n.data.firstFrameAssetId === assetId || n.data.lastFrameAssetId === assetId) return true
+  }
+  for (const s of p.shots ?? []) {
+    if (
+      s.imageAssetId === assetId ||
+      s.boardAssetId === assetId ||
+      s.firstFrameAssetId === assetId ||
+      s.lastFrameAssetId === assetId
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 截取视频最后一帧，在视频节点旁边落一个图片节点。
+ * 这张图可以当下一段的首帧、当参考图继续生图，也可以单独下载再加工。
+ * 同一个视频重复截取时只刷新那一个节点，不会堆出一串重复节点。
+ */
+export async function grabVideoLastFrameNode(
+  nodeId: string,
+  onProgress?: (msg: string) => void
+): Promise<ID> {
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  if (!p?.canvas) throw new Error('画布还没有准备好')
+  const node = p.canvas.nodes.find((n) => n.id === nodeId)
+  if (!node) throw new Error('找不到这个视频节点')
+  const shot = node.data.shotId ? p.shots.find((s) => s.id === node.data.shotId) : undefined
+  const videoId =
+    node.type === 'final' || node.type === 'export' ? p.finalVideoAssetId : shot?.videoAssetId
+  if (!videoId) throw new Error('这个节点还没有视频，先生成视频再截取尾帧')
+  const blob = await assets.getBlob(videoId)
+  if (!blob) throw new Error('视频读取失败')
+  onProgress?.('截取最后一帧…')
+  const frame = await extractVideoLastFrame(blob)
+  const asset = await assets.add(frame, 'image', 'extracted', {
+    filename: `lastframe_${shot ? `shot${shot.index + 1}_` : ''}${Date.now().toString(36)}`,
+    projectId: p.id,
+    shotId: shot?.id
+  })
+
+  const frameNodeId = `lastFrame:${node.id}`
+  const label = shot ? `第 ${shot.index + 1} 镜 · 尾帧` : '成片尾帧'
+  const existing = p.canvas.nodes.find((n) => n.id === frameNodeId)
+  if (existing) {
+    const old = existing.data.outputAssetId
+    existing.data = { ...existing.data, label, outputAssetId: asset.id }
+    existing.status = 'success'
+    existing.error = undefined
+    if (old && old !== asset.id && !assetStillInUse(p, old)) {
+      await assets.remove(old).catch(() => undefined)
+    }
+  } else {
+    // 落在自由创作区最右侧，纵向跟这个视频对齐——一眼看出是哪一镜截出来的，
+    // 又不会压到右边的口播/合成分组上。
+    const abs = absoluteCanvasPosition(p.canvas.nodes, node)
+    const groups = p.canvas.nodes.filter((n) => n.type === 'groupFrame')
+    const right = groups.length
+      ? Math.max(...groups.map((g) => g.position.x + (Number(g.data.width) || NODE_W)))
+      : abs.x + NODE_W
+    const pos = nextFreeformPosition(p.canvas.nodes, { click: { x: right + 48, y: abs.y } })
+    p.canvas.nodes = [
+      ...p.canvas.nodes,
+      {
+        id: frameNodeId,
+        type: 'imageGen',
+        position: { x: pos.x, y: pos.y },
+        data: {
+          label,
+          prompt: '',
+          referenceAssetIds: [],
+          referenceSourceNodeIds: [],
+          aspectRatio: p.settings.aspectRatio,
+          outputAssetId: asset.id
+        },
+        status: 'success'
+      }
+    ]
+    const edgeId = `e-${node.id}-${frameNodeId}`
+    if (!p.canvas.edges.some((e) => e.id === edgeId)) {
+      p.canvas.edges = [
+        ...p.canvas.edges,
+        {
+          id: edgeId,
+          source: node.id,
+          target: frameNodeId,
+          sourceHandle: 'out',
+          targetHandle: 'in'
+        }
+      ]
+    }
+  }
+  await project.save()
+  selectCanvasNode(frameNodeId)
+  revealCanvas(frameNodeId)
+  onProgress?.('尾帧已放进视频旁边的图片节点')
+  return frameNodeId
 }
 
 export function rebindShotScenes() {
@@ -821,113 +1219,163 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
     videoModel !== 'wan-prime' &&
     (project.current.settings.h3ShotChainMode || 'auto') === 'fl2va'
   const perShotFl2va = shotUsesFl2va(shot, videoModel)
+  // 链模式凑不齐首尾帧时降级出片，但首帧（上一镜末帧）仍然要带进常规流程，
+  // 否则「首尾帧链」一降级就断成互不相干的镜头。
+  let chainFirstBlob: Blob | undefined
   if (perShotFl2va || chainFl2va) {
     const ordered = [...project.current.shots].sort((a, b) => a.index - b.index)
-    const prevShot = ordered.find((item) => item.index === shot.index - 1)
-    const nextShot = ordered.find((item) => item.index === shot.index + 1)
+    // 按真实位置找前后镜与首尾，别拿 index 硬算：删过镜头后 index 可能不连续。
+    const pos = ordered.findIndex((item) => item.id === shot.id)
+    const prevShot = pos > 0 ? ordered[pos - 1] : undefined
+    const nextShot = pos >= 0 && pos + 1 < ordered.length ? ordered[pos + 1] : undefined
+    const isFirstShot = pos === 0
     // 首帧优先级：手动选的首帧 > 上一镜视频末帧（链模式，保证镜头连续） > 本镜配图
+    // 读图一律用软读取：图丢了只当没有这张图，不能让「资源缺失」变成整条链路的阻断。
     let firstBlob: Blob | undefined
     if (shot.firstFrameAssetId) {
-      firstBlob = await loadRefImageBlob(shot.firstFrameAssetId, '首帧')
-    } else if (chainFl2va && shot.index > 0) {
+      firstBlob = await tryLoadRefImageBlob(shot.firstFrameAssetId)
+    }
+    if (!firstBlob && chainFl2va && !isFirstShot) {
       const prevVideoId = prevShot?.videoAssetId
       const prevVideoBlob = prevVideoId ? await assets.getBlob(prevVideoId) : undefined
       if (prevVideoBlob) {
         onProgress?.('截取上一镜视频末帧作为本镜首帧…')
-        firstBlob = await extractVideoLastFrame(prevVideoBlob)
+        firstBlob = await extractVideoLastFrame(prevVideoBlob).catch(() => undefined)
       } else {
         onProgress?.('上一镜还没有视频，先落回本镜配图作为首帧。')
       }
     }
     if (!firstBlob && shot.imageAssetId) {
-      firstBlob = await loadRefImageBlob(shot.imageAssetId, '首帧')
+      firstBlob = await tryLoadRefImageBlob(shot.imageAssetId)
     }
     if (!firstBlob) {
-      throw new Error(
-        '首尾帧模式需要首帧：上一镜还没有视频，本镜也没有配图。请先生成上一镜视频，或给本镜配图。'
+      // 手动模式是用户在这一镜上明说的意图，缺首帧必须拦住并说清怎么解决。
+      // 项目级「首尾帧链」只是出片增强：缺帧就安静退回常规出片，
+      // 绝不能因为没有首帧就把整个项目锁成「一个视频都出不了」。
+      if (perShotFl2va) {
+        throw new Error(
+          '这一镜手动开了首尾帧模式，还缺首帧。请在节点上选一张首帧图，或把生成模式改回「参考图」。'
+        )
+      }
+      onProgress?.(
+        isFirstShot
+          ? '第 1 镜没有首帧也没有配图：首尾帧链在这一镜起不了头，先用常规方式出片。'
+          : '本镜没有可用首帧（上一镜还没出视频、本镜也没配图）：先用常规方式出片。'
       )
     }
     // 尾帧优先级：手动选的尾帧 > 下一镜配图（链模式，给下一镜留衔接落点）
     let lastBlob: Blob | undefined
     if (shot.lastFrameAssetId) {
-      lastBlob = await loadRefImageBlob(shot.lastFrameAssetId, '尾帧')
-    } else if (chainFl2va && nextShot?.imageAssetId) {
-      lastBlob = await loadRefImageBlob(nextShot.imageAssetId, '尾帧')
+      lastBlob = await tryLoadRefImageBlob(shot.lastFrameAssetId)
+    }
+    if (!lastBlob && chainFl2va) {
+      // 下一镜的配图、或下一镜已经被链固化过的首帧，都能当作本镜尾帧的落点
+      const tailId = nextShot?.imageAssetId || nextShot?.firstFrameAssetId
+      if (tailId) lastBlob = await tryLoadRefImageBlob(tailId)
     }
     if (!lastBlob) {
-      // 手动首尾帧模式必须给尾帧；链模式缺尾帧时退回自动出片，不让流程卡死。
-      if (perShotFl2va) throw new Error('首尾帧模式需要尾帧。请选择尾帧。')
-      onProgress?.('没有可用尾帧（下一镜还没配图）；本镜退回自动模式出片。')
+      if (perShotFl2va) {
+        throw new Error(
+          '这一镜手动开了首尾帧模式，还缺尾帧。请在节点上选一张尾帧图，或把生成模式改回「参考图」。'
+        )
+      }
+      if (firstBlob) onProgress?.('没有可用尾帧（下一镜还没配图）：本镜用首帧按常规方式出片。')
     }
-    if (lastBlob) {
-    onProgress?.('读取首帧和尾帧…')
-    const promptStyle = getVideoPromptStyle()
-    const cast = subjectsForShot(shot, project.current)
-    const scene = sceneForShot(shot, project.current)
-    const place = resolveShotPlace(shot, scene)
-    const spoken = spokenTextOnly(shot.voiceover || '')
-    const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
-    const onScreenNames = cast.map((subject) => subject.name)
-    const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
-    shot = refreshShot(shot.id)
-    const officialPrompt = videoSendPrompt(shot, project.current)
-    onProgress?.('使用节点上的完整提示词出视频（首尾帧）…')
-    const result = await generateVideo(
-      {
-        imageBlob: firstBlob,
-        lastFrameBlob: lastBlob,
-        prompt: officialPrompt,
-        promptAsIs: true,
-        aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
-        audioDescription: shot.audioDescription,
-        voiceover: spoken,
-        voiceMode,
-        speakerHint: shot.speakerHint,
-        speakerName: visibleSpeaker,
-        onScreenNames,
-        sceneName: place.name,
-        sceneLighting: place.lighting,
-        shotTitle: shot.title,
-        duration: clampVideoDuration(shot.duration, videoModel),
-        width: videoSize.width,
-        height: videoSize.height,
-        aspectRatio,
-        cameraMovement: shot.cameraMovement,
-        promptStyle,
-        videoModel: 'h3',
-        videoProfileId: shot.videoProfileId,
-        videoResolution: canvasVideoResolutionForShot(shot, videoModel),
-        h3GenMode: 'fl2va',
-        mode: 'I2VA',
-        signal,
-        resumeTaskId: shot.videoTaskId,
-        onTaskSubmitted: async (taskId) => {
-          project.updateShot(shot.id, { videoTaskId: taskId })
-          await project.save()
-        }
-      },
-      onProgress
-    )
-    onProgress?.('校验视频文件...')
-    const quality = await reviewVideoQuality(result.blob, result.prompt, signal)
-    if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
-    const asset = await assets.add(result.blob, 'video', 'ai-generated', {
-      filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
-      prompt: result.prompt,
-      projectId: project.current.id,
-      shotId: shot.id
-    })
-    project.assignShotVideo(shot.id, asset.id)
-    project.updateShot(shot.id, { videoTaskId: undefined })
-    await project.save()
-    return asset
+    if (firstBlob && lastBlob) {
+      onProgress?.('读取首帧和尾帧…')
+      const promptStyle = getVideoPromptStyle()
+      const cast = subjectsForShot(shot, project.current)
+      const scene = sceneForShot(shot, project.current)
+      const place = resolveShotPlace(shot, scene)
+      const spoken = spokenTextOnly(shot.voiceover || '')
+      const visibleSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
+      const onScreenNames = cast.map((subject) => subject.name)
+      const voiceMode = spoken ? resolveH3VoiceMode(shot, onScreenNames) : 'none'
+      shot = refreshShot(shot.id)
+      const officialPrompt = videoSendPrompt(shot, project.current)
+      onProgress?.('使用节点上的完整提示词出视频（首尾帧）…')
+      const result = await generateVideo(
+        {
+          imageBlob: firstBlob,
+          lastFrameBlob: lastBlob,
+          prompt: officialPrompt,
+          promptAsIs: true,
+          aesthetic: project.current.script?.h3Aesthetic || project.current.script?.aesthetic,
+          audioDescription: shot.audioDescription,
+          voiceover: spoken,
+          voiceMode,
+          speakerHint: shot.speakerHint,
+          speakerVoice: resolveShotSpeakerVoice(shot, project.current),
+          speakerName: visibleSpeaker,
+          onScreenNames,
+          sceneName: place.name,
+          sceneLighting: place.lighting,
+          shotTitle: shot.title,
+          duration: clampVideoDuration(shot.duration, videoModel),
+          width: videoSize.width,
+          height: videoSize.height,
+          aspectRatio,
+          cameraMovement: shot.cameraMovement,
+          promptStyle,
+          videoModel: 'h3',
+          videoProfileId: shot.videoProfileId,
+          videoResolution: canvasVideoResolutionForShot(shot, videoModel),
+          h3GenMode: 'fl2va',
+          mode: 'I2VA',
+          signal,
+          resumeTaskId: shot.videoTaskId,
+          onTaskSubmitted: async (taskId) => {
+            project.updateShot(shot.id, { videoTaskId: taskId })
+            await project.save()
+          }
+        },
+        onProgress
+      )
+      onProgress?.('校验视频文件...')
+      const quality = await reviewVideoQuality(result.blob, result.prompt, signal)
+      if (!quality.passed) throw new Error(`视频文件无效：${quality.issues.join('；')}`)
+      const asset = await assets.add(result.blob, 'video', 'ai-generated', {
+        filename: `video_${shot.index + 1}_${Date.now().toString(36)}`,
+        prompt: result.prompt,
+        projectId: project.current.id,
+        shotId: shot.id
+      })
+      project.assignShotVideo(shot.id, asset.id)
+      project.updateShot(shot.id, { videoTaskId: undefined })
+      await project.save()
+      if (chainFl2va) await chainLastFrameToNextShot(shot, asset.id, onProgress)
+      return asset
     }
+    // 链模式这里没走成首尾帧：把已经拿到的首帧留给常规流程，别让衔接断掉
+    if (chainFl2va && firstBlob) chainFirstBlob = firstBlob
   }
   shot = await ensureShotVideoRefs(shot, onProgress, signal)
 
   const stillMode = stillModeForShot(shot, project.current)
   const allEntries = collectShotVideoEntries(shot, project.current)
   let packed = packVideoRefEntries(allEntries)
+  if (chainFirstBlob) {
+    // 把上一镜末帧固化成一张参考图并排在最前，常规出片也从它起手
+    try {
+      const chained = await assets.add(chainFirstBlob, 'image', 'ai-generated', {
+        filename: `shot${shot.index + 1}_chainstart_${Date.now().toString(36)}`,
+        projectId: project.current.id,
+        shotId: shot.id
+      })
+      packed = [
+        {
+          id: chained.id,
+          kind: 'extra',
+          name: '上一镜末帧',
+          label: 'starting frame of [Shot 1]; the exact image this shot must begin from'
+        },
+        ...packed.filter((entry) => entry.id !== chained.id)
+      ]
+      onProgress?.('已把上一镜末帧作为首位参考图，保持镜头衔接。')
+    } catch {
+      // 固化失败就算了，常规流程照常出片
+    }
+  }
   if (stillMode === 'keyframe' && !packed.some((entry) => entry.kind === 'keyframe') && shot.imageAssetId) {
     packed = [
       {
@@ -1016,6 +1464,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       voiceover: spoken,
       voiceMode,
       speakerHint: shot.speakerHint,
+      speakerVoice: resolveShotSpeakerVoice(shot, project.current),
       speakerName: visibleSpeaker,
       onScreenNames,
       sceneName: place.name,
@@ -1142,6 +1591,8 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     voiceover: cueLines.length ? cueLines.join('\n') : '',
     voiceMode,
     speakerHint: shot.speakerHint,
+    speakerVoice: resolveShotSpeakerVoice(shot, project.current),
+    voiceRoster: shotVoiceBlock(shot, project.current),
     speakerName: visibleSpeaker,
     onScreenNames,
     sceneName: place.name,
@@ -1171,6 +1622,16 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   project.setShotVideoPrompt(shot.id, compiled)
   await project.save()
   return compiled
+}
+
+/**
+ * 本镜说话角色的音色描述。人物卡上的 voicePrompt 优先（用户改了音色立刻生效），
+ * 卡上没有时退回拆分镜时绑定的 shot.speakerVoice。生成视频一定带上它。
+ */
+function resolveShotSpeakerVoice(shot: Shot, p: Project): string | undefined {
+  const fromCard = speakerSubject(shot, p)?.voicePrompt?.trim()
+  if (fromCard) return fromCard
+  return shot.speakerVoice?.trim() || undefined
 }
 
 /** 口播「名字：台词」里的说话人 → 匹配角色卡（有语音设置的角色） */
@@ -1339,6 +1800,7 @@ export async function runGeneratePlay(
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
+      targetDurationSec: resolveTargetDurationSec(project.current.script, requestTopic, requestContent),
       model: resolveLlmModel(model),
       playMode: continueMode ? 'continue' : 'write',
       continueHint: opts?.hint,
@@ -1352,11 +1814,14 @@ export async function runGeneratePlay(
     project.setSubjects([])
     project.setScenes([])
   }
+  // 存住时长预算：后面拆分镜要用它算镜数，不能只靠当时那一句话。
+  const playTargetSec = resolveTargetDurationSec(project.current.script, requestTopic, requestContent)
   project.setScript({
     ...project.current.script,
     topic: run.result.topic || requestTopic || project.current.script.topic,
     content: run.result.playMarkdown,
     playReady: true,
+    ...(playTargetSec ? { targetDurationSec: playTargetSec } : {}),
     ...(look.matched ? { style: look.matched } : {}),
     ...(run.result.aesthetic ? { aesthetic: run.result.aesthetic } : {}),
     ...(run.result.styleBrief ? { styleBrief: run.result.styleBrief } : {}),
@@ -1388,6 +1853,20 @@ export async function runGeneratePlay(
     )
   }
   return run
+}
+
+/**
+ * 成片目标时长：优先用项目里显式设的值，其次从用户原话里认（「约 40 秒」这类）。
+ * 它是剧本规模和分镜数量的硬预算，拿不到就返回 undefined 让流程按内容自然走。
+ */
+function resolveTargetDurationSec(
+  script: { targetDurationSec?: number; topic?: string; content?: string } | undefined,
+  ...extraTexts: Array<string | undefined>
+): number | undefined {
+  const explicit = Number(script?.targetDurationSec) || 0
+  if (explicit >= 10) return explicit
+  const parsed = extractTargetDurationSec(script?.topic, script?.content, ...extraTexts)
+  return parsed || undefined
 }
 
 function normExtractName(name: string) {
@@ -1424,6 +1903,11 @@ function mergeByName<T extends { id: string; name: string }>(
 function mergeSubjectAssets(next: Subject[], prev: Subject[]): Subject[] {
   return mergeByName(next, prev, 'sub', (fresh, old) => ({
     ...fresh,
+    // 模型这次没真给音色（拿到的是兜底句）时，保留用户之前手填的那条，别覆盖掉。
+    voicePrompt:
+      fresh.voicePrompt && fresh.voicePrompt !== FALLBACK_VOICE_PROMPT
+        ? fresh.voicePrompt
+        : old.voicePrompt || fresh.voicePrompt,
     id: old.id,
     designSheetAssetId: old.designSheetAssetId,
     designSheetHistoryIds: old.designSheetHistoryIds,
@@ -1554,6 +2038,11 @@ export async function runExtractStoryboard(
       if (project.current.pipelineMode === 'remake') {
         for (const shot of stageShots) shot.audioMode = shot.voiceover?.trim() ? 'tts' : 'none'
       }
+      // 用项目里真实的人物卡再绑一次音色：只重提分镜时，模型侧拿不到完整人物表。
+      const voiceBound = bindShotVoiceHints(stageShots, project.current.subjects ?? [])
+      if (voiceBound) {
+        onProgress?.(`✓ 已把 ${voiceBound} 个镜头的说话音色绑到人物卡`)
+      }
       project.setShots(mergeShotAssets(stageShots, project.current.shots))
       rebindShotScenes()
     }
@@ -1579,6 +2068,7 @@ export async function runExtractStoryboard(
       aspectRatio: project.current.settings.aspectRatio,
       productImages,
       keywords: project.current.script.keywords,
+      targetDurationSec: resolveTargetDurationSec(project.current.script),
       mode: 'extract',
       model: resolveLlmModel(model),
       extractStartAt,
@@ -1634,7 +2124,15 @@ export async function runExtractStoryboard(
   return run
 }
 
-const GROUP_GEN_TYPES = new Set(['subject', 'scene', 'shotBoard', 'shotImage', 'sceneProps', 'shotVideo'])
+const GROUP_GEN_TYPES = new Set([
+  'subject',
+  'scene',
+  'shotBoard',
+  'shotImage',
+  'shotFrames',
+  'sceneProps',
+  'shotVideo'
+])
 const IMAGE_GEN_CONCURRENCY = 3
 
 export function groupGenerateJobId(groupId: string) {
@@ -1656,6 +2154,7 @@ export async function runGenerateGroup(
     groupId !== 'group-subjects' &&
     groupId !== 'group-scenes' &&
     groupId !== 'group-shots' &&
+    groupId !== 'group-frames' &&
     groupId !== 'group-videos'
   ) {
     throw new Error('这个分组不能一键生成')
@@ -1665,7 +2164,7 @@ export async function runGenerateGroup(
   if (!p?.canvas) throw new Error('画布为空')
   // 人物和场景资产可以在分镜失败前先生成；验收只拦截镜头/视频下游。
   if (
-    (groupId === 'group-shots' || groupId === 'group-videos') &&
+    (groupId === 'group-shots' || groupId === 'group-frames' || groupId === 'group-videos') &&
     !isPlayApproved(p)
   ) {
     throw new Error(PLAY_GATE_MSG)
@@ -1684,16 +2183,35 @@ export async function runGenerateGroup(
           ? '场景锚点图'
           : groupId === 'group-videos'
             ? '分镜视频'
-            : '分镜关键帧'
+            : groupId === 'group-frames'
+              ? '首尾帧'
+              : '分镜关键帧'
     const activity = trackActivity(groupId, `一键生成${noun}`, source, (msg) => onProgress?.(groupId, msg))
     try {
-      activity.progress(`同时生成 ${pending.length} 个节点…`)
+      // 点「分镜视频」一键生成时，首尾帧模式先把帧补齐：视频吃的就是这两张图，
+      // 不补就变成跳过首尾帧列直接出片。
+      if (groupId === 'group-videos') {
+        await ensureShotFrames((msg) => onProgress?.(groupId, msg), signal)
+      }
+      // 必须串行的两种情况：
+      // 1) 视频首尾帧链：下一镜首帧取自上一镜末帧；
+      // 2) 画首尾帧：这一镜的起始帧要参考上一镜的结束帧，并发会把衔接丢掉。
+      const chain =
+        groupId === 'group-frames' || (groupId === 'group-videos' && isFl2vaChainActive(p))
+      const ordered = chain ? sortNodeIdsByShotIndex(p, pending) : pending
+      activity.progress(
+        groupId === 'group-frames'
+          ? `按镜号串行画 ${ordered.length} 镜的首尾帧（这一镜起始帧接着上一镜结束帧）…`
+          : chain
+            ? `首尾帧链模式：按镜号串行生成 ${ordered.length} 镜（下一镜首帧取自上一镜末帧）…`
+            : `同时生成 ${ordered.length} 个节点…`
+      )
       await mapPool(
-        pending,
-        groupId === 'group-videos' ? VIDEO_GEN_CONCURRENCY : IMAGE_GEN_CONCURRENCY,
+        ordered,
+        chain ? 1 : groupId === 'group-videos' ? VIDEO_GEN_CONCURRENCY : IMAGE_GEN_CONCURRENCY,
         (id) => runCanvasNode(id, (nid, msg) => onProgress?.(nid, msg), signal)
       )
-      activity.done(`${noun}已全部提交`)
+      activity.done(chain ? `${noun}已按镜号顺序全部生成` : `${noun}已全部提交`)
     } catch (e: any) {
       activity.fail(e)
       throw e
@@ -2149,6 +2667,10 @@ export async function runCanvasNode(
         const shot = p.shots.find((s) => s.id === node.data.shotId)
         if (!shot) throw new Error('找不到分镜')
         await generateShotImage(shot, report, signal)
+      } else if (node.type === 'shotFrames' && node.data.shotId) {
+        const shot = project.current?.shots.find((s) => s.id === node.data.shotId)
+        if (!shot) throw new Error('找不到分镜')
+        await generateShotFramePair(shot, report, signal)
       } else if (node.type === 'shotVideo' && node.data.shotId) {
         const shot = project.current?.shots.find((s) => s.id === node.data.shotId)
         if (!shot) throw new Error('找不到分镜')
@@ -2225,13 +2747,48 @@ export async function generateMissingImages(onProgress?: (msg: string) => void, 
   await mapPool(ids, 3, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
 }
 
+/**
+ * 首尾帧模式下出片前的补帧：视频吃的就是这两张帧，缺了必须先按镜号画出来，
+ * 否则整列首尾帧会被跳过，这个模式等于白开。画不成的镜头只记一笔、照常出片，绝不拦流程。
+ */
+export async function ensureShotFrames(
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+): Promise<number> {
+  const p = useProjectStore().current
+  if (!p || !needsShotFrames(p)) return 0
+  // 只给真正走首尾帧的镜头补帧，混合模式下普通镜头不浪费出图额度
+  const missing = [...(p.shots ?? [])]
+    .filter((s) => shotUsesFrames(s, p) && (!s.firstFrameAssetId || !s.lastFrameAssetId))
+    .sort((a, b) => a.index - b.index)
+  if (!missing.length) return 0
+  onProgress?.(`首尾帧模式：先按镜号画 ${missing.length} 镜的起始帧和结束帧…`)
+  let done = 0
+  for (const shot of missing) {
+    ensureNotCancelled(signal)
+    try {
+      await generateShotFramePair(shot, (msg) => onProgress?.(msg), signal)
+      done += 1
+    } catch (e: any) {
+      onProgress?.(`第 ${shot.index + 1} 镜首尾帧没画成（${e?.message || '未知原因'}），这一镜照常出片。`)
+    }
+  }
+  return done
+}
+
 export async function generateMissingVideos(onProgress?: (msg: string) => void, signal?: AbortSignal) {
   const p = useProjectStore().current
   if (!p) return
+  await ensureShotFrames(onProgress, signal)
   const ids = p.shots
     .filter((s) => !s.videoAssetId)
     .map((s) => `shotVideo:${s.id}`)
-  await mapPool(ids, VIDEO_GEN_CONCURRENCY, (id) => runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal))
+  // 首尾帧链：下一镜首帧取自上一镜末帧，并发会把衔接丢掉，必须按镜号串行。
+  const chain = isFl2vaChainActive(p)
+  const ordered = chain ? sortNodeIdsByShotIndex(p, ids) : ids
+  await mapPool(ordered, chain ? 1 : VIDEO_GEN_CONCURRENCY, (id) =>
+    runCanvasNode(id, (_nid, msg) => onProgress?.(msg), signal)
+  )
 }
 
 export async function generateMissingAudio(onProgress?: (msg: string) => void, signal?: AbortSignal) {

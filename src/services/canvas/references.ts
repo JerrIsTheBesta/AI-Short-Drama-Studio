@@ -20,6 +20,8 @@ export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID
   if (!shot) return undefined
   if (node.type === 'shotBoard') return shot.boardAssetId
   if (node.type === 'shotImage') return shot.imageAssetId
+  // 首尾帧节点有两张产出，对外连线默认给起始帧
+  if (node.type === 'shotFrames') return shot.firstFrameAssetId || shot.lastFrameAssetId
   if (node.type === 'shotVideo') return shot.videoAssetId
   if (node.type === 'audio') return shot.audioAssetId
   return undefined
@@ -28,7 +30,9 @@ export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID
 export function canvasNodeProducesImage(node?: CanvasNode): boolean {
   return Boolean(
     node &&
-      ['imageGen', 'subject', 'subjectProps', 'scene', 'sceneProps', 'shotBoard', 'shotImage'].includes(node.type)
+      ['imageGen', 'subject', 'subjectProps', 'scene', 'sceneProps', 'shotBoard', 'shotImage', 'shotFrames'].includes(
+        node.type
+      )
   )
 }
 
@@ -113,6 +117,9 @@ export function canvasReferenceSlotEntries(
     }
     if (source?.type === 'shotImage') {
       return { kind: 'keyframe' as const, name: source.data.label || 'keyframe' }
+    }
+    if (source?.type === 'shotFrames') {
+      return { kind: 'extra' as const, name: `${source.data.label || 'frame'} start frame` }
     }
     return {
       kind: 'extra' as const,

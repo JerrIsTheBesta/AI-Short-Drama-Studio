@@ -8,7 +8,7 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/services/ai/env'
 import { desktop, isDesktop } from '@/services/desktop'
-import { stillModeForVideoModel, type VideoStillMode } from '@/types/canvas'
+import { stillModeForVideoModel, type VideoGenModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 
@@ -98,6 +98,11 @@ export interface AppSettings {
   video: VideoEndpoint
   videos: VideoProfile[]
   activeVideoId: string
+  /**
+   * 创作偏好里选的默认视频模型（内置工作流：h3 / h3-v5 / wan-prime）。
+   * undefined = 跟随「已配置的视频接入」（activeVideoId）。节点上单独选过的模型优先于它。
+   */
+  defaultVideoModel?: VideoGenModel
   /** Zealman 镜像独立地址，不与 AutoDL/其它视频 profile 共用。 */
   zealmanBaseUrl: string
   /** AutoDL 令牌。H3 系列内置工作流共用这一个 Key，用户只填这一处。 */
@@ -411,6 +416,7 @@ function buildDefaults(): AppSettings {
     video: asVideo(videoFirst),
     videos: [videoFirst],
     activeVideoId: videoFirst.id,
+    defaultVideoModel: undefined,
     zealmanBaseUrl: '',
     autodlToken: '',
     music: asEndpoint(musicFirst),
@@ -527,6 +533,12 @@ function parseSettings(raw: string | null): AppSettings {
       video: video.active,
       videos: video.list,
       activeVideoId: video.activeId,
+      defaultVideoModel:
+        parsed.defaultVideoModel === 'h3' ||
+        parsed.defaultVideoModel === 'h3-v5' ||
+        parsed.defaultVideoModel === 'wan-prime'
+          ? parsed.defaultVideoModel
+          : undefined,
       zealmanBaseUrl,
       autodlToken,
       music: music.active,
@@ -1029,6 +1041,12 @@ export const useSettingsStore = defineStore('settings', () => {
     if (profile) syncVideo(profile)
   }
 
+  /** 创作偏好：选内置工作流（h3/h3-v5/wan-prime）作为默认视频模型；传 undefined = 跟随已配置接入 */
+  function selectVideoModelDefault(model?: VideoGenModel) {
+    if (config.value.defaultVideoModel === model) return
+    config.value = { ...config.value, defaultVideoModel: model }
+  }
+
   function removeVideo(id: string) {
     if (config.value.videos.length <= 1) return
     const videos = config.value.videos.filter((p) => p.id !== id)
@@ -1192,6 +1210,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setAutodlToken,
     addVideo,
     selectVideo,
+    selectVideoModelDefault,
     removeVideo,
     renameVideo,
     patchMusic,

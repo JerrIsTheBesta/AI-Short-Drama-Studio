@@ -1,6 +1,6 @@
 import { useProjectStore, useSettingsStore } from '@/stores'
 import { needsExternalTts } from '@/utils/shot'
-import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
+import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard, needsShotFrames, shotUsesFrames } from '@/utils/videoStill'
 import { inferVisualStyleFromText } from '@/utils/visualStyle'
 import { topicFromBrief } from '@/utils/storyBrief'
 import { controlledSignal, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
@@ -12,7 +12,8 @@ import {
   generateMissingBoards,
   generateMissingImages,
   generateMissingVideos,
-  generateMissingAudio
+  generateMissingAudio,
+  generateShotFramePair
 } from './runner'
 import { nextExtractStage, type ExtractStage } from './pipeline'
 import { revealCanvas } from './canvasBridge'
@@ -38,6 +39,8 @@ export type AgentToolName =
   | 'generate_all_boards'
   | 'generate_shot_image'
   | 'generate_all_images'
+  | 'generate_shot_frames'
+  | 'generate_all_frames'
   | 'generate_video'
   | 'generate_all_videos'
   | 'generate_audio'
@@ -198,25 +201,56 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     }
   }
 
+  if (action.tool === 'generate_shot_frames') {
+    const shot = shotFor(action)
+    if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
+    if (!shotUsesFrames(shot, project)) {
+      return { state: 'skip', detail: `第 ${shot.index + 1} 镜不是首尾帧模式，不需要画帧` }
+    }
+    if (shot.firstFrameAssetId && shot.lastFrameAssetId) {
+      return { state: 'skip', detail: `第 ${shot.index + 1} 镜首尾帧已经存在` }
+    }
+    const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
+    const missingSubjects = (project.subjects ?? []).filter(
+      (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
+    )
+    const scene = (project.scenes ?? []).find((item) => item.id === shot.sceneId) || (project.scenes ?? [])[0]
+    const repairs: AgentToolAction[] = missingSubjects.map((subject) => ({ tool: 'generate_sheet', subjectId: subject.id }))
+    if (scene && !scene.plateAssetId) repairs.push({ tool: 'generate_scene', sceneId: scene.id })
+    if (repairs.length) {
+      return { state: 'repair', detail: `第 ${shot.index + 1} 镜缺少人设或场景，先补齐再画首尾帧`, actions: repairs }
+    }
+  }
+
   if (action.tool === 'generate_shot_board' || action.tool === 'generate_video' || action.tool === 'generate_audio') {
     const shot = shotFor(action)
     if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
 
     if (action.tool === 'generate_video') {
       if (shot.videoAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜视频已经存在` }
+      const fl2vaShot = shotUsesFrames(shot, project)
       const stillMode = stillModeForShot(shot, project)
-      if (stillMode === 'storyboard' && !shot.boardAssetId) {
+      if (!fl2vaShot && stillMode === 'storyboard' && !shot.boardAssetId) {
         return {
           state: 'repair',
           detail: `第 ${shot.index + 1} 镜缺少故事看板，先补看板`,
           actions: [{ tool: 'generate_shot_board', shotId: shot.id }]
         }
       }
-      if (stillMode === 'keyframe' && !shot.imageAssetId) {
+      if (!fl2vaShot && stillMode === 'keyframe' && !shot.imageAssetId) {
         return {
           state: 'repair',
           detail: `第 ${shot.index + 1} 镜缺少四宫格关键帧，先补关键帧`,
           actions: [{ tool: 'generate_shot_image', shotId: shot.id }]
+        }
+      }
+      // 首尾帧模式：视频吃的就是这两张帧，缺了必须先画，否则这一镜等于没走首尾帧。
+      // 只在两张都缺时补一次——画过一半或用户自己指定过就不再拦，避免补帧失败反复重来。
+      if (fl2vaShot && !shot.firstFrameAssetId && !shot.lastFrameAssetId) {
+        return {
+          state: 'repair',
+          detail: `第 ${shot.index + 1} 镜要走首尾帧，先画起始帧和结束帧`,
+          actions: [{ tool: 'generate_shot_frames', shotId: shot.id }]
         }
       }
       const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
@@ -291,6 +325,9 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
 
   if (action.tool === 'generate_all_videos') {
     if (!(project.shots ?? []).some((shot) => !shot.videoAssetId)) return { state: 'skip', detail: '分镜视频已经补齐' }
+    if (needsShotFrames(project) && (project.shots ?? []).some((shot) => shotUsesFrames(shot, project) && !shot.firstFrameAssetId && !shot.lastFrameAssetId)) {
+      return { state: 'repair', detail: '首尾帧模式：出视频前先补齐每镜的起始帧和结束帧', actions: [{ tool: 'generate_all_frames' }] }
+    }
     if (shotsMissingKeyframe(project).length) {
       return { state: 'repair', detail: '批量视频缺少关键帧，先补事件画面', actions: [{ tool: 'generate_all_images' }] }
     }
@@ -349,6 +386,13 @@ export function verifyRegisteredTool(raw: unknown): string | null {
       if (!shot) return '关键帧没有落库'
       if (stillModeForShot(shot, project) !== 'keyframe') return null
       return shot.imageAssetId ? null : '关键帧没有落库'
+    case 'generate_shot_frames':
+      if (!shot) return '首尾帧没有落库'
+      return shot.firstFrameAssetId && shot.lastFrameAssetId ? null : '首尾帧没有落库'
+    case 'generate_all_frames':
+      return (project.shots ?? []).some((s) => !s.firstFrameAssetId || !s.lastFrameAssetId)
+        ? '仍有镜头缺首尾帧'
+        : null
     case 'generate_all_boards':
       return shotsMissingStoryboard(project).length || shotsMissingKeyframe(project).length
         ? '仍有看板或关键帧缺失'
@@ -668,6 +712,33 @@ const definitions: ToolDefinition[] = [
     name: 'generate_all_images', phase: 3, timeoutMs: 900_000,
     estimate: () => ({ calls: counts().images, seconds: counts().images * 45 }),
     async execute(_action, ctx) { await generateMissingImages(ctx.onLog, ctx.signal); return '关键帧已补齐' }
+  },
+  {
+    name: 'generate_shot_frames', phase: 3, timeoutMs: 300_000, required: ['shotId'],
+    estimate: () => ({ calls: 2, seconds: 90 }),
+    async execute(action, ctx) {
+      const shot = useProjectStore().current?.shots.find((item) => item.id === action.shotId)
+      if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
+      await generateShotFramePair(shot, (msg) => ctx.onLog?.(msg), ctx.signal)
+      revealCanvas(`shotFrames:${action.shotId}`)
+      return `第 ${shot.index + 1} 镜首尾帧已完成`
+    }
+  },
+  {
+    name: 'generate_all_frames', phase: 3, timeoutMs: 1800_000,
+    estimate: () => ({ calls: counts().images * 2, seconds: counts().images * 90 }),
+    async execute(_action, ctx) {
+      const p = useProjectStore().current
+      const targets = (p?.shots ?? [])
+        .filter((s) => !s.firstFrameAssetId || !s.lastFrameAssetId)
+        .sort((a, b) => a.index - b.index)
+      if (!targets.length) return '所有镜头都已经画好首尾帧'
+      // 这一镜起始帧要接着上一镜结束帧，必须按镜号串行
+      for (const shot of targets) {
+        await generateShotFramePair(shot, (msg) => ctx.onLog?.(msg), ctx.signal)
+      }
+      return `${targets.length} 个镜头的首尾帧已按镜号画完`
+    }
   },
   {
     name: 'generate_video', phase: 4, timeoutMs: 20 * 60_000, required: ['shotId'], estimate: oneVideo,

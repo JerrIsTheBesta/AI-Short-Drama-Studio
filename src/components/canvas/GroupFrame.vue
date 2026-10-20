@@ -28,6 +28,7 @@ const generatable = computed(
     props.data.kind === 'subject' ||
     props.data.kind === 'scene' ||
     props.data.kind === 'shot' ||
+    props.data.kind === 'frames' ||
     props.data.kind === 'video'
 )
 const running = computed(() => isNodeRunning(props.id))
@@ -50,6 +51,7 @@ const childCount = computed(
           n.type === 'scene' ||
           n.type === 'shotBoard' ||
           n.type === 'shotImage' ||
+          n.type === 'shotFrames' ||
           n.type === 'shotVideo' ||
           n.type === 'sceneProps')
     ).length ?? 0
@@ -98,7 +100,7 @@ async function generateAll(ev: Event) {
   ev.stopPropagation()
   if (busy.value || !generatable.value || !hasItems.value) return
   if (
-    (props.data.kind === 'shot' || props.data.kind === 'video') &&
+    (props.data.kind === 'shot' || props.data.kind === 'frames' || props.data.kind === 'video') &&
     !isPlayApproved(project.current)
   ) {
     toast.warn(PLAY_GATE_MSG)

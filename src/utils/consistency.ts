@@ -461,6 +461,67 @@ export function missingCastAssets(project: Project): {
   }
 }
 
+export type ShotRefOwnerKind = 'character' | 'scene' | 'prop' | 'board' | 'keyframe' | 'extra'
+
+/** 这张参考图到底是谁的：按资源 id 反查人物 / 场景 / 道具 / 看板 / 关键帧。 */
+export function shotRefOwner(
+  id: ID,
+  shot: Shot,
+  project: Project
+): { kind: ShotRefOwnerKind; name: string } {
+  const sub = (project.subjects ?? []).find((item) => item.designSheetAssetId === id)
+  if (sub) return { kind: 'character', name: sub.name }
+  const scene = (project.scenes ?? []).find(
+    (item) => item.plateAssetId === id || item.propSheetAssetId === id
+  )
+  if (scene) {
+    return scene.plateAssetId === id
+      ? { kind: 'scene', name: scene.name }
+      : { kind: 'prop', name: scene.name }
+  }
+  if (shot.boardAssetId && shot.boardAssetId === id) {
+    return { kind: 'board', name: `第 ${shot.index + 1} 镜故事看板` }
+  }
+  if (shot.imageAssetId && shot.imageAssetId === id) {
+    return { kind: 'keyframe', name: `第 ${shot.index + 1} 镜四宫格关键帧` }
+  }
+  return { kind: 'extra', name: '额外参考图' }
+}
+
+const REF_OWNER_JOB: Record<ShotRefOwnerKind, (name: string) => string> = {
+  character: (name) =>
+    `「${name}」的人物设定图：锁住这个人的脸、发型、体型、年龄和服装；只做身份参考，不是成片首帧，不要把四宫格画进画面。`,
+  scene: (name) =>
+    `「${name}」的场景锚点图：锁住空间、材质、天气和光线；全片只用这一个地方，不要把四宫格画进画面。`,
+  prop: (name) => `「${name}」的关键道具设定图：只锁住剧情里真正用到的那几件道具。`,
+  board: (name) => `${name}：只用来确定构图、站位和动作顺序；绝对不要把格子、线稿或编号画进画面。`,
+  keyframe: (name) => `${name}：只用来确定动作顺序；绝对不要把宫格和编号画进画面。`,
+  extra: () => `额外参考图：对齐里面的人物、服装、产品或画面风格。`
+}
+
+/**
+ * 参考图编号对照：图1是谁、图2是哪里。
+ * 编号严格按真正发出去的图顺序排，模型才知道哪张图对应哪个人。
+ */
+export function shotRefRoster(
+  shot: Shot,
+  project: Project,
+  ids: ID[],
+  tail?: string
+): string {
+  const usable = (ids ?? []).filter(Boolean)
+  if (!usable.length && !tail) return ''
+  const lines = usable.map((id, i) => {
+    const owner = shotRefOwner(id, shot, project)
+    return `图${i + 1}：${REF_OWNER_JOB[owner.kind](owner.name)}`
+  })
+  if (tail) lines.push(tail)
+  return [
+    '参考图对照（严格按这个编号理解；这些图只做身份和空间锁定，不是要照抄的成片）：',
+    ...lines
+  ].join('\n')
+}
+
 export function composeShotImagePrompt(
   shot: Shot,
   project: Project,
@@ -469,7 +530,8 @@ export function composeShotImagePrompt(
   const chars = subjectsForShot(shot, project)
   const scene = sceneForShot(shot, project)
   const aesthetic = project.script?.aesthetic?.trim()
-  const parts = [basePrompt.trim()]
+  const roster = shotRefRoster(shot, project, collectShotRefIds(shot, project).ids)
+  const parts = [roster, basePrompt.trim()]
   const ar = project.settings?.aspectRatio || '16:9'
   parts.push(`画面比例必须是 ${ar}，整张图按这个画幅输出，禁止另一种比例。`)
   const dialogueSpeaker = (shot.voiceover || '').match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()

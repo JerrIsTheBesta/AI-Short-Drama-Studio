@@ -29,6 +29,16 @@ export interface H3PromptInput {
   voiceover?: string
   voiceMode?: 'dialogue' | 'voiceover' | 'none'
   speakerHint?: string
+  /**
+   * 说话角色的音色描述（中文，来自人物节点 voicePrompt）。
+   * 台词本身是中文，所以这里不进 englishOrOmit，直接跟在说话人后面。
+   */
+  speakerVoice?: string
+  /**
+   * 本镜出场人物各自的声音描述（中文，来自人物卡 voicePrompt）。
+   * 必须写在提示词最开头，紧跟「图几是谁」，否则会被正文中文清洗一起抹掉。
+   */
+  voiceRoster?: string
   speakerName?: string
   /** 画面里实际出镜的人，画外音时必须闭嘴。 */
   onScreenNames?: string[]
@@ -125,22 +135,26 @@ export function isMessyH3Prompt(text: string): boolean {
   if (/Play the following director notes/i.test(t)) return true
   if (/subject_definitions\s*:/i.test(t)) return true
   if (/the place named in the director notes/i.test(t)) return true
-  const outside = t
+  return /[㐀-鿿]/.test(stripAllowedCjk(t))
+}
+
+/**
+ * 允许留在英文正文里的中文：台词 <d>、图号身份、被《》式书名号包的人名，
+ * 以及开头那块「人物声音」（音色是中文，删了人物就没有声音了）。
+ */
+function stripAllowedCjk(text: string): string {
+  return String(text || '')
     .replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
     .replace(/图\s*\d+\s*[是：:=]*/g, '')
     .replace(/「[^」]{1,24}」/g, '')
-  return /[㐀-鿿]/.test(outside)
+    .replace(/人物声音[^\n]*(?:\r?\n(?!\r?\n)[^\n]*)*/g, '')
 }
 
 function cjkOutsideSpokenTags(text: string): boolean {
-  const outside = String(text || '')
-    .replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
-    .replace(/图\s*\d+\s*[是：:=]*/g, '')
-    .replace(/「[^」]{1,24}」/g, '')
-  return /[㐀-鿿]/.test(outside)
+  return /[㐀-鿿]/.test(stripAllowedCjk(text))
 }
 
-/** 正文里的汉字一律删掉；只保留 <d> 里的台词，以及图号/「人名」身份锁定。 */
+/** 正文里的汉字一律删掉；只保留 <d> 里的台词、图号/「人名」身份锁定和人物声音块。 */
 export function stripCjkOutsideSpokenTags(text: string): string {
   const held: string[] = []
   const mask = (block: string) => {
@@ -151,6 +165,9 @@ export function stripCjkOutsideSpokenTags(text: string): string {
     .replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, mask)
     .replace(/图\s*\d+\s*[是：:=]*/g, mask)
     .replace(/「[^」]{1,24}」/g, mask)
+    // 音色是中文：整块护住，否则会被下面的汉字清理删成空壳
+    .replace(/人物声音[^\n]*(?:\r?\n(?!\r?\n)[^\n]*)*/g, mask)
+    .replace(/voice\s*:\s*[^\n,]*/gi, mask)
   const cleaned = masked
     .replace(/[\u3400-\u9fff]+/g, '')
     .replace(/This shot is titled\s*\./gi, '')
@@ -475,6 +492,36 @@ export function ensurePictureIdentity(prompt: string, input: H3PromptInput): str
   return `${block}\n\n${src}`
 }
 
+/**
+ * 人物声音必须紧跟「图几是谁」写清楚：谁的声音是什么样，开口就按这个来。
+ * 用代码插入，不依赖模型自觉，也不让旧稿里残缺的音色段落留在正文中间。
+ */
+export function ensureVoiceRoster(prompt: string, roster: string): string {
+  const block = String(roster || '').trim()
+  if (!block) return String(prompt || '')
+  const src = String(prompt || '')
+    .replace(/人物声音[^\n]*(?:\r?\n(?!\r?\n)[^\n]*)*/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  if (!src) return block
+  const lines = src.split('\n')
+  let last = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (/^\s*图\s*\d+\s*[/：:=是]/.test(line)) {
+      last = i
+      continue
+    }
+    // 图号块结束（遇到空行或正文起手）就停，别把正文里的图号也算进来
+    if (last >= 0 && (!line.trim() || /^\[Shot\s*\d+\]/i.test(line))) break
+  }
+  if (last >= 0) {
+    lines.splice(last + 1, 0, '', block)
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n')
+  }
+  return `${block}\n\n${src}`
+}
+
 function onScreenEnglish(input: H3PromptInput): string[] {
   const fromSlots = slotsOf(input)
     .filter((slot) => slot.kind === 'character')
@@ -522,17 +569,30 @@ function closedMouthLock(input: H3PromptInput): string {
 function dialogueBlocks(input: H3PromptInput, lines: string[]): string {
   if (!lines.length || input.voiceMode === 'none') return 'No dialogue. No lips moving.'
   const who = speakerSubjectLabel(input)
+  const voiceTag = String(input.speakerVoice || '').trim().replace(/[；;]+$/, '')
   if (input.voiceMode === 'voiceover') {
     const spoken = lines
-      .map((line, i) => `${who} (S${i + 1}) says in an off-screen voiceover: ${h3SpokenTag(line)}`)
+      .map(
+        (line, i) =>
+          `${who} (S${i + 1})${voiceTag ? `, voice: ${voiceTag}` : ''} says in an off-screen voiceover: ${h3SpokenTag(line)}`
+      )
       .join(' ')
     return `${spoken} while lips remain completely closed. ${closedMouthLock(input)} The words inside the d tag are being called from off-screen; nobody on screen mouths them.`
   }
   const hint = englishOrOmit(input.speakerHint?.replace(/^\[|\]$/g, ''))
+  // 角色音色是中文，台词本身也是中文，所以不走 englishOrOmit，直接跟在说话人后面。
   return lines
     .map((line, i) => {
       const id = `S${i + 1}`
-      const lead = i === 0 && hint ? `${who} (${id}), ${hint},` : i === 0 ? `${who} (${id})` : `(${id})`
+      const extra = [voiceTag ? `voice: ${voiceTag}` : '', hint].filter(Boolean).join(', ')
+      const lead =
+        i === 0 && extra
+          ? `${who} (${id}), ${extra},`
+          : i === 0
+            ? `${who} (${id})`
+            : extra
+              ? `(${id}, same voice)`
+              : `(${id})`
       return `${lead} says: ${h3SpokenTag(line)}`
     })
     .join(' ')
@@ -659,7 +719,10 @@ function retentionAnalysis(input: H3PromptInput): string {
 
 function assembleOfficial(desc: string, sound: string, music = 'N/A', input?: H3PromptInput): string {
   let body = stripCjkOutsideSpokenTags(desc.trim())
-  if (input) body = ensurePictureIdentity(body, input)
+  if (input) {
+    body = ensurePictureIdentity(body, input)
+    body = ensureVoiceRoster(body, input.voiceRoster || '')
+  }
   const extraJobs = input
     ? slotsOf(input)
         .filter((slot) => slot.kind === 'extra' && slot.index > 1)
@@ -1383,6 +1446,7 @@ ${(resolved.onScreenNames || []).map((name, i) => `S${i + 1} = ${name}`).join('\
 MUST COPY into the prompt as 图N：「中文名」 / <Picture N> mapping (identity/location lock, not first frames):
 ${pictureRoster(resolved) || 'no extra pictures'}
 Voice mode: ${cueLines.length ? resolved.voiceMode || 'dialogue' : 'none — no trusted spoken lines; do NOT invent dialogue'}
+Character voice (this speaker's own timbre, kept verbatim as delivery inside each <d> bracket; do not reinterpret or translate it away): ${resolved.speakerVoice || '(not set — infer a natural timbre that fits the character)'}
 Spoken lines already extracted (quotes / 台词 / 口播栏 only; director notes are NOT speech):
 ${cueLines.length ? cueLines.map((line, i) => `${i + 1}. ${line}`).join('\n') : '(none — write No dialogue. No lips moving.)'}
 Dialogue ownership recovered from the source (each item is one exclusive turn; preserve this order):

@@ -3,17 +3,25 @@
  */
 
 import { buildAuthHeader, providerHttp, type AdapterConfig } from '@/services/ai/adapters'
+import { guessInputMap, type ComfyInputBinding } from '@/services/ai/comfyInputMap'
 
 export type ComfyWorkflowFormat = 'api' | 'ui' | 'unknown'
 
 export interface DiscoveredWorkflow {
   id: string
   name: string
-  /** userdata 相对路径，如 workflows/foo.json */
+  /** userdata 相对路径，如 workflows/foo.json 或 foo.json（取决于服务返回） */
   path: string
   size?: number
   modified?: number
   source: 'userdata' | 'api-workflows' | 'url' | 'file'
+  /**
+   * 列举成功的目录前缀（如 workflows）。列表接口常返回相对该目录的路径，
+   * 读取文件时必须把这个前缀拼回去，否则 404。
+   */
+  root?: string
+  /** 列举成功的接口（如 /userdata、/api/v2/userdata），读取时优先复用 */
+  endpoint?: string
 }
 
 export interface DiscoverResult {
@@ -31,6 +39,12 @@ export interface WorkflowParseResult {
   /** 可写入 adapter.workflowTemplate 的字符串（API 提交体） */
   template?: string
   detail: string
+  /** 调试用：实际请求过的完整 URL 与返回状态 */
+  tried?: string[]
+  /** 解析后的节点图，供助手分析输入映射 */
+  payload?: any
+  /** 规则初判的输入节点（助手分析前 / 助手不可用时的兜底） */
+  bindings?: ComfyInputBinding[]
 }
 
 function trimSlash(url: string) {
@@ -97,11 +111,16 @@ export function parseComfyWorkflowJson(text: string): WorkflowParseResult {
     payload = { prompt: o }
   }
   if (!payload.client_id) payload.client_id = 'ai-cut'
+  // 不再往 JSON 里写死占位符：节点怎么接输入由助手读完结构后给出映射，
+  // 保存时会一并把映射写进接入配置。
+  const bindings = guessInputMap(payload).bindings
   return {
     ok: true,
     format: 'api',
     template: JSON.stringify(payload, null, 2),
-    detail: '已识别为 API Format，可保存到当前接入。'
+    payload,
+    detail: '已识别为 API Format。请点「用助手分析工作流」，由助手确认提示词 / 参考图该接到哪个节点。',
+    bindings
   }
 }
 
@@ -133,22 +152,29 @@ async function tryGetJson(
   }
 }
 
-function normalizeListedFiles(data: unknown, dirHint: string): DiscoveredWorkflow[] {
+function normalizeListedFiles(
+  data: unknown,
+  dirHint: string,
+  endpoint?: string
+): DiscoveredWorkflow[] {
   const out: DiscoveredWorkflow[] = []
+  const root = String(dirHint || '').replace(/^\/+|\/+$/g, '')
   const push = (pathRaw: string, size?: number, modified?: number) => {
     let rel = String(pathRaw || '').replace(/^\/+/, '')
     if (!rel) return
-    if (!rel.includes('/') && dirHint) rel = `${dirHint.replace(/\/$/, '')}/${rel}`
-    if (!/\.json$/i.test(rel)) return
-    const name = rel.split('/').pop() || rel
-    out.push({
-      id: rel,
-      name,
-      path: rel,
-      size,
-      modified,
-      source: 'userdata'
-    })
+    if (/\.json$/i.test(rel)) {
+      const name = rel.split('/').pop() || rel
+      out.push({
+        id: rel,
+        name,
+        path: rel,
+        size,
+        modified,
+        source: 'userdata',
+        root: root || undefined,
+        endpoint
+      })
+    }
   }
   if (Array.isArray(data)) {
     for (const item of data) {
@@ -220,7 +246,7 @@ export async function discoverComfyWorkflows(opts: {
       tried.push(`GET ${listPath}?dir=${dir}`)
       const res = await tryGetJson(url, headers)
       if (!res.ok) continue
-      const found = normalizeListedFiles(res.data, dir.replace(/\/$/, ''))
+      const found = normalizeListedFiles(res.data, dir.replace(/\/$/, ''), listPath)
       if (found.length) {
         workflows = found
         break
@@ -268,33 +294,89 @@ export async function discoverComfyWorkflows(opts: {
   }
 }
 
-/** 拉取 userdata 中的单个工作流文件 */
+function uniqStrings(list: string[]): string[] {
+  return [...new Set(list.map((s) => s.trim()).filter(Boolean))]
+}
+
+/**
+ * 拉取 userdata 中的单个工作流文件。
+ * 关键：列表接口通常返回「相对目录」的路径（如 C图像-Zimage/xx.json），
+ * 读取时必须把列举时用的目录前缀（workflows 等）拼回去，否则必然 404。
+ */
 export async function fetchComfyUserdataWorkflow(opts: {
   baseUrl: string
   path: string
   apiKey?: string
   adapter?: AdapterConfig
+  /** 列举时成功的目录前缀（来自 DiscoveredWorkflow.root） */
+  root?: string
+  /** 列举时成功的接口（来自 DiscoveredWorkflow.endpoint） */
+  endpoint?: string
+  source?: DiscoveredWorkflow['source']
 }): Promise<WorkflowParseResult> {
   const base = trimSlash(opts.baseUrl || '')
   const rel = String(opts.path || '').replace(/^\/+/, '')
   if (!base || !rel) return { ok: false, format: 'unknown', detail: '缺少地址或路径' }
   const headers = authHeaders(opts.apiKey, opts.adapter)
-  const candidates = [
-    `/userdata/${rel.split('/').map(encodeURIComponent).join('/')}`,
-    `/userdata/${encodeURIComponent(rel)}`,
-    `/api/userdata/${rel.split('/').map(encodeURIComponent).join('/')}`,
-    `/api/userdata/${encodeURIComponent(rel)}`
-  ]
-  for (const path of candidates) {
-    const res = await tryGetJson(joinUrl(base, path), headers)
-    if (!res.ok || res.data == null) continue
+
+  const roots = uniqStrings([opts.root || '', 'workflows', 'user/default/workflows', 'default/workflows', ''])
+  const endpoints = uniqStrings([
+    opts.endpoint || '',
+    '/userdata',
+    '/api/userdata',
+    '/v2/userdata',
+    '/api/v2/userdata'
+  ])
+  const relSeg = rel.split('/').map(encodeURIComponent).join('/')
+  const relFlat = encodeURIComponent(rel)
+  const fullSeg = (root: string) => (root ? `${root}/${rel}` : rel)
+
+  const build = (ep: string, root: string) => {
+    const prefix = root ? `${ep}/${root.split('/').map(encodeURIComponent).join('/')}` : ep
+    return [`${prefix}/${relSeg}`, `${prefix}/${relFlat}`]
+  }
+  const knownRoot = opts.root || ''
+  const knownEp = opts.endpoint || ''
+  const otherRoots = roots.filter((r) => r !== knownRoot)
+  const otherEps = endpoints.filter((e) => e !== knownEp)
+  const candidates: string[] = []
+  // 1) 列举成功时的接口 + 目录（最可能命中），两种编码都试
+  if (knownEp) candidates.push(...build(knownEp, knownRoot))
+  // 2) 同一接口换目录前缀（列表返回相对路径的情况）
+  if (knownEp) for (const r of otherRoots) candidates.push(...build(knownEp, r).slice(0, 1))
+  // 3) 换接口、仍用已知目录
+  for (const e of otherEps) candidates.push(...build(e, knownRoot).slice(0, 1))
+  // 4) 最常见兜底：/userdata/workflows/... 与 /api/userdata/workflows/...
+  candidates.push(...build('/userdata', 'workflows').slice(0, 1), ...build('/api/userdata', 'workflows').slice(0, 1))
+  // 5) 查询串形式（部分网关 / 云 API 用 ?file= 而不是路径参数）
+  for (const ep of endpoints) {
+    for (const root of roots) {
+      candidates.push(`${ep}?file=${encodeURIComponent(fullSeg(root))}`)
+    }
+  }
+  // 6) 部分扩展把工作流当资源暴露（/api/workflows/xx）
+  if (opts.source === 'api-workflows' || !opts.source) {
+    const id = encodeURIComponent(rel)
+    candidates.push(`/api/workflows/${id}`, `/workflows/${id}`)
+  }
+  const tried: string[] = []
+  let last = ''
+  for (const path of uniqStrings(candidates)) {
+    const url = joinUrl(base, path)
+    const res = await tryGetJson(url, headers)
+    tried.push(`${res.status || 'ERR'} ${url}`)
+    if (!res.ok || res.data == null) {
+      last = `${res.status || '无响应'} ${(res.text || '').slice(0, 80)}`.trim()
+      continue
+    }
     const text = typeof res.data === 'string' ? res.data : JSON.stringify(res.data)
     return parseComfyWorkflowJson(text)
   }
   return {
     ok: false,
     format: 'unknown',
-    detail: `无法读取工作流文件「${rel}」。若路径含多级目录，部分旧版 Comfy 可能不支持，请改用粘贴或文件导入。`
+    tried,
+    detail: `无法读取工作流文件「${rel}」。已试 ${tried.length} 种路径${last ? `，最后返回：${last}` : ''}。请点「查看尝试过的地址」把结果发我，或改用「粘贴 API Format JSON」/「从文件导入」。`
   }
 }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { AdapterConfig, AdapterType } from '@/services/ai/adapters'
+import { analyzeWorkflowWithLlm, validateInputMap } from '@/services/ai/comfyInputMap'
 import ComfyWorkflowPanel from '@/components/settings/ComfyWorkflowPanel.vue'
 
 const props = defineProps<{
@@ -100,9 +101,23 @@ function onPasteWorkflow(ev: ClipboardEvent) {
       ev.preventDefault()
       const pretty = JSON.stringify(obj, null, 2)
       patchAdapter({ type: 'comfyui-prompt', workflowTemplate: pretty })
+      // 粘贴完就让助手读完节点图，把提示词 / 参考图接到正确的节点上
+      void analyzeMap(pretty)
     }
   } catch {
     /* 交给 textarea 正常粘贴 */
+  }
+}
+
+async function analyzeMap(template: string) {
+  try {
+    const payload = JSON.parse(template)
+    const { map } = await analyzeWorkflowWithLlm(payload)
+    const checked = validateInputMap(payload, map)
+    if (!checked.bindings.length) return
+    patchAdapter({ inputMap: checked })
+  } catch {
+    /* 分析失败不打断粘贴；可在下方工作流面板里重新分析 */
   }
 }
 </script>

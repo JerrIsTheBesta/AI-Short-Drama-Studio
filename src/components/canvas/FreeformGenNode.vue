@@ -667,12 +667,6 @@ function removeSelf() {
               : '写提示词，可加参考图做图生图…'
           "
         />
-        <AspectRatioSeg v-model="aspectRatio" compact />
-        <VideoResolutionSeg
-          v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
-          v-model="videoResolution"
-          compact
-        />
         <div class="prompt-foot">
           <ImageModelSelect v-if="!isVideo" />
           <VideoModelSelect
@@ -680,6 +674,13 @@ function removeSelf() {
             v-model="videoModel"
             :profile-id="node?.data.videoProfileId"
             @select-profile="(id) => applyShotVideoProfile(props.id, id)"
+          />
+          <!-- 比例和模型同排：一眼看到「用什么模型、出什么画幅」 -->
+          <AspectRatioSeg v-model="aspectRatio" compact />
+          <VideoResolutionSeg
+            v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
+            v-model="videoResolution"
+            compact
           />
           <div v-if="isVideo" class="dur-edit">
             <button type="button" class="dur-btn" @click="durOpen = durOpen === 'foot' ? '' : 'foot'">
@@ -1054,8 +1055,15 @@ function removeSelf() {
 .prompt-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 8px;
+}
+.prompt-foot > :deep(.psel:first-child) {
+  flex: 1 1 140px;
+}
+.prompt-foot > .go {
+  margin-left: auto;
 }
 .dur-edit {
   position: relative;
@@ -1070,7 +1078,7 @@ function removeSelf() {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background-color: var(--color-bg-2);
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%23f5f5fa' d='M1.2 1.2L6 6l4.8-4.8' stroke='%23f5f5fa' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1.4 2.2L6 6.2l4.6-4' fill='none' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;
   background-position: right 8px center;
   background-size: 10px;
@@ -1079,6 +1087,11 @@ function removeSelf() {
   font-weight: 650;
   cursor: pointer;
   outline: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.dur-btn:hover {
+  border-color: var(--color-text-4, #64748b);
+  background-color: var(--color-bg-3);
 }
 .dur-menu {
   position: absolute;

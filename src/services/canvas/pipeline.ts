@@ -1,10 +1,10 @@
 import type { Project } from '@/types'
 import { isPlayApproved, needsPlayReview } from './playGate'
 import { needsExternalTts } from '@/utils/shot'
-import { shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
+import { frameStagePending, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
 
 export interface PipelineStep {
-  id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'videos' | 'audio'
+  id: 'play' | 'board' | 'review' | 'cast' | 'panels' | 'images' | 'frames' | 'videos' | 'audio'
   label: string
   tools: { tool: string }[]
   focusNodeId?: string
@@ -102,6 +102,15 @@ export function nextPipelineStep(p: Project | null | undefined): PipelineStep | 
       label: '分镜关键帧',
       tools: [{ tool: 'generate_all_images' }],
       focusNodeId: 'group-shots'
+    }
+  }
+  // 首尾帧模式：视频用的就是这两张帧，必须先画，否则这一列会被整条流水线跳过。
+  if (frameStagePending(p)) {
+    return {
+      id: 'frames',
+      label: '首尾帧',
+      tools: [{ tool: 'generate_all_frames' }],
+      focusNodeId: 'group-frames'
     }
   }
   if (p.shots.some((s) => !s.videoAssetId)) {
@@ -241,6 +250,8 @@ export const TOOL_LABEL: Record<string, string> = {
   generate_all_boards: '补齐故事看板',
   generate_shot_image: '生成关键帧',
   generate_all_images: '补齐关键帧',
+  generate_shot_frames: '生成首尾帧',
+  generate_all_frames: '补齐首尾帧',
   generate_video: '生成分镜视频',
   generate_all_videos: '补齐分镜视频',
   generate_audio: '生成口播',
