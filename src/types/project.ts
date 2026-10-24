@@ -271,6 +271,11 @@ export interface Script {
    */
   playReady?: boolean
   /**
+   * imported：用户导入的成稿。拆分镜只按原文切，禁止智能体重写正文。
+   * generated：由「写剧本」生成。未标记的旧项目保持原行为。
+   */
+  origin?: 'imported' | 'generated'
+  /**
    * 拆分镜的断点标记：按剧情工作包记录已完成的小组结果。
    * playKey 与剧本正文对应；重跑「拆分镜」时同文本可直接跳过已完成的小组，不再从头消费 token。
    */

@@ -24,7 +24,7 @@ import {
   subjectsForShot
 } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
-import { lookFromScript } from '@/utils/visualStyle'
+import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
 export function defaultSubjectSheetPrompt(subject: Subject, project: Project): string {
@@ -160,25 +160,36 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
     .join('\n\n')
 }
 
+/** 出图前补上全片画风。已写明同一种画风时不重复堆。 */
+export function ensureStyleLock(prompt: string, project: Project): string {
+  const look = lookFromScript(project.script)
+  const line = `画风要求：全片统一为「${look.medium}」。${mediumLockText(look)}`
+  const body = prompt.trim()
+  if (body.includes(look.medium) && /画风|绘制媒介|必须按/.test(body)) return body
+  return `${body}\n${line}`.trim()
+}
+
 export function subjectSendPrompt(subject: Subject, project: Project): string {
   const raw = subject.sheetPrompt?.trim() || defaultSubjectSheetPrompt(subject, project)
-  return ensureCharacterSheetWhiteBackground(raw)
+  return ensureStyleLock(ensureCharacterSheetWhiteBackground(raw), project)
 }
 
 export function sceneSendPrompt(scene: Scene, project: Project): string {
-  return scene.platePrompt?.trim() || defaultScenePlatePrompt(scene, project)
+  return ensureStyleLock(scene.platePrompt?.trim() || defaultScenePlatePrompt(scene, project), project)
 }
 
 export function scenePropSendPrompt(scene: Scene, project: Project): string {
-  return scene.propSheetPrompt?.trim() || defaultScenePropPrompt(scene, project)
+  return ensureStyleLock(scene.propSheetPrompt?.trim() || defaultScenePropPrompt(scene, project), project)
 }
 
 export function boardSendPrompt(shot: Shot, project: Project): string {
-  return shot.boardPrompt?.trim() || defaultBoardPrompt(shot, project)
+  const raw = shot.boardPrompt?.trim() || defaultBoardPrompt(shot, project)
+  const film = project.pipelineMode !== 'remake' && project.script?.workflowMode === 'film-chapter'
+  return film ? ensureStyleLock(raw, project) : raw
 }
 
 export function shotImageSendPrompt(shot: Shot, project: Project): string {
-  return shot.imagePrompt?.trim() || defaultShotImagePrompt(shot, project)
+  return ensureStyleLock(shot.imagePrompt?.trim() || defaultShotImagePrompt(shot, project), project)
 }
 
 /** 运镜对结束帧构图的影响：结束帧不是把开场画面复制一遍，要走到运镜的落点 */
@@ -242,7 +253,7 @@ export function defaultShotFramePrompts(shot: Shot, project: Project): { start: 
     .replace(/<d>[\s\S]*?<\/d>/gi, '')
     .trim()
   const common = [
-    look.style ? `整体影像风格：${look.style}。` : '',
+    look.medium ? `画风要求：全片统一为「${look.medium}」。` : '',
     place.name ? `场景：${place.name}。` : '',
     place.lighting ? `光线：${place.lighting}。` : '',
     cast.length
@@ -285,8 +296,11 @@ export function shotFrameSendPrompt(
   project: Project,
   which: 'start' | 'end'
 ): string {
-  if (which === 'start') return shot.startFramePrompt?.trim() || defaultShotFramePrompts(shot, project).start
-  return shot.endFramePrompt?.trim() || defaultShotFramePrompts(shot, project).end
+  const raw =
+    which === 'start'
+      ? shot.startFramePrompt?.trim() || defaultShotFramePrompts(shot, project).start
+      : shot.endFramePrompt?.trim() || defaultShotFramePrompts(shot, project).end
+  return ensureStyleLock(raw, project)
 }
 
 function hasStoredPrompt(value: string | undefined): boolean {

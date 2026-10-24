@@ -204,18 +204,25 @@ async function downloadMedia(
   authorization: string,
   signal?: AbortSignal
 ): Promise<{ blob: Blob; mimeType: string }> {
+  // 结果文件在图床上。带上生图用的 Bearer，或 Accept: application/json，图床会回 400。
   const load = (auth?: string) =>
     providerHttp(url, {
       method: 'GET',
-      headers: auth ? { Authorization: auth } : {},
+      headers: {
+        Accept: '*/*',
+        ...(auth ? { Authorization: auth } : {})
+      },
       signal,
       timeoutMs: 120_000
     })
-  let resp = await load(authorization)
-  if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
-    resp = await load()
+  let resp = await load()
+  if (!resp.ok && authorization && (resp.status === 400 || resp.status === 401 || resp.status === 403)) {
+    resp = await load(authorization)
   }
-  if (!resp.ok) throw new Error(`结果下载失败 HTTP ${resp.status}`)
+  if (!resp.ok) {
+    const detail = (await resp.text()).replace(/\s+/g, ' ').trim().slice(0, 180)
+    throw new Error(detail ? `结果下载失败 HTTP ${resp.status} ${detail}` : `结果下载失败 HTTP ${resp.status}`)
+  }
   const blob = await resp.blob()
   const mimeType = blob.type || (url.includes('.mp4') ? 'video/mp4' : 'image/png')
   return { blob, mimeType }

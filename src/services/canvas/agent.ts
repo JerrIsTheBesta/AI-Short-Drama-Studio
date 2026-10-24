@@ -90,6 +90,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 4. 已有完整剧本时：
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
    - 用户明确说「重新写剧本」，或在讲一个和当前剧本无关的新故事（新题材、新人物、新画风）→ 必须先 seed_script（text=用户这几轮的故事原文，含画风时长题材人物），再 generate_play。禁止 continue_play，禁止拿旧剧本当草稿。
+4b. 当前剧本 origin 为 imported（用户导入的成稿）时：拆分镜、提炼人物、提炼场景只能 extract_cast。禁止 seed_script、generate_play、generate_storyboard，禁止改写、润色或替换正文。对白和情节必须原样拆进镜头。只有用户明确说「重新写剧本 / 重写剧本」才允许改写。
 5. 批量、耗时、不可逆的生成（补齐全部人设图 / 全部场景 / 全部关键帧 / 全部视频 / 全部配音）默认一次做一小批，做完在 say 里点明下一步，用户说「继续 / 全流程」再往下；其余所有操作——建节点、连线、删节点、改提示词、重命名、重跑单个节点、重排画布、体检——用户说一次就一次做完，不要分批磨。
 6. 普通创作不生成故事看板，用人设图和场景图画「这一镜正在发生的事件」关键帧，再出视频。AI 短剧才走故事看板。
 6b. 首尾帧这一站不能被跳过：只要画布上有「首尾帧」分组（项目开了首尾帧链，或某个镜头自己选了首尾帧模式），出视频前必须先给每个镜头画起始帧和结束帧（generate_all_frames 一次补齐，或按镜 generate_shot_frames），画完才 generate_video / generate_all_videos。顺序是：人设 → 场景 →（走首尾帧的镜头跳过关键帧/看板）→ 首尾帧 → 视频。禁止从场景锚点/关键帧直接跳到视频：没画帧，视频根本拿不到首尾帧，这个模式等于白开。画帧失败不要卡住流程，记一笔后照常出片。
@@ -1093,7 +1094,24 @@ function dedupeActions(actions: any[]): any[] {
   })
 }
 
+const SCRIPT_REWRITE = /重新写(?:完整)?剧本|重写(?:完整)?剧本|改写剧本|换(?:一个|成).{0,12}(?:故事|剧本)|新故事|新剧本/
+
+/** 导入的成稿只允许拆镜，不允许智能体先重写剧本。 */
+function protectImportedScript(actions: any[], userText: string): any[] {
+  const origin = useProjectStore().current?.script?.origin
+  if (origin !== 'imported' || SCRIPT_REWRITE.test(userText)) return actions
+  const kept = actions.filter(
+    (item) => !['generate_play', 'generate_storyboard', 'seed_script'].includes(String(item?.tool || ''))
+  )
+  const askedSplit = /拆分镜|拆镜|提炼|分镜|出节点|拆剧本|拆人物|拆场景/.test(userText)
+  if (askedSplit && !kept.some((item) => item.tool === 'extract_cast')) {
+    kept.unshift({ tool: 'extract_cast' })
+  }
+  return kept
+}
+
 function applyPlayGate(actions: any[], userText: string): any[] {
+  actions = protectImportedScript(actions, userText)
   const all = wantAll(userText)
   const p = useProjectStore().current
   if (all) {

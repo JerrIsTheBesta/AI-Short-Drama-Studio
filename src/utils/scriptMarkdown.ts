@@ -408,7 +408,8 @@ export function scriptFromImportedPlay(p: Project, markdown: string, filename = 
     shotDuration: prev?.shotDuration ?? p.settings?.defaultShotDuration ?? 5,
     createdAt: prev?.createdAt ?? Date.now(),
     ...(prev ?? {}),
-    ...fields
+    ...fields,
+    origin: 'imported' as const
   }
 }
 

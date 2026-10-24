@@ -288,8 +288,8 @@ const nav = [
   {
     id: 'image' as const,
     label: '图像生成',
-    desc: '人设、场景、看板',
-    lead: '第三步：负责画图的模型。人物设定图、场景底板、故事看板、分镜关键帧都用它生成。'
+    desc: '云端生图 / 本机 ComfyUI',
+    lead: '第三步：负责画图的模型。人物设定图、场景底板、故事看板、分镜关键帧都用它生成。Zealman 镜像的地址在「Zealman 镜像」填写，这里选中后可以直接出图。'
   },
   {
     id: 'tts' as const,
@@ -312,8 +312,8 @@ const nav = [
   {
     id: 'zealman' as const,
     label: 'Zealman 镜像',
-    desc: '内置工作流镜像接口',
-    lead: '如果你用 Zealman 镜像站的现成工作流，在这儿开关和切换即可；用别的厂商可以忽略这页。'
+    desc: '生图和视频只填地址',
+    lead: 'Zealman 镜像的文生图和视频都在这一页填写 Base URL。填好后到图像生成、视频里选用对应模型即可。'
   },
   {
     id: 'system' as const,

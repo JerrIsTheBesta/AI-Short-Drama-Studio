@@ -39,7 +39,10 @@ function apply() {
   if (settings.config.videos.some((item) => item.id === previous)) settings.selectVideo(previous)
   for (const workflow of ZEALMAN_IMAGE_WORKFLOWS) {
     const profile = settings.config.images.find(
-      (item) => item.provider === 'zealman' && item.adapter?.type === 'zealman-workflow' && item.model === workflow.id
+      (item) =>
+        item.provider === 'zealman' &&
+        item.adapter?.type === 'zealman-workflow' &&
+        (item.model === workflow.id || item.model === workflow.name || item.model === workflow.id.replace(/^API-/, ''))
     )
     const values = {
       name: `Zealman 生图 · ${workflow.name}`,
@@ -67,7 +70,7 @@ function apply() {
   <div class="zealman-settings">
     <section class="panel">
       <div class="heading">
-        <div><h2>Zealman 镜像接口</h2><p>只需填写镜像服务的 Base URL。无需 API Key，也无需手工填写工作流参数。</p></div>
+        <div><h2>Zealman 镜像接口</h2><p>生图和视频都只用这一页的 Base URL。应用后，对应模型会出现在图像生成和视频列表里，地址以这里为准。图像生成页里的本地 ComfyUI 是你自己电脑上的另一套。</p></div>
         <span class="badge">内置工作流</span>
       </div>
       <label for="zealman-base-url">Base URL</label>

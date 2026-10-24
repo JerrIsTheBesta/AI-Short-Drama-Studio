@@ -77,6 +77,8 @@ export interface StoryboardInput {
   existingScenes?: Scene[]
   /** 原创电影章节：按场次/蒙太奇拆，不压成短视频口播表。 */
   workflowMode?: Script['workflowMode']
+  /** 用户导入的成稿：只按原文切镜头，禁止改写对白和情节。 */
+  verbatim?: boolean
   /**
    * 用户要的成片总时长（秒）。这是分镜数量的硬预算：
    * 剧本和分镜都按它反推规模，避免「要 40 秒却拆出 20 镜」。
@@ -717,6 +719,11 @@ function buildShotWorkBatches(play: string, targetBatches?: number): ShotWorkBat
   }))
 }
 
+function verbatimSplitRule(verbatim?: boolean): string {
+  if (!verbatim) return ''
+  return `【导入剧本 · 只拆不改】这是用户导入的成稿，拆分镜时禁止改写正文。不润色、不补情节、不换说法、不增删对白，也不要把对白改成旁白或把旁白改成对白。voiceover 必须逐字抄原文对白。visualPrompt 和 videoPrompt 只拍摄原文已经写明的人物、动作和场景，禁止添加原文没有的事件、道具、反应或结局。镜头顺序跟原文一致。\n`
+}
+
 async function generateShotWorkBatch(
   input: StoryboardInput,
   model: string,
@@ -764,7 +771,7 @@ async function generateShotWorkBatch(
       messages: [
         {
           role: 'system',
-          content: `你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
+          content: `${verbatimSplitRule(input.verbatim)}你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
 忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
@@ -1629,7 +1636,7 @@ ${extractPlayForSceneStage(play)}`
     : ''
 
   const userText = extractMode
-    ? `下面是已经写好的完整剧本。请**忠实提炼**成画布节点 JSON（subjects / scenes / shots），不要重写故事、不要另起炉灶。${budgetLine}
+    ? `${verbatimSplitRule(input.verbatim)}下面是已经写好的完整剧本。请**忠实提炼**成画布节点 JSON（subjects / scenes / shots），不要重写故事、不要另起炉灶。${budgetLine}
 
 完整剧本：
 """

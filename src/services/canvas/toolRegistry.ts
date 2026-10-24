@@ -484,6 +484,10 @@ const definitions: ToolDefinition[] = [
       )
       const explicitReplace =
         /重新写(?:完整)?剧本|重写(?:完整)?剧本|换(?:一个|成).{0,12}(?:故事|剧本)|新故事|新剧本|从头(?:写|开始)/.test(text)
+      if (cur.script?.origin === 'imported' && !explicitReplace) {
+        ctx.onLog('导入的剧本保持原文，不会用聊天内容覆盖')
+        return '这是导入的剧本，正文保持不动。要拆分镜请直接提炼；要重写请明确说「重新写剧本」。'
+      }
       if (hasFullPlay && !explicitReplace) {
         ctx.onLog('已有完整剧本；已阻止用当前聊天短句覆盖正文')
         return '保留已有完整剧本。人物反馈或局部修改不会再清空正文。'

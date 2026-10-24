@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useProjectStore, useSettingsStore, uniqueProfileName } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
 import EndpointForm from '@/components/settings/EndpointForm.vue'
@@ -26,7 +27,18 @@ defineProps<{
 
 const settings = useSettingsStore()
 const project = useProjectStore()
+const router = useRouter()
 const showVideoKey = ref(false)
+const zealmanImage = computed(
+  () =>
+    settings.config.image.provider === 'zealman' ||
+    settings.config.image.adapter?.type === 'zealman-workflow'
+)
+const zealmanVideo = computed(
+  () =>
+    settings.config.video.provider === 'zealman' ||
+    settings.config.video.adapter?.type === 'zealman-workflow'
+)
 
 const llmName = computed({
   get: () => settings.config.llms.find((p) => p.id === settings.config.activeLlmId)?.name ?? '',
@@ -215,10 +227,17 @@ function patchAdapter(
     </template>
 
     <template v-else-if="module === 'image'">
+      <section v-if="zealmanImage" class="owned">
+        <h3>这套生图来自 Zealman 镜像</h3>
+        <p class="hint">地址和工作流在「Zealman 镜像」里填写。本页用来接云端生图接口，或添加你自己电脑上的 ComfyUI。</p>
+        <p class="hint">当前地址：{{ settings.config.image.baseUrl || '还没填写' }}</p>
+        <p class="hint">工作流：{{ settings.config.image.model || '内置文生图' }}</p>
+        <button type="button" @click="router.push('/settings/zealman')">打开 Zealman 镜像</button>
+      </section>
       <ComfyQuickAdd />
       <ProfileLibrary
         title="已保存的生图接入"
-        hint="角色设计、场景图、故事看板。保存多套后，出图节点里可以直接切换。"
+        hint="角色设计、场景图、故事看板。保存多套后，出图节点里可以直接切换。Zealman 文生图会自动出现在这里。"
         :profiles="settings.config.images.map((p) => ({ id: p.id, name: p.name, subtitle: subtitle(p) }))"
         :active-id="settings.config.activeImageId"
         :providers="IMAGE_PROVIDERS"
@@ -226,33 +245,35 @@ function patchAdapter(
         @create="createNamed('image', $event, IMAGE_PROVIDERS, settings.config.images.map((p) => p.name), '自定义生图')"
         @remove="settings.removeImage(settings.config.activeImageId)"
       />
-      <label class="name-label">名称</label>
-      <input
-        class="name-input"
-        v-model="imageName"
-        placeholder="例如 火山方舟 Seedream"
-      />
-      <EndpointForm
-        title="API 接入"
-        :hint="settings.config.image.provider === 'apimart' ? '只填接口地址和 API Key 就能出图，默认地址 https://api.aishuch.com，默认模型 gpt-image-2。' : '选好厂商，填 API Key，再把要用的模型名加进列表。出图节点里可以随时切换不同的模型。'"
-        :presets="IMAGE_PROVIDERS"
-        :base-url="settings.config.image.baseUrl"
-        :api-key="settings.config.image.apiKey"
-        :model="settings.config.image.model"
-        :models="settings.config.image.models"
-        :provider="settings.config.image.provider"
-        @patch="settings.patchImage($event)"
-        @add-model="settings.addModel('image', $event)"
-        @remove-model="settings.removeModel('image', $event)"
-      />
-      <AdapterFields
-        v-if="settings.config.image.provider !== 'apimart'"
-        kind="image"
-        :adapter="settings.config.image.adapter"
-        :base-url="settings.config.image.baseUrl"
-        :api-key="settings.config.image.apiKey"
-        @patch="patchAdapter('image', $event)"
-      />
+      <template v-if="!zealmanImage">
+        <label class="name-label">名称</label>
+        <input
+          class="name-input"
+          v-model="imageName"
+          placeholder="例如 火山方舟 Seedream"
+        />
+        <EndpointForm
+          title="API 接入"
+          :hint="settings.config.image.provider === 'apimart' ? '只填接口地址和 API Key 就能出图，默认地址 https://api.aishuch.com，默认模型 gpt-image-2。' : '选好厂商，填 API Key，再把要用的模型名加进列表。出图节点里可以随时切换不同的模型。'"
+          :presets="IMAGE_PROVIDERS"
+          :base-url="settings.config.image.baseUrl"
+          :api-key="settings.config.image.apiKey"
+          :model="settings.config.image.model"
+          :models="settings.config.image.models"
+          :provider="settings.config.image.provider"
+          @patch="settings.patchImage($event)"
+          @add-model="settings.addModel('image', $event)"
+          @remove-model="settings.removeModel('image', $event)"
+        />
+        <AdapterFields
+          v-if="settings.config.image.provider !== 'apimart'"
+          kind="image"
+          :adapter="settings.config.image.adapter"
+          :base-url="settings.config.image.baseUrl"
+          :api-key="settings.config.image.apiKey"
+          @patch="patchAdapter('image', $event)"
+        />
+      </template>
     </template>
 
     <template v-else-if="module === 'tts'">
@@ -298,6 +319,13 @@ function patchAdapter(
     </template>
 
     <template v-else-if="module === 'video'">
+      <section v-if="zealmanVideo" class="owned">
+        <h3>这套视频来自 Zealman 镜像</h3>
+        <p class="hint">地址和工作流在「Zealman 镜像」里填写。本页用来接云端视频接口，或添加你自己电脑上的 ComfyUI。</p>
+        <p class="hint">当前地址：{{ settings.config.video.baseUrl || '还没填写' }}</p>
+        <p class="hint">工作流：{{ settings.config.video.workflowId || '内置工作流' }}</p>
+        <button type="button" @click="router.push('/settings/zealman')">打开 Zealman 镜像</button>
+      </section>
       <ComfyQuickAdd />
       <ProfileLibrary
         title="已保存的视频接入"
@@ -309,6 +337,7 @@ function patchAdapter(
         @create="createVideo"
         @remove="settings.removeVideo(settings.config.activeVideoId)"
       />
+      <template v-if="!zealmanVideo">
       <label class="name-label">名称</label>
       <input
         class="name-input"
@@ -408,6 +437,7 @@ function patchAdapter(
           @patch="patchAdapter('video', $event)"
         />
       </section>
+      </template>
     </template>
   </div>
 </template>
@@ -417,6 +447,32 @@ function patchAdapter(
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+.owned {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 640px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-1);
+}
+.owned h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.owned button {
+  align-self: flex-start;
+  margin-top: 4px;
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #5686f5;
+  color: #fff;
+  cursor: pointer;
 }
 .video {
   display: flex;

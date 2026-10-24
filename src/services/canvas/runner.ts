@@ -1820,6 +1820,7 @@ export async function runGeneratePlay(
     ...project.current.script,
     topic: run.result.topic || requestTopic || project.current.script.topic,
     content: run.result.playMarkdown,
+    origin: continueMode ? project.current.script.origin : 'generated',
     playReady: true,
     ...(playTargetSec ? { targetDurationSec: playTargetSec } : {}),
     ...(look.matched ? { style: look.matched } : {}),
@@ -2076,6 +2077,7 @@ export async function runExtractStoryboard(
       existingSubjects,
       existingScenes,
       workflowMode: project.current.script.workflowMode,
+      verbatim: project.current.script.origin === 'imported',
       resumeBatchShots: resumeBatches,
       onBatchDone: (index, rows) => {
         if (!project.current?.script) return

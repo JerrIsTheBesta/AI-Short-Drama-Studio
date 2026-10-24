@@ -130,7 +130,8 @@ export function buildProjectContext(userText: string) {
               content: truncate(p.script.content, 1600),
               keywords: p.script.keywords,
               style: p.script.style,
-              aspectRatio: p.script.aspectRatio
+              aspectRatio: p.script.aspectRatio,
+              origin: p.script.origin || ''
             }
           }
         : {}),

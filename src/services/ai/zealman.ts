@@ -72,16 +72,16 @@ export interface ZealmanImageWorkflow {
   defaultNegative: string
 }
 
-/** Zealman 内置文生图工作流。model 字段存工作流 id。 */
+/** Zealman 内置文生图。workflow_id 和 input_values 用镜像导出的扁平字段，不传 workflow_template。 */
 export const ZEALMAN_IMAGE_WORKFLOWS: ZealmanImageWorkflow[] = [
   {
-    id: 'A01-文生图-Qwen2512高清放大',
+    id: 'API-A01-文生图-Qwen2512高清放大',
     name: 'A01-文生图-Qwen2512高清放大',
-    seedKey: '3:seed',
-    promptKey: '187:text',
-    negativeKey: '437:text',
-    widthKey: '515:value',
-    heightKey: '516:value',
+    seedKey: 'seed',
+    promptKey: 'prompt',
+    negativeKey: 'prompt_2',
+    widthKey: 'value',
+    heightKey: 'value_2',
     defaultWidth: 1280,
     defaultHeight: 720,
     defaultNegative:
@@ -90,7 +90,12 @@ export const ZEALMAN_IMAGE_WORKFLOWS: ZealmanImageWorkflow[] = [
 ]
 
 export function zealmanImageWorkflowById(id: string): ZealmanImageWorkflow | undefined {
-  return ZEALMAN_IMAGE_WORKFLOWS.find((item) => item.id === id)
+  const raw = id.trim()
+  if (!raw) return undefined
+  return ZEALMAN_IMAGE_WORKFLOWS.find((item) => {
+    const bare = item.id.replace(/^API-/, '')
+    return raw === item.id || raw === item.name || raw === bare || raw === `API-${bare}`
+  })
 }
 
 export function normalizeZealmanBaseUrl(value: string): string {

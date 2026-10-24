@@ -56,8 +56,8 @@ async function onAdd() {
     <header class="head">
       <h3>本地 ComfyUI</h3>
       <p class="hint">
-        只用于你电脑上或局域网里的 ComfyUI，例如 <code>http://127.0.0.1:8188</code>。
-        云端大厂和中转站请使用下面的“API 来源 / Base URL / API Key”。
+        只填你电脑上或局域网里的 ComfyUI，例如 <code>http://127.0.0.1:8188</code>。
+        Zealman 镜像地址填在左侧「Zealman 镜像」。云端大厂和中转站使用下面的 API 接入。
       </p>
     </header>
 

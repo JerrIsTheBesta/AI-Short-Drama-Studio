@@ -289,6 +289,15 @@ export function lookFromTexts(
   }
 }
 
+/** 只取正文里点名画风的行，避免把对白里的「电影」「风格」误当成全片画风。 */
+export function styleLinesFromPlay(content?: string): string {
+  return (content || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /画风|视觉风格|画面风格|美术风格|绘制风格|风格要求|整体风格|画面质感/.test(line))
+    .join('\n')
+}
+
 export function lookFromScript(
   script?: {
     style?: VisualStyle
@@ -307,6 +316,7 @@ export function lookFromScript(
     script?.keywords,
     script?.aesthetic,
     script?.styleBrief,
+    styleLinesFromPlay(script?.content),
     ...extra
   )
 }
