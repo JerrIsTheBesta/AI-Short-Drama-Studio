@@ -10,6 +10,11 @@ import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
 import { isFFmpegReady, getFFmpeg, resetFFmpeg } from '@/services/ffmpeg'
 import { desktop, isDesktop } from '@/services/desktop'
+import {
+  parseDirectorSkill,
+  pickDirectorSkillFile,
+  pickDirectorSkillFolder
+} from '@/services/settings/directorSkill'
 
 const router = useRouter()
 const route = useRoute()
@@ -37,6 +42,48 @@ const diag = ref({
 })
 
 const saving = ref(false)
+const importingSkill = ref(false)
+const directorSkill = computed(() => settings.config.directorSkill)
+const directorPreview = computed(() => {
+  const body = directorSkill.value?.body || ''
+  return body.length > 180 ? `${body.slice(0, 180)}…` : body
+})
+
+async function saveDirectorFile(picked: { text: string; filename: string } | null) {
+  if (!picked) return
+  const doc = parseDirectorSkill(picked.text, picked.filename)
+  settings.update({ directorSkill: doc })
+  await settings.flush()
+  toast.success(`已导入导演手册「${doc.name}」。拆分镜头和写提示词会按它来。`)
+}
+
+async function importDirectorSkill() {
+  importingSkill.value = true
+  try {
+    await saveDirectorFile(await pickDirectorSkillFile())
+  } catch (err: any) {
+    toast.error(err?.message || '导入手册失败')
+  } finally {
+    importingSkill.value = false
+  }
+}
+
+async function importDirectorFolder() {
+  importingSkill.value = true
+  try {
+    await saveDirectorFile(await pickDirectorSkillFolder())
+  } catch (err: any) {
+    toast.error(err?.message || '导入手册失败')
+  } finally {
+    importingSkill.value = false
+  }
+}
+
+async function clearDirectorSkill() {
+  settings.update({ directorSkill: null })
+  await settings.flush()
+  toast.success('已清除导演手册，恢复内置分镜写法')
+}
 
 const llmReady = computed(() => endpointReady(settings.config.llm))
 const assistantTargetsReady = computed(() =>
@@ -318,7 +365,7 @@ const nav = [
   {
     id: 'system' as const,
     label: '系统',
-    desc: '引擎、存储、关于',
+    desc: '引擎、存储、导演手册',
     lead: '剪辑引擎、文件存在哪、项目备份导出，还有版本号和官方交流群。'
   }
 ]
@@ -454,6 +501,25 @@ function navReady(id: SettingsSection) {
         </p>
 
         <div v-else-if="section === 'system'" class="sys">
+          <section class="panel">
+            <h2>导演手册</h2>
+            <p class="card-desc">
+              导入一份 SKILL.md 或 README.md。之后拆分镜头、写画面提示词和视频提示词都按这份手册来。没有导入时仍用内置分镜导演手册。
+            </p>
+            <p v-if="directorSkill" class="path">{{ directorSkill.name }}<span v-if="directorSkill.filename"> · {{ directorSkill.filename }}</span></p>
+            <p v-else class="muted">还没有导入。支持带前言的 SKILL，也支持普通 README。</p>
+            <p v-if="directorSkill" class="muted small skill-preview">{{ directorPreview }}</p>
+            <div class="acts">
+              <button type="button" class="mini" :disabled="importingSkill" @click="importDirectorSkill">
+                {{ importingSkill ? '正在读取…' : directorSkill ? '更换手册' : '导入手册' }}
+              </button>
+              <button v-if="isDesktop()" type="button" class="mini" :disabled="importingSkill" @click="importDirectorFolder">
+                导入文件夹
+              </button>
+              <button v-if="directorSkill" type="button" class="link" @click="clearDirectorSkill">清除</button>
+            </div>
+          </section>
+
           <section v-if="isDesktop()" class="panel">
             <h2>本机文件权限</h2>
             <p class="card-desc">
@@ -877,6 +943,11 @@ function navReady(id: SettingsSection) {
 .muted.small {
   margin: 3px 0 0;
   font-size: 11px;
+}
+.skill-preview {
+  white-space: pre-wrap;
+  max-height: 4.8em;
+  overflow: hidden;
 }
 .engine-row {
   display: flex;

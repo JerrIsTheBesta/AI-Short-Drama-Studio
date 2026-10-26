@@ -115,6 +115,15 @@ export interface AppSettings {
   music: ServiceEndpoint
   musics: NamedEndpoint[]
   activeMusicId: string
+  /** 用户导入的导演手册。拆分镜头和写提示词时优先用它。 */
+  directorSkill: DirectorSkillDoc | null
+}
+
+export interface DirectorSkillDoc {
+  name: string
+  filename: string
+  body: string
+  importedAt: number
 }
 
 export const LLM_PRESETS = [
@@ -379,6 +388,18 @@ function hydrateVideo(
   return { list: isolated, activeId: active.id, active: asVideo(active) }
 }
 
+function normalizeDirectorSkill(raw: unknown): DirectorSkillDoc | null {
+  if (!raw || typeof raw !== 'object') return null
+  const body = String((raw as DirectorSkillDoc).body || '').trim().slice(0, 24_000)
+  if (body.length < 20) return null
+  return {
+    name: String((raw as DirectorSkillDoc).name || '导演手册').trim().slice(0, 80) || '导演手册',
+    filename: String((raw as DirectorSkillDoc).filename || '').slice(0, 180),
+    body,
+    importedAt: Number((raw as DirectorSkillDoc).importedAt) || Date.now()
+  }
+}
+
 function buildDefaults(): AppSettings {
   const env = envDefaults()
   const llm = endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS)
@@ -428,7 +449,8 @@ function buildDefaults(): AppSettings {
     autodlToken: '',
     music: asEndpoint(musicFirst),
     musics: [musicFirst],
-    activeMusicId: musicFirst.id
+    activeMusicId: musicFirst.id,
+    directorSkill: null
   }
 }
 
@@ -550,7 +572,8 @@ function parseSettings(raw: string | null): AppSettings {
       autodlToken,
       music: music.active,
       musics: music.list,
-      activeMusicId: music.activeId
+      activeMusicId: music.activeId,
+      directorSkill: normalizeDirectorSkill(parsed.directorSkill)
     }
   } catch {
     return defaults

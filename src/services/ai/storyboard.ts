@@ -13,6 +13,7 @@ import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } fro
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, Subject, VisualStyle } from '@/types'
 import { getSkillBody } from '@/skills'
+import { directorPlaybookText, importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { getLlmConfig, getVideoPromptStyle } from './runtime'
 import {
   buildStyleBriefForLLM,
@@ -627,7 +628,7 @@ async function repairStoryboardOnce(
     messages: [
       {
         role: 'system',
-          content: `你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。${durationBlock}不新增用户没说的产品、人物、数字或事实；只补用户本次内容边界内已经出现或明确蕴含的事件过程，禁止续写边界之外的后果。\n${extractHint}\n${NARRATIVE_CONTINUITY_RULES}\n${SPEAKER_STAGING_RULES}\n如果问题指出重大事件被压扁或相邻镜头断层，可以拆分、插入或重排断层附近的镜头，补足本集边界内的可见过程与反应；只局部修相关段落，其他合格镜头保持原意。若用户指定停在悬念点，就停在那里，不得为了闭环继续讲下一步。每个新增镜头也必须写全 continuity，格式为“承接上一镜的明确末态 → 本镜可见变化 → 留给下一镜的明确末态”。\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按语义段落分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。不要机械地一镜只放一句：同一人物、同一表达意图的连续 2-4 个短句优先合在一个 7-10 秒镜头里，短促反应或转场才保留一句；总字数仍不得超过 duration*4。voiceover 保留“人物名：台词”便于识别说话人，真正送入 H3 时会自动去掉人物名前缀。\n说话镜头先判断动作、空间关系、环境信息和情绪节奏，再选景别。表情是叙事重点且不需交代环境时可以收近；需要保留递物、争执、问答、人物距离、环境压力或集体反应时，应使用合适的中景、双人或多人同框。特写只是可选倾向，禁止把每个说话镜头机械切成特写；但要写清谁在说、其他人如何反应，不能所有人同时张嘴。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${videoPerformanceSpec(getVideoPromptStyle())}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
+          content: `${importedDirectorPrefix()}你是短视频总编审。上一稿验收未通过，现在把 JSON 打回来重新提炼，必须消掉下列问题后再交稿。${durationBlock}不新增用户没说的产品、人物、数字或事实；只补用户本次内容边界内已经出现或明确蕴含的事件过程，禁止续写边界之外的后果。\n${extractHint}\n${NARRATIVE_CONTINUITY_RULES}\n${SPEAKER_STAGING_RULES}\n如果问题指出重大事件被压扁或相邻镜头断层，可以拆分、插入或重排断层附近的镜头，补足本集边界内的可见过程与反应；只局部修相关段落，其他合格镜头保持原意。若用户指定停在悬念点，就停在那里，不得为了闭环继续讲下一步。每个新增镜头也必须写全 continuity，格式为“承接上一镜的明确末态 → 本镜可见变化 → 留给下一镜的明确末态”。\n每镜 title 使用不同的 3-8 字内容标题，禁止统一写“镜头”。把用户原文按语义段落分配进 voiceover，默认 audioMode=h3-dialogue；只有原文明说旁白时才用 h3-voiceover。不要机械地一镜只放一句：同一人物、同一表达意图的连续 2-4 个短句优先合在一个 7-10 秒镜头里，短促反应或转场才保留一句；总字数仍不得超过 duration*4。voiceover 保留“人物名：台词”便于识别说话人，真正送入 H3 时会自动去掉人物名前缀。\n说话镜头先判断动作、空间关系、环境信息和情绪节奏，再选景别。表情是叙事重点且不需交代环境时可以收近；需要保留递物、争执、问答、人物距离、环境压力或集体反应时，应使用合适的中景、双人或多人同框。特写只是可选倾向，禁止把每个说话镜头机械切成特写；但要写清谁在说、其他人如何反应，不能所有人同时张嘴。\nvisualPrompt 用中文描述可见静帧（场景、人物衣着、光源），这是给配图用的。\n${videoPerformanceSpec(getVideoPromptStyle())}\n禁止把 visualPrompt 翻译成英文，禁止两段写成一样。h3Aesthetic 用英文写全片材质、灯光、色彩和摄影质感。不得堆标签。\n只输出完整合法 JSON。`
       },
       {
         role: 'user',
@@ -947,7 +948,7 @@ async function generateShotWorkBatch(
       messages: [
         {
           role: 'system',
-          content: `${verbatimSplitRule(input.verbatim)}你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
+          content: `${importedDirectorPrefix()}${verbatimSplitRule(input.verbatim)}你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
 忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
@@ -1189,7 +1190,7 @@ async function extractShotOutline(
       ? '按剧本拍点出分镜场记（动作、对白、不拍清单）…'
       : '先把剧本交给模型出分镜场记（只要画面、时长、声音）…'
   )
-  const shortSystem = `你是分镜导演。只写一份能拍的场记，像聊天里列镜头那样短、快。
+  const shortSystem = `${importedDirectorPrefix()}你是分镜导演。只写一份能拍的场记，像聊天里列镜头那样短、快。
 按剧本顺序拆镜。同一空间的对白往来可以留在一镜；同一人连续短句可留在一镜。
 每镜写：标题（括号里写景别或运镜）、画面（2–4 句看见的动作）、内容（这一镜演什么）、时长、声音。
 有对白时必须加一行「口播：人物名：原词」，剧本里的对白原词一条都不能丢。没有对白的纯空镜/赶路镜才不写口播。
@@ -1203,7 +1204,7 @@ async function extractShotOutline(
 时长：6 秒
 声音：踩草声、急促呼吸、水流声、泼水声`
 
-  const filmSystem = `你是电影分镜导演。输入是完整章节剧本，不是短视频口播表。按剧本顺序拆能拍的镜头，忠实覆盖每一场和每一条蒙太奇，不要另编情节。
+  const filmSystem = `${importedDirectorPrefix()}你是电影分镜导演。输入是完整章节剧本，不是短视频口播表。按剧本顺序拆能拍的镜头，忠实覆盖每一场和每一条蒙太奇，不要另编情节。
 
 拆镜原则：
 - 一场戏里按戏剧拍点拆：进入、看见、犹豫、开口、反应、离开。不要把整场压成一镜，也不要一句对白拆成三镜空表情。
@@ -1282,7 +1283,7 @@ async function expandOneShot(
       messages: [
         {
           role: 'system',
-          content: `你是分镜节点填写员。只把下面这一条场记扩成画布字段，不改故事、不改时长、不改画面原意。
+          content: `${importedDirectorPrefix()}你是分镜节点填写员。只把下面这一条场记扩成画布字段，不改故事、不改时长、不改画面原意。
 口播必须用场记里的原词；场记写了对白而你输出空字符串视为不合格。同一空间的对白往来可以留在一镜。只有场记标明画外音/旁白时才用 audioMode=h3-voiceover。
 必须写 videoPrompt：从0秒到本镜结束按实际剧情拍点分2–5段。每段先写当前行动者、具体动作和表情，再写说话者与原词，并交代其他出场人物站在近处还是后面、身体朝哪、眼睛看谁、如何非语言反应；最后写这一段的合理运镜和落点。说话者可以在后面，前面的人侧对或回头看他。禁止合影看镜头，禁止只在结尾加「不要看镜头」。
 ${film ? '本镜必须能在剧本原文里找到对应拍点。蒙太奇要写成看得见的连续动作。剧本写了不拍的，写进 videoPrompt 末尾一句。善意是普通人做的小事。' : ''}
@@ -1402,7 +1403,7 @@ async function realStoryboard(
     ...(input.keywords ?? [])
   )
   const hasUserStyle = Boolean(mediumPhrase)
-  const directorPlaybook = getSkillBody('storyboard-director')
+  const directorPlaybook = directorPlaybookText()
   const extractMode = input.mode === 'extract'
 
   if (extractMode) {
@@ -3175,7 +3176,7 @@ function playScaleBrief(targetSec: number | undefined): string {
 }
 
 async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {
-  const directorPlaybook = getSkillBody('storyboard-director')
+  const directorPlaybook = directorPlaybookText()
   const screenwriterPlaybook = getSkillBody('ai-short-film-screenwriter')
   const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
   const styleCn = styleLabel(look.style)

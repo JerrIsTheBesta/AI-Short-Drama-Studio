@@ -1601,7 +1601,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     // 旧稿里的引号对白可以保留，但去掉整段场记式中文
     usableNodeText
       .replace(/<d>\s*\[[^\]]*\]\s*[\s\S]*?<\/d>/gi, '')
-      .replace(/Reference pictures[\s\S]*?(?=\[Shot\s*\d+\]|Camera language|$)/i, '')
+      .replace(/(?:Reference pictures|Speaker lock)[\s\S]*?(?=\[Shot\s*\d+\]|Camera language|$)/i, '')
   ]
     .filter(Boolean)
     .join('\n')
@@ -1621,7 +1621,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     .join('\n')
   const compiled = ensurePictureIdentity(
     await compileH3OfficialPrompt({
-    prompt: [source, castNotes ? `人物（必须写清图1图2图3分别是谁；正文用这些人名。场记不是台词，只有引号/对白栏里的原词才进 <d>）：\n${castNotes}` : '']
+    prompt: [source, castNotes ? `人物（(S1) 永远是第一张人物图，(S2) 永远是第二张；正文用 (S1)(S2) 指人，不要按台词顺序重编号。场记不是台词，只有引号/对白栏里的原词才进 <d>）：\n${castNotes}` : '']
       .filter(Boolean)
       .join('\n\n'),
     aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
@@ -2643,7 +2643,7 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
   const hasSpeech = cueLines.length > 0
   const compiled = ensurePictureIdentity(
     await compileH3OfficialPrompt({
-    prompt: `【节点当前提示词。场记、时长、画风、图1图2身份都是画面，不是台词。只有引号或「台词/对白」里的原词才进 <d>。必须写清图1是谁、图2是谁、图3是谁。】\n${source}`,
+    prompt: `【节点当前提示词。场记、时长、画风都是画面，不是台词。只有引号或「台词/对白」里的原词才进 <d>。(S1) 永远是第一张人物图，(S2) 永远是第二张，不要按台词顺序重编号。】\n${source}`,
     aesthetic: p.script?.h3Aesthetic || p.script?.aesthetic,
     voiceover: cueLines.join('\n'),
     voiceMode: hasSpeech ? 'dialogue' : 'none',

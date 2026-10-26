@@ -1,6 +1,6 @@
 ---
 name: h3-prompt-writing
-description: 分镜出片提示词：integrated_multimodal_description + 图1图2图3身份 + 时间轴 + 台词只进 <d>。
+description: 分镜出片提示词：integrated_multimodal_description + (S1)(S2) 绑定参考图 + 独占台词 + 台词只进 <d>。
 triggers: 视频,Comfy,H3,配音,口播,图生视频,提示词,优化提示词
 ---
 
@@ -8,15 +8,16 @@ triggers: 视频,Comfy,H3,配音,口播,图生视频,提示词,优化提示词
 
 点「优化提示词」必须产出下面这个格式。画布上仍然是 **一镜一条成片**。
 
-## 必须写图1 / 图2 / 图3 是谁
+## 人物图用 (S1) (S2)，不要用「图1 是人设」
 
-参考图是人设/场景锁定，**不是首帧**。正文开头必须按连线顺序写：
+(S1) 永远是第一张人物参考图，(S2) 永远是第二张。编号跟着人走，不跟台词顺序走。参考图是身份锁定，**不是首帧**。
 
 ```text
-Reference pictures (follow this mapping exactly):
-图1：「刘彦昌」 / <Picture 1> is this person's character design. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-图2：「沉香」 / <Picture 2> is this person's character design. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-图3：「破屋」 / <Picture 3> is the location. Lock space, materials, weather and light. One unified place.
+Speaker lock (these labels are the pictures):
+(S1) is 「阿凯」 / <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+(S2) is 「大斌」 / <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Picture 3> is the location 「出租屋」. Lock space, materials, weather and light. One unified place.
+Only one (S#) speaks at a time, and each person says their own line once. Everyone else keeps their lips completely closed. No overlap, no chorus, no second person repeating the same line.
 ```
 
 不要写 `Picture 1 aligns with 0.00 seconds`。不要写 Ref2VA 六段。
@@ -25,40 +26,28 @@ Reference pictures (follow this mapping exactly):
 
 ```text
 integrated_multimodal_description:
-Reference pictures (follow this mapping exactly):
-图1：「刘彦昌」 / <Picture 1> is this person's character design. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-图2：「沉香」 / <Picture 2> is this person's character design. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-图3：「破屋」 / <Picture 3> is the location. Lock space, materials, weather and light. One unified place.
+Speaker lock (these labels are the pictures):
+(S1) is 「阿凯」 / <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+(S2) is 「大斌」 / <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
 
-[Shot 1] Grounded ancient Chinese family drama, photorealistic live-action, 16:9. Clean low-noise digital cinema image, natural skin texture, restrained oil-lamp light and cool rain light. No glamour filter, oily highlights or exaggerated warm color grading.
-
-Rain falls heavily outside the poor mountain house. Sixteen-year-old Shenxiang sits opposite his father Liu Yanchang at a rough wooden table. This is one continuous six-second emotional shot. The camera movement is extremely restrained so the actors' expressions remain the focus.
+[Shot 1] Grounded contemporary comedy, photorealistic live-action, 9:16. Afternoon light through the living-room window. (S1) 「阿凯」 squats at the left sofa, digging through cushions. (S2) 「大斌」 sprawls on the right sofa with a bag of chips. Neither looks into the lens.
 
 [00:00.000–00:01.200]
-Begin with a tight table-level close-up. Liu Yanchang opens a worn thread-bound book with trembling hands, then places a jade hairpin on the table.
+Wide view from the doorway. Both mouths stay closed. Chip crunch and cushion rustle only.
 
-[00:01.200–00:05.200]
-The camera slowly pushes into an intimate profile two-shot. Liu Yanchang grips Shenxiang's wrist and looks into his son's eyes:
+[00:01.200–00:05.600]
+Cut to (S1) alone. (S2) is off screen.
+(S1) says: <d>[Chinese] 我那条黑领带呢！上周刚买的！你见着没有啊！</d>
+Only (S1) speaks in this shot. (S2) keeps their lips completely closed and makes no voice.
 
-<d>[Chinese, spoken on screen by Liu Yanchang, urgent reassurance changing into grief, accurate lip synchronization] 你娘没有不要你。</d>
-
-His voice breaks:
-
-<d>[Chinese, spoken on screen by Liu Yanchang, suppressed pain and guilt, accurate lip synchronization] 她被压在华山底下……整整十六年。</d>
-
-Only Liu Yanchang speaks. Shenxiang's lips remain completely closed.
-
-[00:05.200–00:06.000]
-Focus shifts to Shenxiang. Relief becomes horror. He still cannot speak. The action develops continuously and finishes naturally within 0.80 seconds.
-
-Camera language:
-Tight close-up on trembling hands and jade hairpin → extremely slow push into an intimate profile two-shot → hold during the dialogue → final gentle focus shift onto Shenxiang. No rapid movement, no unnecessary orbit and no dramatic camera shake.
-
-Performance direction:
-Liu Yanchang's first sentence protects the mother; his second sentence confesses helplessness. Shenxiang feels relief first, then shock, then grief. Avoid calm exposition, emotionless father, immediate shouting, theatrical sobbing, speaking Shenxiang, subtitles and visible text.
+[Shot 2] At 00:05.600
+Cut to (S2) alone. He swallows before he talks.
+(S2) says: <d>[Chinese] 你自己扔的地方问我？反正我零食罐里没藏领带。</d>
+Only (S2) speaks in this shot. (S1) keeps their lips completely closed and makes no voice.
+The chip bag is visibly emptier than at the start. The action develops continuously and finishes naturally within 8 seconds.
 
 overall_soundscape:
-Steady rain on the roof and paper window, faint oil-lamp flame, old pages turning, jade touching wood, Liu Yanchang's uneven breathing and emotionally restrained Mandarin dialogue. No narrator and no music.
+Quiet living-room tone, cushion rustle, crisp chip crunch. Only the speaking (S#) is heard, and only the words inside the d tag. No music.
 
 non_diegetic_music:
 N/A
@@ -66,13 +55,14 @@ N/A
 
 ## 台词
 
-- **只有嘴里真正说出来的字**进 `<d>`。场记、时长、画风、图1图2、Camera language、Performance direction 都不是台词。
-- 表演、说话人、口型写在括号里：`<d>[Chinese, spoken on screen by Name, delivery, accurate lip synchronization] 原词</d>`。
-- 没开口的人嘴唇保持完全闭合。没有对白就写 `No dialogue. No lips moving.`，不要把「无」放进 `<d>`。
+- 每句台词只说一次，由它自己的 (S#) 说，单独占一个时间段。
+- 形式固定：`(S1) says: <d>[Chinese] 原词</d>`，紧跟着写另一个人嘴唇闭合。
+- 场记、时长、画风、人物名单都不是台词。
+- 没有对白就写 `No dialogue. No lips moving.`，不要把「无」放进 `<d>`。
 
 ## 写法
 
-- 正文用英文写动作、光、表演；中文只允许出现在 `<d>` 和 `图N：「人名」`。
-- 人物在正文里用真实名字（图1图2对应的人），不要匿名成不知道是谁的 the man。
-- 用 `[00:00.000–00:01.200]` 时间轴写清楚每一拍。不要把时间轴当台词。
-- `non_diegetic_music` 固定 `N/A`。不要配乐，不要旁白。
+- 动作、机位、光用英文写。中文只留在 `<d>` 和「人名」里。写中文场面会被删掉，最后只剩人物名单。
+- 写这场戏里真正发生的事：谁在左谁在右、手里拿什么、道具怎么变少。不要写 “Begin with the opening frame” 或 “let the frame breathe”。
+- `overall_soundscape` 写这场的真实声音，例如薯片咔嚓、靠垫哗啦。不要只写 close breath。
+- `non_diegetic_music` 固定 `N/A`。

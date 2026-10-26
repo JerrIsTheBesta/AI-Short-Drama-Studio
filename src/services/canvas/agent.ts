@@ -1,5 +1,6 @@
 import { callLLM, getAIMode } from '@/services/ai/client'
 import { skillContextForAgent } from '@/skills'
+import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { useProjectStore } from '@/stores'
 import type { Project } from '@/types'
 import { needsShotFrames, shotsMissingKeyframe, shotsMissingStoryboard } from '@/utils/videoStill'
@@ -377,6 +378,14 @@ export async function runAgentTurn(
 
   const skillPack = skillContextForAgent(skillSelectContext(baseText))
   const wantQa = skillPack.selected.some((s) => s.id === 'qa-verify')
+  const directorManual =
+    skillPack.selected.some((s) =>
+      ['storyboard-director', 'shot-video', 'h3-prompt-writing', 'film-chapter-production', 'shot-image'].includes(
+        s.id
+      )
+    ) || /分镜|拆镜|提示词|导演/.test(baseText)
+      ? importedDirectorPrefix()
+      : ''
 
   let plan: { say: string; actions: any[]; done?: boolean }
 
@@ -393,7 +402,7 @@ export async function runAgentTurn(
       messages: [
         {
           role: 'system',
-          content: `${TOOLS_HINT}\n\n${skillPack.prompt}${restrictToNodes ? `\n\n${NODE_PATH_RULE}` : ''}${memoryText ? `\n\n${memoryText}\n回答和规划时必须尊重上面的记忆。` : ''}`
+          content: `${TOOLS_HINT}\n\n${skillPack.prompt}${directorManual ? `\n\n${directorManual}` : ''}${restrictToNodes ? `\n\n${NODE_PATH_RULE}` : ''}${memoryText ? `\n\n${memoryText}\n回答和规划时必须尊重上面的记忆。` : ''}`
         },
         {
           role: 'user',

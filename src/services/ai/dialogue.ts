@@ -39,7 +39,7 @@ export function looksLikeShotDirection(text: string): boolean {
   if (/Reference pictures/i.test(t)) return true
   if (/\[\d{2}:\d{2}\.\d{3}/.test(t) || /\[Shot\s*\d+\]/i.test(t)) return true
   if (/\d+\s*[-–~到至]\s*\d+\s*秒/.test(t) || /^\d+[s秒]\s*[：:]/.test(t)) return true
-  if (/^(?:镜头|景别|地点|出场|站位|视线|动作承接|可见画面|道具|现场声|画风|时长|场记)\s*[：:]/.test(t)) {
+  if (/^(?:镜头|景别|地点|场景|音效|出场|站位|视线|动作承接|可见画面|道具|现场声|画风|时长|场记)\s*[：:]/.test(t)) {
     return true
   }
   if (/这一镜怎么演|连续\s*\d+\s*秒|情感镜头|武侠|雨夜打斗|合围|推近|缓推/.test(t) && !/[“「]/.test(t)) {
@@ -73,11 +73,16 @@ export function spokenTextOnly(input: string): string {
         .replace(/^(?:\[[^\]\n]{1,80}\]|【[^】\n]{1,80}】)\s*/, '')
         .trim()
       if (!trimmed) return ''
-      const match = trimmed.match(/^([^：:\n]{1,12})[：:]\s*(.+)$/)
+      const match = trimmed.match(/^([^：:\n]{1,16})[：:]\s*(.+)$/)
       if (!match) return trimmed
 
-      const label = match[1].trim().replace(/^[【\[(（]|[】\])）]$/g, '')
-      const looksLikeSpeaker = SPEAKER_RE.test(label) || NAME_RE.test(label) || PERF_HINT_RE.test(label)
+      const label = match[1].trim()
+      const bare = label
+        .replace(/[（(][^）)]{0,16}[）)]/g, '')
+        .replace(/^[【\[(（]+|[】\])）]+$/g, '')
+        .trim()
+      const stageLabel = /^(?:场景|音效|镜头|景别|时长|画风|站位|地点|道具|场记|画面|动作|运镜|机位|构图|环境|光影|备注|说明)$/.test(bare)
+      const looksLikeSpeaker = !stageLabel && (SPEAKER_RE.test(bare) || NAME_RE.test(bare) || PERF_HINT_RE.test(label))
       const body = looksLikeSpeaker ? match[2].trim() : trimmed
       return isPlaceholderSpokenLine(body) ? '' : body
     })

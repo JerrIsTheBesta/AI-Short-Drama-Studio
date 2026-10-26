@@ -10,7 +10,7 @@ triggers: 视频,出片,图生视频,运镜,动起来,生成视频
 
 缺人设、场景或看板先补，不要先出配图。画外音镜头里被叫到的人不能张嘴。最终视频必须是单一完整画面，禁止复制四宫格、分格、边框、拼贴、字幕或标签。
 
-出片使用 `videoPrompt` 的动作表演信息，不把配图用的 `visualPrompt` 原样送入 H3。`videoPrompt` 必须从0秒到本镜结束按实际剧情拍点分2–5段，逐段写谁看见什么、做什么、谁说什么、其他人如何反应、情绪和运镜怎样变化；禁止机械等分填套话。选 **H3** 时点「优化提示词」编成官方三段（见 `h3-prompt-writing`）：`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`。一条成片内部可切 `[Shot 1]` / `[Shot 2]` / `[Shot 3]`；第一镜不加时间戳，后续镜写 `At 00:03.000`。人物用英文外貌 + `(S1)`。只有台词用中文，写进 `<d>[Chinese] 原词</d>`。人设图不是 I2VA 首帧。选万相时不套这套格式。
+出片使用 `videoPrompt` 的动作表演信息，不把配图用的 `visualPrompt` 原样送入 H3。`videoPrompt` 必须从0秒到本镜结束按实际剧情拍点分2–5段，逐段写谁看见什么、做什么、谁说什么、其他人如何反应、情绪和运镜怎样变化；禁止机械等分填套话。选 **H3** 时点「优化提示词」编成官方三段（见 `h3-prompt-writing`）：`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`。一条成片内部可切 `[Shot 1]` / `[Shot 2]` / `[Shot 3]`；第一镜不加时间戳，后续镜写 `At 00:03.000`。人物用 `(S1)` `(S2)` 固定对应人物参考图，不按台词顺序重编号。只有台词用中文，写进 `<d>[Chinese] 原词</d>`。每次只有一个 (S#) 开口，其他人嘴唇闭合。人设图不是 I2VA 首帧。选万相时不套这套格式。
 
 ## 配音
 

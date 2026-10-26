@@ -11,6 +11,7 @@ import {
   videoPerformanceSpec
 } from '@/utils/shotPrompt'
 import { parseJsonRobust } from '@/utils/jsonRepair'
+import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 
 function shotLine(shot?: Shot): string {
   if (!shot) return '（无）'
@@ -62,7 +63,7 @@ export async function enrichVideoPerformance(opts: {
       messages: [
         {
           role: 'system',
-          content: `你给图生视频写「视频内容表现」。${videoPerformanceSpec(getVideoPromptStyle())}
+          content: `${importedDirectorPrefix()}你给图生视频写「视频内容表现」。${videoPerformanceSpec(getVideoPromptStyle())}
 只输出 JSON：{"videoPrompt":"..."}
 像给演员说戏，不要像填表。只写本镜这 ${opts.shot.duration} 秒里发生的事。
 从0秒到${opts.shot.duration}秒按实际剧情拍点分成2–5段，不机械等分。每段明确当前行动者、动作和表情、说话人和原词、其他人物占位与视线、一个有动机的运镜及落点。时间轴是导演调度，不是四行摘要；每段都要有可见的画面进展。
