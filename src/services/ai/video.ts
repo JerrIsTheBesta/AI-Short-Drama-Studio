@@ -94,6 +94,8 @@ export interface VideoGenInput {
   h3GenMode?: H3VideoGenMode
   /** 首尾帧模式的尾帧图 */
   lastFrameBlob?: Blob
+  /** 文档有音频开关时，把节点上的有声/无声发给接口 */
+  generateAudio?: boolean
   /** 数字人口播：与画面同步的口播音频 */
   audioBlob?: Blob
   /** 走 MiniMax H3 图+音频同步工作流 */
@@ -1087,6 +1089,8 @@ async function realApimartVideo(
     height: input.height,
     duration: input.duration,
     resolution: input.videoResolution,
+    generateAudio: input.generateAudio,
+    audioField: cfg.options?.audioField,
     images,
     signal: input.signal,
     onProgress,
@@ -1127,7 +1131,10 @@ async function realHttpCustomVideo(
       duration: input.duration,
       aspect_ratio: input.aspectRatio && String(input.aspectRatio) !== 'auto' ? input.aspectRatio : '16:9',
       width: input.width,
-      height: input.height
+      height: input.height,
+      ...(typeof input.generateAudio === 'boolean'
+        ? { [cfg.options?.audioField || 'audio']: input.generateAudio }
+        : {})
     },
     signal: input.signal,
     kind: 'video',
@@ -1284,8 +1291,13 @@ export async function generateVideo(
         throw new Error('[video] 数字人口播需要人物参考图和对应音频')
       }
     } else if (input.h3GenMode === 'fl2va') {
-      if (!input.imageBlob || !input.lastFrameBlob) {
-        throw new Error('[video] 首尾帧模式需要首帧和尾帧各一张图')
+      const requireLast = getVideoConfig(input.videoProfileId).options?.lastFrameRequired === true
+      if (!input.imageBlob || (requireLast && !input.lastFrameBlob)) {
+        throw new Error(
+          requireLast
+            ? '[video] 这个视频模型要求首帧和尾帧各一张图'
+            : '[video] 首尾帧模式需要一张首帧'
+        )
       }
     } else if (!input.imageBlob) {
       const peekId = input.videoModel === 'h3-v5' ? autodlVideoProfileId() || input.videoProfileId : input.videoProfileId

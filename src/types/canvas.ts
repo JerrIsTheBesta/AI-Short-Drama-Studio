@@ -133,6 +133,10 @@ export interface CanvasNode {
     videoStillMode?: VideoStillMode
     /** h3-v5 可选 1080p，其余固定 768p */
     videoResolution?: VideoResolution
+    /** 文档列出的出图档位，节点上由用户选 1K / 2K / 4K */
+    imageResolution?: '1k' | '2k' | '4k'
+    /** 文档有音频开关时，节点上的有声 / 无声 */
+    generateAudio?: boolean
     /** H3：参考图生成（默认）或首尾帧 */
     h3GenMode?: H3VideoGenMode
     firstFrameAssetId?: string

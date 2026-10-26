@@ -22,6 +22,9 @@ import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
+import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
+import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
+import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
@@ -301,6 +304,25 @@ const videoModel = computed({
 const videoResolution = computed({
   get: () => normalizeVideoResolution(nodeMeta.value?.data.videoResolution, videoModel.value),
   set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
+})
+const docVideoProfile = computed(() => {
+  const id = nodeMeta.value?.data.videoProfileId || shot.value?.videoProfileId || settings.config.activeVideoId
+  return settings.config.videos.find((item) => item.id === id)
+})
+const imageResolutionChoices = computed(
+  () =>
+    settings.config.images.find((item) => item.id === settings.config.activeImageId)?.options?.imageResolutions ||
+    []
+)
+const imageResolution = computed({
+  get: () => pickDocImageResolution(nodeMeta.value?.data.imageResolution, imageResolutionChoices.value) || '2k',
+  set: (v: DocImageResolution) => project.patchCanvasNode(props.id, { imageResolution: v })
+})
+const showVideoAudio = computed(() => docVideoProfile.value?.options?.videoAudio === true)
+const lastFrameRequired = computed(() => docVideoProfile.value?.options?.lastFrameRequired === true)
+const generateAudio = computed({
+  get: () => Boolean(nodeMeta.value?.data.generateAudio),
+  set: (v: boolean) => project.patchCanvasNode(props.id, { generateAudio: v })
 })
 const nodeAspectRatio = computed({
   get: () => nodeMeta.value?.data.aspectRatio ?? project.current?.settings.aspectRatio ?? '16:9',
@@ -1288,6 +1310,7 @@ const cropStyle = computed(() => ({
         v-if="isH3Fl2va"
         v-model:first-id="firstFrameId"
         v-model:last-id="lastFrameId"
+        :last-required="lastFrameRequired"
         :first-hint="shot?.imageAssetId ? '空则用本镜配图' : '请选择首帧'"
       />
       <ShotRefStrip
@@ -1314,6 +1337,12 @@ const cropStyle = computed(() => ({
           v-model="nodeAspectRatio"
           compact
         />
+        <ImageResolutionSeg
+          v-if="(isImageNode || isFrameNode) && imageResolutionChoices.length"
+          v-model="imageResolution"
+          :choices="imageResolutionChoices"
+        />
+        <DocAudioToggle v-if="type === 'shotVideo' && showVideoAudio" v-model="generateAudio" />
         <VideoResolutionSeg
           v-if="type === 'shotVideo' && videoAllows1080p(videoModel) && !isH3Fl2va"
           v-model="videoResolution"

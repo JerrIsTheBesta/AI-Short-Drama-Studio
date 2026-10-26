@@ -101,34 +101,160 @@ function shotDurationLimit(input: Pick<StoryboardInput, 'maxShotDuration'>): num
   return Math.max(5, Math.min(30, Math.round(Number(input.maxShotDuration) || 15)))
 }
 
-/** 从用户原话里认「约 40 秒 / 40s / 时长 40 秒钟」这类目标总时长。认不出返回 0。 */
-export function extractTargetDurationSec(...texts: Array<string | undefined | null>): number {
-  for (const text of texts) {
-    const raw = String(text || '').trim()
-    if (!raw) continue
-    const patterns = [
-      /(?:目标|成片|总时长|全片|整片|视频|时长|控制在|大约|大概|约|总计)\s*(\d{1,4})\s*(?:秒|秒钟|s\b)/i,
-      /(\d{1,4})\s*(?:秒|秒钟|s\b)\s*(?:的|左右|以内)?\s*(?:短剧|短片|视频|成片|短电影)/i
-    ]
-    for (const re of patterns) {
-      const m = raw.match(re)
-      const n = m ? Number(m[1]) : 0
-      if (n >= 10 && n <= 1800) return n
-    }
+/** 成片总时长允许比用户要求多 10 秒或少 10 秒。超出这个窗口必须打回。 */
+export const DURATION_TOLERANCE_SEC = 10
+const MIN_SHOT_SEC = 5
+const DURATION_REPAIR_ROUNDS = 2
+
+const CN_DIGIT: Record<string, number> = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9
+}
+
+function cnSmallNumber(raw: string): number {
+  const text = raw.replace(/\s+/g, '')
+  if (!text) return 0
+  if (text === '十') return 10
+  if (text.startsWith('十')) return 10 + (CN_DIGIT[text.slice(1)] || 0)
+  const ten = text.indexOf('十')
+  if (ten >= 0) {
+    const high = CN_DIGIT[text.slice(0, ten)] || 1
+    const low = text.slice(ten + 1)
+    return high * 10 + (low ? CN_DIGIT[low] || 0 : 0)
+  }
+  return CN_DIGIT[text] || 0
+}
+
+function acceptDuration(seconds: number): number {
+  const n = Math.round(seconds)
+  return n >= 10 && n <= 1800 ? n : 0
+}
+
+/** 从一小段里读出秒数：30秒、30s、1分20秒、1.5分钟、三十秒、半分钟。 */
+function secondsFromPhrase(phrase: string): number {
+  const text = phrase.replace(/\s+/g, '')
+  if (!text) return 0
+  if (text.includes('半分钟')) return 30
+  const minSec = text.match(/(\d+)分(\d+)秒/)
+  if (minSec) return acceptDuration(Number(minSec[1]) * 60 + Number(minSec[2]))
+  const minutes = text.match(/(\d+(?:\.\d+)?)分钟/)
+  if (minutes) return acceptDuration(Number(minutes[1]) * 60)
+  const seconds = text.match(/(\d+)(?:秒|秒钟|s)/i)
+  if (seconds) return acceptDuration(Number(seconds[1]))
+  const cnMin = text.match(/([一二两三四五六七八九十]+|半)分钟/)
+  if (cnMin) {
+    if (cnMin[1] === '半') return 30
+    return acceptDuration(cnSmallNumber(cnMin[1]) * 60)
+  }
+  const cnSec = text.match(/([一二两三四五六七八九十]+)秒/)
+  if (cnSec) return acceptDuration(cnSmallNumber(cnSec[1]))
+  return 0
+}
+
+const DURATION_PHRASE =
+  '((?:半分钟)|(?:\\d+\\s*分\\s*\\d+\\s*秒)|(?:\\d+(?:\\.\\d+)?\\s*分钟)|(?:\\d+\\s*(?:秒|秒钟|s))|(?:[一二两三四五六七八九十]+\\s*分钟)|(?:[一二两三四五六七八九十]+\\s*秒))'
+
+function labeledDuration(text: string): number {
+  const primary = new RegExp(
+    `(?:总时长|成片时长|目标成片|成片|全片|整片|总共|一共|控制在|做成|拍成|建议时长|目标时长|视频时长)\\s*[:：是为]?\\s*(?:约|大概|大约)?\\s*${DURATION_PHRASE}`,
+    'gi'
+  )
+  let hit: RegExpExecArray | null
+  while ((hit = primary.exec(text))) {
+    const n = secondsFromPhrase(hit[1] || '')
+    if (n) return n
+  }
+  const filmed = text.match(
+    new RegExp(`(\\d+)\\s*(?:秒|秒钟|s)\\s*(?:左右|以内)?\\s*(?:的)?\\s*(?:短剧|短片|视频|成片|短电影)`, 'i')
+  )
+  if (filmed) {
+    const n = acceptDuration(Number(filmed[1]))
+    if (n) return n
+  }
+  const secondary = new RegExp(`时长\\s*[:：]?\\s*(?:约|大概|大约)?\\s*${DURATION_PHRASE}`, 'gi')
+  while ((hit = secondary.exec(text))) {
+    const prefix = text.slice(Math.max(0, hit.index - 2), hit.index)
+    if (prefix === '单镜' || prefix === '每镜') continue
+    const n = secondsFromPhrase(hit[1] || '')
+    if (n) return n
   }
   return 0
 }
 
+function bareDuration(text: string): number {
+  if (text.length > 600) return 0
+  const hit = text.match(new RegExp(DURATION_PHRASE, 'i'))
+  return hit ? secondsFromPhrase(hit[1] || hit[0]) : 0
+}
+
+/** 从用户原话里认「约 40 秒 / 40s / 30S / 1 分钟 / 三十秒」这类目标总时长。认不出返回 0。 */
+export function extractTargetDurationSec(...texts: Array<string | undefined | null>): number {
+  for (const text of texts) {
+    const raw = String(text || '').trim()
+    if (!raw) continue
+    const labeled = labeledDuration(raw)
+    if (labeled) return labeled
+    const bare = bareDuration(raw)
+    if (bare) return bare
+  }
+  return 0
+}
+
+export function totalShotDuration(shots: Array<{ duration?: number }>): number {
+  return shots.reduce((sum, shot) => sum + Math.max(0, Math.round(Number(shot.duration) || 0)), 0)
+}
+
+/** 总时长不在目标 ±10 秒内时返回必须打回的原因；合格返回空字符串。 */
+export function durationWindowIssue(totalSec: number, targetSec: number): string {
+  const target = Math.round(Number(targetSec) || 0)
+  if (target < 10) return ''
+  const total = Math.round(totalSec)
+  if (Math.abs(total - target) <= DURATION_TOLERANCE_SEC) return ''
+  const lo = target - DURATION_TOLERANCE_SEC
+  const hi = target + DURATION_TOLERANCE_SEC
+  const delta = total - target
+  return `严重：成片总时长 ${total} 秒，不在用户要求的 ${target} 秒允许区间 ${lo}–${hi} 秒（只能多 ${DURATION_TOLERANCE_SEC} 秒或少 ${DURATION_TOLERANCE_SEC} 秒）。当前${delta > 0 ? '超了' : '少了'} ${Math.abs(delta)} 秒。必须重排镜头，让全部 duration 相加落进这个区间：超了就合并相邻、同地点、同组人物的镜头并缩短；短了就加长已有镜头。不能删掉关键剧情来凑秒数。`
+}
+
 /**
- * 目标总时长 → 分镜数硬预算。
- * 按「单镜平均 8 秒（不超过模型单镜上限）」折算，最少 1 镜。
- * 40 秒 → 5 镜；60 秒 → 8 镜；120 秒 → 15 镜。
+ * 按模型单镜上限把成片时长切成小组。
+ * 30 秒、单镜最长 15 秒 → [15, 15]，两个小组各出 15 秒。
+ */
+export function durationSlices(targetSec: number | undefined, maxShotSec?: number): number[] {
+  const target = Math.round(Number(targetSec) || 0)
+  if (target < 10) return []
+  const maxShot = Math.max(MIN_SHOT_SEC, Math.min(30, Math.round(Number(maxShotSec) || 15)))
+  const slices: number[] = []
+  let left = target
+  while (left > 0) {
+    const take = Math.min(maxShot, left)
+    slices.push(take)
+    left -= take
+  }
+  if (slices.length >= 2 && slices[slices.length - 1] < MIN_SHOT_SEC) {
+    const tail = slices.pop() || 0
+    const prev = slices[slices.length - 1]
+    if (prev + tail <= maxShot) slices[slices.length - 1] = prev + tail
+    else slices.push(MIN_SHOT_SEC)
+  }
+  return slices
+}
+
+/**
+ * 目标总时长 → 分镜小组数。一组对应用模型最长的一镜。
+ * 30 秒、最长 15 秒 → 2 组，不是按 5 秒一镜拆成 8 组。
  */
 export function shotBudgetFromDuration(targetSec: number | undefined, maxShotSec?: number): number {
-  const target = Number(targetSec) || 0
-  if (target < 10) return 0
-  const perShot = Math.max(5, Math.min(Number(maxShotSec) || 10, 8))
-  return Math.max(1, Math.ceil(target / perShot))
+  return durationSlices(targetSec, maxShotSec).length
 }
 
 function isLongFormPlay(input: Pick<StoryboardInput, 'workflowMode' | 'content'>, play = ''): boolean {
@@ -495,7 +621,7 @@ async function repairStoryboardOnce(
     Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
   const repairShotCap = shotBudgetFromDuration(repairTargetSec, input.maxShotDuration)
   const durationBlock = repairTargetSec
-    ? `\n【成片时长硬约束】用户要的是 ${repairTargetSec} 秒成片，全片镜头数不得超过 ${repairShotCap} 个。超了就把相邻、同地点、同组人物的镜头合并成长镜头（靠运镜与画内调度表达，不靠切镜），而不是删掉关键剧情；每镜 duration 可在 3–${shotDurationLimit(input)} 秒内调整，总和贴近 ${repairTargetSec} 秒。`
+    ? `\n【成片时长硬约束】用户要的是 ${repairTargetSec} 秒成片，允许 ${repairTargetSec - DURATION_TOLERANCE_SEC}–${repairTargetSec + DURATION_TOLERANCE_SEC} 秒，多 1 秒或少 1 秒超出这个窗口都不合格。全片镜头数不得超过 ${repairShotCap} 个。超了就把相邻、同地点、同组人物的镜头合并成长镜头（靠运镜与画内调度表达，不靠切镜），而不是删掉关键剧情；每镜 duration 在 ${MIN_SHOT_SEC}–${shotDurationLimit(input)} 秒内，全部镜头 duration 相加必须落在允许窗口里。`
     : ''
   const repair = await callLLM({
     messages: [
@@ -615,12 +741,57 @@ function splitLongStoryBeat(text: string, maxChars: number): string[] {
   return out
 }
 
+function collapseShotBatches(
+  drafts: Array<{ label: string; excerpt: string }>,
+  wanted: number
+): Array<{ label: string; excerpt: string }> {
+  const out = drafts.map((draft) => ({ ...draft }))
+  if (wanted <= 0) return out
+  let guard = 0
+  while (out.length > wanted && guard++ < 6) {
+    const per = Math.ceil(out.length / wanted)
+    if (per <= 1) break
+    const merged: Array<{ label: string; excerpt: string }> = []
+    for (let i = 0; i < out.length; i += per) {
+      const chunk = out.slice(i, i + per)
+      merged.push({
+        label: chunk.length > 1 ? `${chunk[0].label} 起` : chunk[0].label,
+        excerpt: chunk.map((item) => item.excerpt).join('\n\n')
+      })
+    }
+    if (merged.length >= out.length) break
+    out.splice(0, out.length, ...merged)
+  }
+  while (out.length < wanted) {
+    let index = 0
+    out.forEach((item, i) => {
+      if (item.excerpt.length > out[index].excerpt.length) index = i
+    })
+    const item = out[index]
+    if (item.excerpt.length < 40) break
+    const mid = Math.floor(item.excerpt.length / 2)
+    let cut = item.excerpt.lastIndexOf('\n\n', mid)
+    if (cut < 20) cut = item.excerpt.lastIndexOf('\n', mid)
+    if (cut < 20) cut = mid
+    const left = item.excerpt.slice(0, cut).trim()
+    const right = item.excerpt.slice(cut).trim()
+    if (!left || !right) break
+    out.splice(
+      index,
+      1,
+      { label: `${item.label} · 前段`, excerpt: left },
+      { label: `${item.label} · 后段`, excerpt: right }
+    )
+  }
+  return out
+}
+
 /**
  * 先在本地按场次和剧情段落切工作包，避免把整份剧本交给一个模型。
  * 每个工作包只允许产出 1–3 镜；并发数由调用方限制为 3。
  *
- * targetBatches：期望的工作包总数。给了这个值就不再按固定字数切，
- * 而是把切分口径放宽到「正文总长 / 期望包数」，让包数收敛到目标。
+ * targetBatches：期望的工作包总数。给了这个值就按成片时长收敛到这么多组，
+ * 多了合并、少了拆开，不再按场次数拆出 8、9 个小组。
  * 不传时保持原来的 1100 字 / 4 段口径。
  */
 function buildShotWorkBatches(play: string, targetBatches?: number): ShotWorkBatch[] {
@@ -711,11 +882,14 @@ function buildShotWorkBatches(play: string, targetBatches?: number): ShotWorkBat
     flush()
   }
 
-  return drafts.map((draft, index) => ({
+  const fitted =
+    wanted > 0 && drafts.length !== wanted ? collapseShotBatches(drafts, wanted) : drafts
+
+  return fitted.map((draft, index) => ({
     index,
     ...draft,
-    previousHint: index > 0 ? drafts[index - 1].excerpt.slice(-320) : undefined,
-    nextHint: index + 1 < drafts.length ? drafts[index + 1].excerpt.slice(0, 320) : undefined
+    previousHint: index > 0 ? fitted[index - 1].excerpt.slice(-320) : undefined,
+    nextHint: index + 1 < fitted.length ? fitted[index + 1].excerpt.slice(0, 320) : undefined
   }))
 }
 
@@ -736,7 +910,9 @@ async function generateShotWorkBatch(
   shotBudget?: number,
   /** 全片镜数预算，用于向模型交代「这就是总数，不许超」。 */
   totalShotBudget?: number,
-  targetDurationSec?: number
+  targetDurationSec?: number,
+  /** 本包各镜 duration 相加的上限（秒）。 */
+  durationCap?: number
 ): Promise<{ shots: Record<string, unknown>[]; model?: string }> {
   const limit = Math.max(
     1,
@@ -744,7 +920,7 @@ async function generateShotWorkBatch(
   )
   const budgetLine =
     totalShotBudget && totalShotBudget > 0
-      ? `\n【镜数硬上限】全片成片目标 ${targetDurationSec || '?'} 秒，只批 ${totalShotBudget} 个镜头；本工作包最多 ${limit} 镜，绝对不许超。先把本段所有动作与对白压缩进这 ${limit} 个镜头：同一地点、同一组人物的连续动作合并成一个长镜头，靠运镜和画内调度表达，不要靠切镜。`
+      ? `\n【镜数与时长硬上限】全片成片目标 ${targetDurationSec || '?'} 秒，允许上下浮动 ${DURATION_TOLERANCE_SEC} 秒。全片只批 ${totalShotBudget} 个小组；本工作包只出 ${limit} 镜，duration 合计必须是 ${durationCap || targetDurationSec || '?'} 秒。把本段动作与对白收进这 ${limit} 个镜头，靠运镜和画内调度表达，不要再拆小组。`
       : ''
   const parseBatch = (content: string): Record<string, unknown>[] => {
     try {
@@ -784,7 +960,7 @@ visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体�
           content: `工作包：${batch.label}
 已有人物：${subjectNames.join('、') || '（按原文识别）'}
 已有地点：${sceneNames.join('、') || '（按原文识别）'}
-当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。按完整动作与对白决定时长，可在 3–${shotDurationLimit(input)} 秒调整；同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头，不要机械拆成两个 5 秒镜头。${budgetLine}
+当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。${durationCap ? `本工作包的成片时长就是 ${durationCap} 秒，只出 ${limit} 镜，duration 写成 ${durationCap}。` : `每镜 duration 在 ${MIN_SHOT_SEC}–${shotDurationLimit(input)} 秒。`}同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头。${budgetLine}
 ${directives ? `\n全片约束（只用于保真）：\n${directives}\n` : ''}
 ${batch.previousHint ? `上一工作包末尾（只用于承接，不要重复拍）：\n${batch.previousHint}\n` : ''}
 本工作包剧本原文：
@@ -1405,30 +1581,28 @@ ${extractPlayForSceneStage(play)}`
     const sceneNames = extractSceneRows(scenePart.raw)
       .map((item: { name?: unknown }) => String(item?.name || '').trim())
       .filter(Boolean)
-    // 目标总时长 → 全片镜数预算 → 工作包数。没有目标时长时退回按字数切。
+    // 目标总时长 ÷ 模型单镜上限 = 小组数。30 秒、最长 15 秒 → 2 组，每组 15 秒。
     const targetDurationSec =
       Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
-    const totalShotBudget = shotBudgetFromDuration(targetDurationSec, shotDurationLimit(input))
-    const targetBatches = totalShotBudget ? Math.max(1, Math.ceil(totalShotBudget / SHOTS_PER_BATCH)) : 0
-    const workBatches = buildShotWorkBatches(play, targetBatches)
+    const maxShotSec = shotDurationLimit(input)
+    const slices = durationSlices(targetDurationSec, maxShotSec)
+    const totalShotBudget = slices.length
+    const workBatches = buildShotWorkBatches(play, totalShotBudget || undefined)
     if (!workBatches.length) throw new Error('剧本正文为空，无法拆分镜')
     onProgress?.(
-      totalShotBudget
-        ? `目标成片 ${targetDurationSec} 秒 → 预算 ${totalShotBudget} 镜 → 拆成 ${workBatches.length} 个工作包，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
+      slices.length
+        ? `目标成片 ${targetDurationSec} 秒，单镜最长 ${maxShotSec} 秒 → ${workBatches.length} 个小组（${slices.join(' + ')} 秒）`
         : `已拆成 ${workBatches.length} 个剧情工作包；每包最多 ${SHOTS_PER_BATCH} 镜，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
     )
     const directives = extractPlayDirectives(play)
     const batchShots: Array<Record<string, unknown>[] | undefined> = new Array(workBatches.length)
     const batchModels: Array<string | undefined> = new Array(workBatches.length)
-    // 按「剩余预算 / 剩余包数」给每个工作包配额，保证全片不超总镜数。
+    // 有时长切片时，一组只出一镜，时长就是这一片的秒数。
     const perBatchBudget = (index: number) => {
-      if (!totalShotBudget) return undefined
-      const rest = workBatches.length - index
-      if (rest <= 0) return 1
-      const used = batchShots.slice(0, index).reduce((sum, rows) => sum + (rows?.length || 0), 0)
-      const remaining = Math.max(1, totalShotBudget - used)
-      return Math.max(1, Math.min(SHOTS_PER_BATCH, Math.ceil(remaining / rest)))
+      if (slices.length) return 1
+      return undefined
     }
+    const perBatchSeconds = (index: number) => slices[index]
     const failed: Array<{ index: number; label: string; error: string }> = []
     let completed = 0
     let persistedPrefix = 0
@@ -1493,7 +1667,8 @@ ${extractPlayForSceneStage(play)}`
             false,
             perBatchBudget(index),
             totalShotBudget || undefined,
-            targetDurationSec || undefined
+            targetDurationSec || undefined,
+            perBatchSeconds(index)
           )
           await landFinishedBatch(index, result)
         } catch (error) {
@@ -1528,7 +1703,8 @@ ${extractPlayForSceneStage(play)}`
           true,
           perBatchBudget(item.index),
           totalShotBudget || undefined,
-          targetDurationSec || undefined
+          targetDurationSec || undefined,
+          perBatchSeconds(item.index)
         )
         await landFinishedBatch(item.index, result)
         } catch (error) {
@@ -1605,13 +1781,18 @@ ${extractPlayForSceneStage(play)}`
       scenes: sceneRows,
       shots: rawShots
     }
-    const parsed = normalizeStoryboard(merged, {
-      style: input.style,
-      topic: input.topic,
-      content: input.content,
-      keywords: input.keywords,
-      maxShotDuration: input.maxShotDuration
-    })
+    const parsed = await ensureShotDuration(
+      normalizeStoryboard(merged, {
+        style: input.style,
+        topic: input.topic,
+        content: input.content,
+        keywords: input.keywords,
+        maxShotDuration: input.maxShotDuration
+      }),
+      { ...input, targetDurationSec: targetDurationSec || input.targetDurationSec },
+      parallelModel,
+      onProgress
+    )
     const warnings = storyboardQualityIssues(parsed, input)
     if (warnings.length) {
       log(`⚠ 并行提炼完成，保留可编辑稿并提示 ${warnings.length} 项：${warnings.join('；')}`)
@@ -1632,7 +1813,7 @@ ${extractPlayForSceneStage(play)}`
     Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
   const budgetShots = shotBudgetFromDuration(budgetSec, input.maxShotDuration)
   const budgetLine = budgetShots
-    ? `\n【镜数硬上限】用户要的是 ${budgetSec} 秒成片，全片只批 ${budgetShots} 个镜头，绝对不许超。同一地点、同一组人物的连续动作合并成长镜头，靠运镜和画内调度表达，不靠切镜。`
+    ? `\n【镜数与时长硬上限】用户要的是 ${budgetSec} 秒成片，单镜最长 ${shotDurationLimit(input)} 秒，所以只批 ${budgetShots} 个镜头。允许 ${budgetSec - DURATION_TOLERANCE_SEC}–${budgetSec + DURATION_TOLERANCE_SEC} 秒。全部镜头 duration 相加必须落在这个窗口。`
     : ''
 
   const userText = extractMode
@@ -1803,6 +1984,7 @@ ${hasUserStyle && !look.matched ? '这是自定义画风，不要套页面下拉
   }
 
   parsed = await polishStoryboardOnce(parsed, input, model, onProgress)
+  parsed = await ensureShotDuration(parsed, input, model, onProgress)
 
   log(
     `✓ 解析成功，${parsed.subjects?.length ?? 0} 个主体 / ${parsed.scenes?.length ?? 0} 个场景 / ${parsed.shots.length} 个分镜`
@@ -1897,17 +2079,121 @@ export function bindShotVoiceHints<
   return bound
 }
 
+function mergeAdjacentShots(a: StoryboardShot, b: StoryboardShot): StoryboardShot {
+  const voice = [a.voiceover, b.voiceover].map((item) => item.trim()).filter(Boolean).join('\n')
+  const video = [a.videoPrompt, b.videoPrompt].map((item) => (item || '').trim()).filter(Boolean).join('\n')
+  return {
+    ...a,
+    duration: a.duration + b.duration,
+    voiceover: voice,
+    videoPrompt: video || a.videoPrompt,
+    audioDescription: [a.audioDescription, b.audioDescription].filter(Boolean).join('，'),
+    subjectIds: [...new Set([...(a.subjectIds || []), ...(b.subjectIds || [])])],
+    continuity: [a.continuity, b.continuity].filter(Boolean).join(' → ')
+  }
+}
+
+/** 镜数放不进窗口时合并相邻镜头，再把各镜秒数收进目标 ±10 秒。收不进去返回 null。 */
+function fitShotsToDuration(
+  shots: StoryboardShot[],
+  targetSec: number,
+  maxShot: number
+): StoryboardShot[] | null {
+  const max = Math.max(MIN_SHOT_SEC, maxShot)
+  const minCount = Math.max(1, Math.ceil((targetSec - DURATION_TOLERANCE_SEC) / max))
+  const maxCount = Math.max(minCount, Math.floor((targetSec + DURATION_TOLERANCE_SEC) / MIN_SHOT_SEC))
+  const rows = shots.map((shot) => ({ ...shot }))
+  while (rows.length > maxCount && rows.length > 1) {
+    let index = 0
+    let smallest = Number.POSITIVE_INFINITY
+    for (let i = 0; i < rows.length - 1; i++) {
+      const sum = rows[i].duration + rows[i + 1].duration
+      if (sum < smallest) {
+        smallest = sum
+        index = i
+      }
+    }
+    rows.splice(index, 2, mergeAdjacentShots(rows[index], rows[index + 1]))
+  }
+  if (rows.length < minCount) return null
+  const goal = Math.min(rows.length * max, Math.max(rows.length * MIN_SHOT_SEC, targetSec))
+  const weight = rows.reduce((sum, shot) => sum + Math.max(MIN_SHOT_SEC, shot.duration), 0) || rows.length
+  const values = rows.map((shot) =>
+    Math.min(max, Math.max(MIN_SHOT_SEC, Math.round((Math.max(MIN_SHOT_SEC, shot.duration) / weight) * goal)))
+  )
+  let total = values.reduce((sum, value) => sum + value, 0)
+  let guard = 0
+  while (total !== goal && guard++ < 500) {
+    if (total > goal) {
+      const index = values.reduce((best, value, i) => (value > values[best] ? i : best), 0)
+      if (values[index] <= MIN_SHOT_SEC) break
+      values[index] -= 1
+      total -= 1
+    } else {
+      const index = values.findIndex((value) => value < max)
+      if (index < 0) break
+      values[index] += 1
+      total += 1
+    }
+  }
+  if (Math.abs(total - targetSec) > DURATION_TOLERANCE_SEC) return null
+  return rows.map((shot, index) => ({ ...shot, duration: values[index] }))
+}
+
+/**
+ * 检测成片总时长。不合格就打回重拆；模型仍交不出合格时长时，强制把各镜秒数收进 ±10 秒。
+ */
+async function ensureShotDuration(
+  parsed: StoryboardResult,
+  input: StoryboardInput,
+  model: string,
+  onProgress?: (msg: string) => void
+): Promise<StoryboardResult> {
+  const target =
+    Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
+  if (target < 10 || !parsed.shots.length) return parsed
+  let current = parsed
+  for (let round = 0; round <= DURATION_REPAIR_ROUNDS; round++) {
+    const total = totalShotDuration(current.shots)
+    const issue = durationWindowIssue(total, target)
+    if (!issue) {
+      if (round > 0) onProgress?.(`时长检测通过：总时长 ${total} 秒，在 ${target} 秒的 ±${DURATION_TOLERANCE_SEC} 秒内`)
+      return current
+    }
+    if (round === DURATION_REPAIR_ROUNDS) break
+    onProgress?.(
+      `时长检测未通过：现在 ${total} 秒，用户要 ${target} 秒（允许 ${target - DURATION_TOLERANCE_SEC}–${target + DURATION_TOLERANCE_SEC} 秒）。打回按时长重拆（${round + 1}/${DURATION_REPAIR_ROUNDS}）…`
+    )
+    try {
+      current = await repairStoryboardOnce(current, { ...input, targetDurationSec: target }, model, [issue])
+    } catch (error) {
+      log(`⚠ 时长打回失败，改为强制收秒：${(error as Error).message}`)
+      break
+    }
+  }
+  const fitted = fitShotsToDuration(current.shots, target, shotDurationLimit(input))
+  if (!fitted) {
+    const total = totalShotDuration(current.shots)
+    throw new Error(
+      `时长检测未通过：总时长 ${total} 秒，用户要求 ${target} 秒，只允许上下浮动 ${DURATION_TOLERANCE_SEC} 秒。已打回重拆 ${DURATION_REPAIR_ROUNDS} 次，仍收不进这个区间。`
+    )
+  }
+  const fittedTotal = totalShotDuration(fitted)
+  onProgress?.(`时长检测仍不合格，已按 ${target} 秒强制收回各镜时长，现为 ${fittedTotal} 秒`)
+  return { ...current, shots: fitted }
+}
+
 export function storyboardQualityIssues(
   result: StoryboardResult,
-  input: Pick<StoryboardInput, 'content' | 'topic' | 'targetDurationSec'>
+  input: Pick<StoryboardInput, 'content' | 'topic' | 'targetDurationSec' | 'maxShotDuration'>
 ): string[] {
   const issues: string[] = []
   if (!result.shots.length) issues.push('严重：没有生成任何分镜')
   const targetSec = Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
-  const shotCap = shotBudgetFromDuration(targetSec) || 12
+  const shotCap = shotBudgetFromDuration(targetSec, input.maxShotDuration) || 12
   if (result.shots.length > shotCap) {
     issues.push(
-      `分镜 ${result.shots.length} 个，超出${targetSec ? `「${targetSec} 秒」对应的 ${shotCap}` : shotCap}镜预算，短视频节奏失控`
+      `${targetSec ? '严重：' : ''}分镜 ${result.shots.length} 个，超出${targetSec ? `「${targetSec} 秒」对应的 ${shotCap}` : shotCap}镜预算，短视频节奏失控`
     )
   }
   if (
@@ -1938,9 +2224,8 @@ export function storyboardQualityIssues(
   }
   const targetDuration = targetSec
   const totalDuration = result.shots.reduce((sum, shot) => sum + shot.duration, 0)
-  if (targetDuration >= 10 && Math.abs(totalDuration - targetDuration) > Math.max(5, targetDuration * 0.25)) {
-    issues.push(`总时长 ${totalDuration} 秒，与用户目标 ${targetDuration} 秒偏差过大`)
-  }
+  const durationIssue = durationWindowIssue(totalDuration, targetDuration)
+  if (durationIssue) issues.push(durationIssue)
   if (!result.h3Aesthetic || result.h3Aesthetic.length < 35) {
     issues.push('缺少可直接传给 H3 的英文 Aesthetic')
   }
@@ -2886,7 +3171,7 @@ function playScaleBrief(targetSec: number | undefined): string {
   const scenes = Math.max(2, Math.min(6, Math.round(target / 15)))
   const chars = Math.max(400, Math.round(target * 18))
   const lines = Math.max(4, Math.round(target / 5))
-  return `目标成片时长：${target} 秒（硬约束，必须照它定规模）。按 ${target} 秒反推：分场不超过 ${scenes} 场；分场正文（不含人物小传与环境清单）控制在 ${chars} 字以内；对白总量控制在 ${lines} 句以内。宁可写短、写透，也不要铺场面——多写一场，后面分镜就超预算、成片就拖长。`
+  return `目标成片时长：${target} 秒（硬约束，必须照它定规模）。成片允许 ${target - DURATION_TOLERANCE_SEC}–${target + DURATION_TOLERANCE_SEC} 秒，超出这个窗口就不合格。按 ${target} 秒反推：分场不超过 ${scenes} 场；分场正文（不含人物小传与环境清单）控制在 ${chars} 字以内；对白总量控制在 ${lines} 句以内。宁可写短、写透，也不要铺场面——多写一场，后面分镜就超预算、成片就拖长。`
 }
 
 async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {

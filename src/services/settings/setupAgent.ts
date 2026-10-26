@@ -16,6 +16,7 @@ import {
   type ProviderPreset
 } from '@/services/ai/providers'
 import { parseJsonRobust } from '@/utils/jsonRepair'
+import { normalizeModelNodeOptions } from '@/services/ai/modelOptions'
 import {
   endpointReady,
   uniqueProfileName,
@@ -108,8 +109,8 @@ const SYSTEM = `${settingsSkillRaw}
 一次最多 8 个 actions。没有把握就 actions 为空，先问。文档已经够写的时候不要空 actions。
 
 可用工具：
-{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe", "adapter": { "type": "openai-compatible|openai-images|http-custom|comfyui-workflow|comfyui-prompt", "path": "可选", "pollPath": "可选含{id}", "resultJsonPath": "可选", "authHeader": "可选", "authPrefix": "可选，Bearer 或空", "workflowTemplate": "ComfyUI /prompt JSON，可用{{prompt}}{{image}}" } }
-{ "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选", "adapter": "可选，同上" }
+{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe", "options": { "imageResolutions": ["1k","2k"], "videoAudio": true, "lastFrameRequired": false, "audioField": "audio" }, "adapter": { "type": "openai-compatible|openai-images|http-custom|comfyui-workflow|comfyui-prompt", "path": "可选", "pollPath": "可选含{id}", "resultJsonPath": "可选", "authHeader": "可选", "authPrefix": "可选，Bearer 或空", "workflowTemplate": "ComfyUI /prompt JSON，可用{{prompt}}{{image}}" } }
+{ "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选", "options": "可选，同上", "adapter": "可选，同上" }
 { "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
 { "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
 { "tool": "test_connection", "kind": "llm|vision|image|tts|video", "id": "可选，默认当前套" }
@@ -140,7 +141,10 @@ ${catalog(VIDEO_PROVIDERS)}
 - 自建 ComfyUI（如 http://127.0.0.1:8188）：优先用 add_comfyui 一次加生图+视频。用户只说「我的 ComfyUI 在 xxx」或只贴地址时立刻添加，不要追问模型名。
 - 有工作流 JSON 再写入 adapter.workflowTemplate；没有也不要拒绝添加，提醒出片前在设置页适配器粘贴。不要编造 AutoDL 生命周期或假工作流。
 - OpenAI 兼容中转：LLM/视觉用默认；生图若不是 /images/generations，设 adapter.type=http-custom 并填 path、resultJsonPath。
-- 写完接入后，若用户要求「测一下」，调用 test_connection。`
+- 写完接入后，若用户要求「测一下」，调用 test_connection。
+- options 只写文档里明确出现的节点参数，禁止编造。生图文档列出 1K/2K/4K 时，imageResolutions 只收录文档有的档位，写成小写 1k、2k、4k。文档没写分辨率就不要填 imageResolutions。
+- 视频文档有音频开关时 videoAudio 才写 true，并把文档里的字段名写入 audioField（必须含 audio，例如 audio 或 generate_audio）。没有音频开关就不要写 videoAudio。
+- 尾帧默认不是必填。只有文档写明尾帧、结束帧或 last frame 必填时，lastFrameRequired 才写 true。文档没提尾帧，就不要写这个字段。`
 
 function providersFor(kind: SetupKind): ProviderPreset[] {
   if (kind === 'llm') return LLM_PROVIDERS
@@ -390,7 +394,8 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
         promptStyle: action.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
         provider: merged.provider,
         stillMode,
-        adapter: resolvedAdapter
+        adapter: resolvedAdapter,
+        options: normalizeModelNodeOptions(action.options)
       })
       return { ok: true, detail: `已保存视频接入「${name}」(${id})`, kind }
     }
@@ -406,7 +411,8 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
         adapter ||
         (kind === 'image' && /localhost|127\.0\.0\.1/i.test(baseUrl)
           ? { type: 'comfyui-prompt' as const }
-          : undefined)
+          : undefined),
+      options: normalizeModelNodeOptions(action.options)
     }
     if (kind === 'llm') settings.addLlm(seed)
     else if (kind === 'vision') settings.addVision(seed)
@@ -427,6 +433,10 @@ async function runAction(action: Record<string, unknown>): Promise<{ ok: boolean
     if (action.model) patch.model = String(action.model).trim()
     if (action.provider) patch.provider = String(action.provider).trim()
     if (Array.isArray(action.models)) patch.models = action.models.map(String)
+    if (action.options) {
+      const options = normalizeModelNodeOptions(action.options)
+      if (options) patch.options = options
+    }
     if (action.adapter) {
       const adapter = normalizeAdapterInput(action.adapter)
       if (adapter) patch.adapter = adapter

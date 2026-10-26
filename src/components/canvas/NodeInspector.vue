@@ -17,6 +17,9 @@ import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
+import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
+import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
+import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
@@ -280,6 +283,29 @@ const videoResolution = computed({
   get: () => normalizeVideoResolution(props.node?.data.videoResolution, videoModel.value),
   set: (v: VideoResolution) => {
     if (props.node) project.patchCanvasNode(props.node.id, { videoResolution: v })
+  }
+})
+const docVideoProfile = computed(() => {
+  const id = props.node?.data.videoProfileId || shot.value?.videoProfileId || settings.config.activeVideoId
+  return settings.config.videos.find((item) => item.id === id)
+})
+const imageResolutionChoices = computed(
+  () =>
+    settings.config.images.find((item) => item.id === settings.config.activeImageId)?.options?.imageResolutions ||
+    []
+)
+const imageResolution = computed({
+  get: () => pickDocImageResolution(props.node?.data.imageResolution, imageResolutionChoices.value) || '2k',
+  set: (v: DocImageResolution) => {
+    if (props.node) project.patchCanvasNode(props.node.id, { imageResolution: v })
+  }
+})
+const showVideoAudio = computed(() => docVideoProfile.value?.options?.videoAudio === true)
+const lastFrameRequired = computed(() => docVideoProfile.value?.options?.lastFrameRequired === true)
+const generateAudio = computed({
+  get: () => Boolean(props.node?.data.generateAudio),
+  set: (v: boolean) => {
+    if (props.node) project.patchCanvasNode(props.node.id, { generateAudio: v })
   }
 })
 const isH3Video = computed(
@@ -986,8 +1012,8 @@ async function optimizeVideoPrompt() {
           v-else-if="shot && project.current && stillModeForShot(shot, project.current) === 'keyframe' && !isH3Fl2va && !shot.imageAssetId"
           class="err"
         >这一镜还没有四宫格关键帧，当前模型需要关键帧后再出视频。</p>
-        <p v-else-if="isH3Fl2va && !shot.lastFrameAssetId" class="err">
-          这一镜手动开了首尾帧，还缺尾帧。请在下方选择尾帧。
+        <p v-else-if="isH3Fl2va && lastFrameRequired && shot && !shot.lastFrameAssetId" class="err">
+          这一镜的视频模型要求尾帧，请在下方选择。
         </p>
         <p v-else-if="fl2vaChain && shot && !isH3Fl2va" class="hint">
           项目已开启首尾帧链：第 1 镜用本镜配图起手，第 2 镜起自动接上一镜末帧，不用手动选帧。凑不齐首尾帧时会自动退回常规出片，不会卡住生成。
@@ -999,6 +1025,7 @@ async function optimizeVideoPrompt() {
         v-if="isH3Fl2va"
         v-model:first-id="firstFrameId"
         v-model:last-id="lastFrameId"
+        :last-required="lastFrameRequired"
         :first-hint="node.type === 'shotVideo' && shot?.imageAssetId ? '空则用本镜配图' : ''"
       />
       <ShotRefStrip
@@ -1099,12 +1126,18 @@ async function optimizeVideoPrompt() {
 
       <div v-if="isImageNode || isVideoNode" class="insp-params">
         <ImageModelSelect v-if="isImageNode" />
+        <ImageResolutionSeg
+          v-if="isImageNode && imageResolutionChoices.length"
+          v-model="imageResolution"
+          :choices="imageResolutionChoices"
+        />
         <VideoModelSelect
           v-if="isVideoNode"
           v-model="videoModel"
           :profile-id="node.data.videoProfileId"
           @select-profile="onSelectVideoProfile"
         />
+        <DocAudioToggle v-if="isVideoNode && showVideoAudio" v-model="generateAudio" />
         <VideoResolutionSeg
           v-if="isVideoNode && videoAllows1080p(videoModel) && !isH3Fl2va"
           v-model="videoResolution"

@@ -58,6 +58,7 @@ function imageResolution(raw?: string): '1k' | '2k' | '4k' {
   const value = String(raw || '').toLowerCase().replace(/\s/g, '')
   if (value === '4k' || value === '4') return '4k'
   if (value === '1k' || value === '1') return '1k'
+  if (value === '2k' || value === '2') return '2k'
   return '2k'
 }
 
@@ -436,6 +437,8 @@ export async function apimartGenerateVideo(opts: {
   height?: number
   duration?: number
   resolution?: string
+  generateAudio?: boolean
+  audioField?: string
   images?: Blob[]
   signal?: AbortSignal
   onProgress?: (msg: string) => void
@@ -464,6 +467,10 @@ export async function apimartGenerateVideo(opts: {
       aspect_ratio: ratio,
       duration,
       resolution: videoQuality(opts.resolution)
+    }
+    if (typeof opts.generateAudio === 'boolean') {
+      const field = String(opts.audioField || 'audio').trim()
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(field) && /audio/i.test(field)) body[field] = opts.generateAudio
     }
     if (imageUrls.length) body.image_urls = imageUrls
     opts.onProgress?.('提交视频任务...')

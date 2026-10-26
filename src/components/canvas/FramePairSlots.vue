@@ -5,11 +5,15 @@ import { openLightbox } from '@/composables/useLightbox'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import type { ID } from '@/types'
 
-const props = defineProps<{
-  firstId?: ID
-  lastId?: ID
-  firstHint?: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    firstId?: ID
+    lastId?: ID
+    firstHint?: string
+    lastRequired?: boolean
+  }>(),
+  { lastRequired: false }
+)
 
 const emit = defineEmits<{
   'update:firstId': [id: ID | undefined]
@@ -67,7 +71,7 @@ function clear(which: 'first' | 'last') {
       <small v-if="firstHint">{{ firstHint }}</small>
     </div>
     <div class="slot">
-      <span>尾帧</span>
+      <span>{{ lastRequired ? '尾帧' : '尾帧（可选）' }}</span>
       <button v-if="lastId && urls[lastId]" type="button" class="thumb" @click="openLightbox(urls[lastId], 'image')">
         <img :src="urls[lastId]" alt="" />
       </button>

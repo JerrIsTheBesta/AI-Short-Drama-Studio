@@ -41,6 +41,8 @@ export interface ImageGenInput {
   referenceLabels?: string[]
   /** 覆盖设置页作图模型，例如视频复刻用 gpt-image-1 */
   model?: string
+  /** 文档列出的出图档位：1k / 2k / 4k */
+  resolution?: string
   signal?: AbortSignal
 }
 
@@ -80,6 +82,7 @@ async function realCustomOrComfy(input: ImageGenInput): Promise<ImageGenOutput> 
       extraBody: {
         ...(imageUrls.length ? { image_urls: imageUrls } : {}),
         ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
+        ...(input.resolution ? { resolution: input.resolution } : {}),
         n: 1
       },
       signal: input.signal
@@ -542,6 +545,7 @@ export async function generateImage(
         model: cfg.model,
         prompt,
         aspectRatio: input.aspectRatio,
+        resolution: input.resolution || cfg.options?.imageResolutions?.[0],
         n: input.n,
         referenceImages: input.referenceImages,
         signal: input.signal,

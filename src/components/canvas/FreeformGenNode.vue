@@ -17,6 +17,9 @@ import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
+import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
+import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
+import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
 import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import {
@@ -134,6 +137,21 @@ const effectiveVideoProfile = computed(() => {
     : undefined
   if (own) return own
   return list.find((p) => p.id === settings.config.activeVideoId) || undefined
+})
+const imageResolutionChoices = computed(
+  () =>
+    settings.config.images.find((item) => item.id === settings.config.activeImageId)?.options?.imageResolutions ||
+    []
+)
+const imageResolution = computed({
+  get: () => pickDocImageResolution(node.value?.data.imageResolution, imageResolutionChoices.value) || '2k',
+  set: (v: DocImageResolution) => project.patchCanvasNode(props.id, { imageResolution: v })
+})
+const showVideoAudio = computed(() => effectiveVideoProfile.value?.options?.videoAudio === true)
+const lastFrameRequired = computed(() => effectiveVideoProfile.value?.options?.lastFrameRequired === true)
+const generateAudio = computed({
+  get: () => Boolean(node.value?.data.generateAudio),
+  set: (v: boolean) => project.patchCanvasNode(props.id, { generateAudio: v })
 })
 function profileIsAutodl(p?: { provider?: string; baseUrl?: string; adapter?: { type?: string } }) {
   if (!p) return false
@@ -399,7 +417,7 @@ async function generate() {
         toast.warn('请先选首帧')
         return
       }
-      if (!lastFrameId.value && !refs.value[1]) {
+      if (lastFrameRequired.value && !lastFrameId.value && !refs.value[1]) {
         toast.warn('请先选尾帧')
         return
       }
@@ -628,6 +646,7 @@ function removeSelf() {
           v-if="isH3Fl2va"
           v-model:first-id="firstFrameId"
           v-model:last-id="lastFrameId"
+          :last-required="lastFrameRequired"
         />
         <div v-else class="refs">
           <div v-for="id in refs" :key="id" class="thumb nodrag nopan nowheel">
@@ -677,6 +696,12 @@ function removeSelf() {
           />
           <!-- 比例和模型同排：一眼看到「用什么模型、出什么画幅」 -->
           <AspectRatioSeg v-model="aspectRatio" compact />
+          <ImageResolutionSeg
+            v-if="!isVideo && imageResolutionChoices.length"
+            v-model="imageResolution"
+            :choices="imageResolutionChoices"
+          />
+          <DocAudioToggle v-if="isVideo && showVideoAudio" v-model="generateAudio" />
           <VideoResolutionSeg
             v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
             v-model="videoResolution"

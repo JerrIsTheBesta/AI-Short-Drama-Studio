@@ -501,6 +501,11 @@ function requestBodyForProvider(
     const quality = String(source.resolution || '')
     body.resolution = /480/.test(quality) ? '480p' : '720p'
     if (images.length) body.image_urls = images.slice(0, 7)
+    for (const [key, value] of Object.entries(source)) {
+      if (typeof value === 'boolean' && /audio/i.test(key) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        body[key] = value
+      }
+    }
     return body
   }
   body.n = Math.max(1, Math.round(Number(source.n) || 1))

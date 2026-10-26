@@ -767,7 +767,7 @@ async function removeProductImage(id: string) {
           </div>
           <div v-if="targetDurationSec" class="kv">
             <span>时长预算</span>
-            <b :class="{ over: estimatedDuration > targetDurationSec * 1.25 }">
+            <b :class="{ over: Math.abs(estimatedDuration - targetDurationSec) > 10 }">
               {{ targetDurationSec }}s / {{ durationShots(targetDurationSec) }} 镜
             </b>
           </div>

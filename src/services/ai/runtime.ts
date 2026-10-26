@@ -55,7 +55,8 @@ export function getImageConfig() {
     apiKey: s?.apiKey || d.apiKey,
     model: s?.model || d.model,
     adapter: s?.adapter,
-    provider: s?.provider
+    provider: s?.provider,
+    options: s?.options
   }
 }
 
@@ -142,6 +143,7 @@ export function getVideoConfig(profileId?: string) {
     promptStyle: getVideoPromptStyle(),
     adapter: s?.adapter,
     provider: s?.provider,
+    options: s?.options,
     zealmanBaseUrl: settings?.zealmanBaseUrl || ''
   }
 }

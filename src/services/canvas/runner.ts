@@ -44,6 +44,7 @@ import {
 } from '@/services/ai'
 import { blobToChatImageUrl } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
+import { pickDocImageResolution } from '@/services/ai/modelOptions'
 import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneAssetForShot, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
@@ -169,6 +170,35 @@ function resolveLlmModel(override?: string): string | undefined {
   const picked = override?.trim()
   if (picked) return picked
   return useSettingsStore().config.llm.model?.trim() || undefined
+}
+
+function findCanvasNode(match: (node: CanvasNode) => boolean) {
+  return useProjectStore().current?.canvas?.nodes.find(match)
+}
+
+function docImageResolution(node?: CanvasNode | null) {
+  const settings = useSettingsStore()
+  const profile = settings.config.images.find((item) => item.id === settings.config.activeImageId)
+  return pickDocImageResolution(node?.data.imageResolution, profile?.options?.imageResolutions)
+}
+
+function videoProfileById(profileId?: string) {
+  const settings = useSettingsStore()
+  return (
+    settings.config.videos.find((item) => item.id === profileId) ||
+    settings.config.videos.find((item) => item.id === settings.config.activeVideoId)
+  )
+}
+
+function docGenerateAudio(profileId: string | undefined, enabled?: boolean) {
+  const profile = videoProfileById(profileId)
+  if (profile?.options?.videoAudio !== true) return undefined
+  return Boolean(enabled)
+}
+
+function shotVideoAudio(shotId: string, profileId?: string) {
+  const node = findCanvasNode((item) => item.type === 'shotVideo' && item.data.shotId === shotId)
+  return docGenerateAudio(profileId || node?.data.videoProfileId, node?.data.generateAudio)
 }
 
 /** 剧本正文指纹：断点标记只在同一段剧本上复用，文本一变就作废。 */
@@ -309,6 +339,7 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
       width: size.width,
       height: size.height,
       aspectRatio: '16:9',
+      resolution: docImageResolution(findCanvasNode((node) => node.type === 'subject' && node.data.subjectId === latest.id)),
       referenceImages: refs.length ? refs : undefined,
       referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -377,6 +408,9 @@ export async function generateScenePropSheet(
       width: size.width,
       height: size.height,
       aspectRatio: '16:9',
+      resolution: docImageResolution(
+        findCanvasNode((node) => node.type === 'sceneProps' && node.data.sceneId === latest.id)
+      ),
       referenceImages: clippedRefs.length ? clippedRefs : undefined,
       referenceLabels: clippedLabels.length ? clippedLabels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -423,6 +457,7 @@ export async function generateScenePlate(scn: Scene, onProgress?: (msg: string) 
       width: size.width,
       height: size.height,
       aspectRatio: '16:9',
+      resolution: docImageResolution(findCanvasNode((node) => node.type === 'scene' && node.data.sceneId === latest.id)),
       referenceImages: extras.blobs.length ? extras.blobs.slice(0, 10) : undefined,
       referenceLabels: extras.labels.length ? extras.labels.slice(0, 10) : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -485,6 +520,7 @@ export async function generateShotBoard(shot: Shot, onProgress?: (msg: string) =
       width: size.width,
       height: size.height,
       aspectRatio,
+      resolution: docImageResolution(findCanvasNode((node) => node.type === 'shotBoard' && node.data.shotId === shot.id)),
       referenceImages: blobs.length ? blobs : undefined,
       referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -565,6 +601,7 @@ export async function generateShotImage(shot: Shot, onProgress?: (msg: string) =
       width: size.width,
       height: size.height,
       aspectRatio,
+      resolution: docImageResolution(findCanvasNode((node) => node.type === 'shotImage' && node.data.shotId === shot.id)),
       referenceImages: blobs.length ? blobs : undefined,
       referenceLabels: labels.length ? labels : undefined,
       model: imageModelForProject(project.current.pipelineMode),
@@ -650,6 +687,7 @@ async function renderShotFrame(
         width: size.width,
         height: size.height,
         aspectRatio,
+        resolution: docImageResolution(findCanvasNode((node) => node.type === 'shotFrames' && node.data.shotId === shot.id)),
         referenceImages: blobs.length ? blobs : undefined,
         referenceLabels: labels.length ? labels : undefined,
         model: imageModelForProject(project.current.pipelineMode),
@@ -1274,12 +1312,10 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       if (tailId) lastBlob = await tryLoadRefImageBlob(tailId)
     }
     if (!lastBlob) {
-      if (perShotFl2va) {
-        throw new Error(
-          '这一镜手动开了首尾帧模式，还缺尾帧。请在节点上选一张尾帧图，或把生成模式改回「参考图」。'
-        )
+      if (perShotFl2va && videoProfileById(shot.videoProfileId)?.options?.lastFrameRequired === true) {
+        throw new Error('这一镜的视频模型要求尾帧。请在节点上选一张尾帧图，或把生成模式改回「参考图」。')
       }
-      if (firstBlob) onProgress?.('没有可用尾帧（下一镜还没配图）：本镜用首帧按常规方式出片。')
+      if (firstBlob) onProgress?.('没有可用尾帧：本镜用首帧按常规方式出片。')
     }
     if (firstBlob && lastBlob) {
       onProgress?.('读取首帧和尾帧…')
@@ -1320,6 +1356,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
           videoModel: 'h3',
           videoProfileId: shot.videoProfileId,
           videoResolution: canvasVideoResolutionForShot(shot, videoModel),
+          generateAudio: shotVideoAudio(shot.id, shot.videoProfileId),
           h3GenMode: 'fl2va',
           mode: 'I2VA',
           signal,
@@ -1481,6 +1518,7 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
       videoModel,
       videoProfileId: shot.videoProfileId,
       videoResolution: canvasVideoResolutionForShot(shot, videoModel),
+      generateAudio: shotVideoAudio(shot.id, shot.videoProfileId),
       h3GenMode: 'reference',
       mode: h3Mode,
       signal,
@@ -1856,17 +1894,29 @@ export async function runGeneratePlay(
   return run
 }
 
+/** 最近几句用户原话，最新的在前。分镜时长以这里的「30秒 / 30S」为准。 */
+function recentUserDurationTexts(): string[] {
+  const messages = useProjectStore().current?.agentState?.messages || []
+  return messages
+    .filter((message) => message.role === 'user' && message.content.trim())
+    .slice(-8)
+    .map((message) => message.content)
+    .reverse()
+}
+
 /**
- * 成片目标时长：优先用项目里显式设的值，其次从用户原话里认（「约 40 秒」这类）。
+ * 成片目标时长。用户刚说的时长优先，其次是项目里已经记下的值，再从剧本里认。
  * 它是剧本规模和分镜数量的硬预算，拿不到就返回 undefined 让流程按内容自然走。
  */
 function resolveTargetDurationSec(
   script: { targetDurationSec?: number; topic?: string; content?: string } | undefined,
   ...extraTexts: Array<string | undefined>
 ): number | undefined {
+  const fromUser = extractTargetDurationSec(...extraTexts, ...recentUserDurationTexts())
+  if (fromUser >= 10) return fromUser
   const explicit = Number(script?.targetDurationSec) || 0
   if (explicit >= 10) return explicit
-  const parsed = extractTargetDurationSec(script?.topic, script?.content, ...extraTexts)
+  const parsed = extractTargetDurationSec(script?.topic, script?.content)
   return parsed || undefined
 }
 
@@ -2105,11 +2155,13 @@ export async function runExtractStoryboard(
     rebindShotScenes()
   }
   if (project.current.script) {
+    const durationSec = resolveTargetDurationSec(project.current.script, ...recentUserDurationTexts())
     project.setScript({
       ...project.current.script,
       playReady: true,
       // 全部小组都已落库，断点标记完成使命，清掉避免旧标记污染下次改稿。
       shotBatches: undefined,
+      ...(durationSec ? { targetDurationSec: durationSec } : {}),
       ...(look.matched ? { style: look.matched } : {}),
       ...(run.result.aesthetic ? { aesthetic: run.result.aesthetic } : {}),
       ...(run.result.h3Aesthetic ? { h3Aesthetic: run.result.h3Aesthetic } : {}),
@@ -2456,6 +2508,7 @@ export async function generateFreeformImage(
     width: size.width,
     height: size.height,
     aspectRatio,
+    resolution: docImageResolution(node),
     referenceImages: blobs.length ? blobs : undefined,
     model: imageModelForProject(p.pipelineMode),
     signal
@@ -2488,20 +2541,21 @@ export async function generateFreeformVideo(
   const ids = resolvedCanvasReferenceAssetIds(p, node)
   const videoModel = normalizeVideoGenModel(node.data.videoModel)
   const useFl2va = isH3VideoFamily(videoModel) && normalizeH3GenMode(node.data.h3GenMode) === 'fl2va'
+  const requireLast = videoProfileById(node.data.videoProfileId)?.options?.lastFrameRequired === true
   const firstId = node.data.firstFrameAssetId || ids[0]
   const lastId = node.data.lastFrameAssetId || ids[1]
   if (useFl2va) {
     if (!firstId) throw new Error('请先选首帧')
-    if (!lastId) throw new Error('请先选尾帧')
+    if (!lastId && requireLast) throw new Error('请先选尾帧')
   } else if (!ids.length) {
     throw new Error('请先选至少一张参考图')
   }
-  onProgress?.(useFl2va ? '读取首帧和尾帧...' : '读取参考图...')
+  onProgress?.(useFl2va && lastId ? '读取首帧和尾帧...' : '读取参考图...')
   const library = useLibraryStore()
   const blobs: Blob[] = []
   if (useFl2va) {
     blobs.push(await loadRefImageBlob(firstId, '首帧'))
-    blobs.push(await loadRefImageBlob(lastId, '尾帧'))
+    if (lastId) blobs.push(await loadRefImageBlob(lastId, '尾帧'))
   } else {
     for (const id of ids) {
       const b = (await assets.getBlob(id)) || (await library.getBlob(id))
@@ -2531,7 +2585,8 @@ export async function generateFreeformVideo(
       promptAsIs: true,
       imageBlob: blobs[0],
       referenceImages: useFl2va ? [] : blobs.slice(1, videoMaxRefImages(videoModel)),
-      lastFrameBlob: useFl2va ? blobs[1] : undefined,
+      lastFrameBlob: useFl2va && blobs[1] ? blobs[1] : undefined,
+      generateAudio: docGenerateAudio(node.data.videoProfileId, node.data.generateAudio),
       imageSlots,
       duration,
       width: videoSize.width,
@@ -2542,7 +2597,7 @@ export async function generateFreeformVideo(
       videoModel,
       videoProfileId: node.data.videoProfileId,
       videoResolution: node.data.videoResolution,
-      h3GenMode: useFl2va ? 'fl2va' : 'reference',
+      h3GenMode: useFl2va && blobs[1] ? 'fl2va' : 'reference',
       mode: 'R2VA',
       signal,
       resumeTaskId: node.data.videoTaskId,

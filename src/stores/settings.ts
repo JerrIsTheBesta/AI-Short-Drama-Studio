@@ -11,6 +11,7 @@ import { desktop, isDesktop } from '@/services/desktop'
 import { stillModeForVideoModel, type VideoGenModel, type VideoStillMode } from '@/types/canvas'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
+import { normalizeModelNodeOptions, type ModelNodeOptions } from '@/services/ai/modelOptions'
 
 export type { AdapterConfig }
 
@@ -34,6 +35,8 @@ export interface ServiceEndpoint {
   provider?: string
   /** 自定义适配器：openai-compatible / openai-images / http-custom / comfyui-* */
   adapter?: AdapterConfig
+  /** 文档里写明的节点选项，例如出图 1K/2K */
+  options?: ModelNodeOptions
 }
 
 /** 一套已保存的接入（地址 + Key + 模型列表） */
@@ -70,6 +73,8 @@ export interface VideoEndpoint {
   stillMode: VideoStillMode
   /** 自定义适配器：comfyui-workflow（AutoDL）/ comfyui-prompt（自建）/ http-custom */
   adapter?: AdapterConfig
+  /** 文档里写明的节点选项：音频开关、尾帧是否必填 */
+  options?: ModelNodeOptions
 }
 
 export interface VideoProfile extends VideoEndpoint {
@@ -200,7 +205,8 @@ function asEndpoint(ep: ServiceEndpoint): ServiceEndpoint {
     model: ep.model,
     models: uniq(ep.models ?? []),
     provider: ep.provider,
-    adapter: ep.adapter
+    adapter: ep.adapter,
+    options: normalizeModelNodeOptions(ep.options)
   }
 }
 
@@ -219,7 +225,8 @@ function asVideo(ep: VideoEndpoint): VideoEndpoint {
     promptStyle: ep.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
     provider: ep.provider,
     stillMode: stillModeForVideoModel('h3', ep),
-    adapter: ep.adapter
+    adapter: ep.adapter,
+    options: normalizeModelNodeOptions(ep.options)
   }
 }
 
@@ -874,6 +881,7 @@ export const useSettingsStore = defineStore('settings', () => {
     models: string[]
     provider?: string
     adapter?: AdapterConfig
+    options?: ModelNodeOptions
   }) {
     const profile = profileFromEndpoint(
       {
@@ -882,7 +890,8 @@ export const useSettingsStore = defineStore('settings', () => {
         model: seed.model,
         models: seed.models,
         provider: seed.provider,
-        adapter: seed.adapter
+        adapter: seed.adapter,
+        options: seed.options
       },
       seed.name
     )
@@ -1019,6 +1028,7 @@ export const useSettingsStore = defineStore('settings', () => {
     provider?: string
     stillMode?: VideoStillMode
     adapter?: AdapterConfig
+    options?: ModelNodeOptions
   }) {
     const profile = videoFromEndpoint(
       {
@@ -1028,7 +1038,8 @@ export const useSettingsStore = defineStore('settings', () => {
         promptStyle: seed.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
         provider: seed.provider,
         stillMode: stillModeForVideoModel('h3', seed),
-        adapter: seed.adapter
+        adapter: seed.adapter,
+        options: seed.options
       },
       seed.name
     )

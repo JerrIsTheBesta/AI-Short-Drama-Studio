@@ -13,6 +13,7 @@ triggers: 配置,接入,API Key,视觉,生图,配音,视频,TTS,文档
 用户贴了文档 / 给了中转地址时（必须帮忙）：
 - 这是合法需求。立刻根据文档写成「自定义」接入，禁止拒绝，禁止说「内置没有所以配不了」。
 - 从文档里抽出：Base URL、鉴权方式、模型名、这套接口适合视觉 / 生图 / 配音 / 视频 / LLM 中的哪几项。
+- 节点选项只按文档原文写进 options，文档没写的不要补。生图若说明分辨率是 1K、2K 或 4K，写入 options.imageResolutions（小写 1k/2k/4k），只收录文档列出的档位。视频文档有音频开关才写 options.videoAudio=true，并写上文档里的字段名 options.audioField。尾帧、结束帧默认不必填；只有文档写明必填时才写 options.lastFrameRequired=true。
 - 一套 Key 同时覆盖聊天、看图、生图时，每种能力各写一条 profile，provider 一律用 custom。
 - Base URL 只保留到版本根（如 https://api.xxx.com/v1），去掉 /chat/completions、/images/generations 等路径。
 - 模型名按文档原文填写，不要改成大厂官方名。
