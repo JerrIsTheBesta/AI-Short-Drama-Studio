@@ -71,6 +71,17 @@ export function ensureCharacterSheetWhiteBackground(prompt: string): string {
   return next.trim()
 }
 
+/** 反复入镜的同一件道具：纯白底正面、侧面、背面、细节。 */
+export function propTurnaroundPrompt(prop: { name: string; description?: string }, look?: VisualLook): string {
+  const medium = look?.medium || '与全片一致的画风'
+  const whiteBg =
+    '背景必须是无缝纯白（#FFFFFF），四格同一块白底。禁止灰色/米色影棚、渐变、地面线、阴影底板、风景、室内陈设、人手或任何环境。'
+  return `【16:9】道具「${prop.name}」多角度设计图。画风必须是「${medium}」。
+${whiteBg}
+同一件道具，形状、材质、颜色、磨损和标志完全一致。从左到右四格：正面、侧面、背面、局部细节。不要人物，不要场景，不要把别的物件画进来。
+外观锁定：${prop.description || prop.name}`
+}
+
 /** 这个角色身上有哪些东西：包、证件、平板、鞋、配饰，单独一张资产图 */
 export function characterPropSheetPrompt(
   subject: Subject,

@@ -11,7 +11,7 @@
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
 import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } from './abort'
 import { mockStoryboardFromPrompt } from './mock'
-import type { Scene, Script, Shot, ShotAudioMode, Subject, VisualStyle } from '@/types'
+import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
 import { getSkillBody } from '@/skills'
 import { directorPlaybookText, importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { getLlmConfig, getVideoPromptStyle } from './runtime'
@@ -36,6 +36,8 @@ import {
   extractLocationsFromPlay,
   extractPlayForSceneStage,
   extractSubjectsFromPlay,
+  keepRecurringProps,
+  propsListedInPlay,
   isFieldLabelName,
   looksLikeFilmChapterPlay
 } from '@/utils/scriptMarkdown'
@@ -312,6 +314,8 @@ export interface StoryboardResult {
   lightingNote?: string
   /** 整片锁定的主体（人物/动物），后续先出人设图 */
   subjects?: Subject[]
+  /** 剧本里至少出现两次的道具，后续出多角度图 */
+  props?: StoryProp[]
   /** 整片锁定的场景底板 */
   scenes?: Scene[]
   shots: StoryboardShot[]
@@ -1491,6 +1495,32 @@ ${stylePriority}
 顶层必须是对象，scenes 必须是非空数组。不要套 data/result，不要把 scenes 写成对象。`
 
 
+    const pullRecurringProps = async (script: string, subjects: Subject[]): Promise<StoryProp[]> => {
+      const names = subjects.map((item) => item.name)
+      let rows = propsListedInPlay(script)
+      if (!rows.length && getAIMode() !== 'mock') {
+        try {
+          const part = await runPart(
+            '道具',
+            '你只提炼成片里会反复入镜的同一件道具。不要人物，不要地点，不要把衣服、鞋、发型当道具。只有被寻找、交接、反复特写的独立物件才算，例如黑领带、零食罐、同一把钥匙。name 用剧本短名，2到8个字。description 只写形状、材质、颜色、新旧和辨识点，不写房间。只输出 JSON：{"props":[{"name":"黑领带","description":"窄版黑色丝绸领带，尖端有细金属夹"}]}。没有就输出 {"props":[]}。',
+            1800,
+            PLAY_LLM_TIMEOUT_MS,
+            (raw) => Array.isArray(raw?.props)
+          )
+          rows = Array.isArray(part.raw?.props) ? part.raw.props : []
+        } catch (error) {
+          if (isAbortError(error) && !isTimeoutAbort(error)) throw error
+          rows = []
+        }
+      }
+      return keepRecurringProps(script, rows, names).map((row, index) => ({
+        id: `prop_${index + 1}`,
+        name: row.name,
+        description: row.description,
+        mentions: row.mentions
+      }))
+    }
+
     let subjectPart: { raw: any; model?: string } = {
       raw: { subjects: input.existingSubjects || [] }
     }
@@ -1499,7 +1529,7 @@ ${stylePriority}
     }
 
     if (stageOrder[startAt] <= stageOrder.subjects) {
-      onProgress?.('第 1/3 步：只提炼人物角色…')
+      onProgress?.('第 1/3 步：提炼人物，并找出反复出现的道具…')
       const playPeople = extractSubjectsFromPlay(play)
       if (playPeople.length) {
         log(`✓ 从剧本文字抽出 ${playPeople.length} 个角色，不走模型`)
@@ -1514,12 +1544,17 @@ ${stylePriority}
         { subjects: rows, scenes: [], shots: [] },
         { style: input.style, topic: input.topic, content: input.content, keywords: input.keywords, maxShotDuration: input.maxShotDuration }
       )
-      await input.onExtractStage?.('subjects', { subjects: normalized.subjects, scenes: [], shots: [] })
-      onProgress?.(`✓ 已保存 ${normalized.subjects?.length || 0} 个角色`)
+      const props = await pullRecurringProps(play, normalized.subjects ?? [])
+      await input.onExtractStage?.('subjects', { subjects: normalized.subjects, props, scenes: [], shots: [] })
+      onProgress?.(
+        props.length
+          ? `✓ 已保存 ${normalized.subjects?.length || 0} 个角色，${props.length} 个反复出现的道具`
+          : `✓ 已保存 ${normalized.subjects?.length || 0} 个角色`
+      )
       if (stopAfter === 'subjects') {
         onProgress?.('人物阶段完成。下一步由你确认后再提炼场景。')
         return {
-          result: { subjects: normalized.subjects, scenes: [], shots: [] },
+          result: { subjects: normalized.subjects, props, scenes: [], shots: [] },
           model: subjectPart.model || parallelModel
         }
       }

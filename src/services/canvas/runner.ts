@@ -74,6 +74,7 @@ import {
   shotFrameSendPrompt,
   shotVoiceBlock,
   subjectSendPrompt,
+  propSendPrompt,
   videoSendPrompt,
   shotDirectorBrief
 } from '@/utils/nodePrompt'
@@ -83,7 +84,7 @@ import { isPlayApproved, PLAY_GATE_MSG } from './playGate'
 import { generateFinalCut } from './exportFinal'
 import { setActiveProjectDir } from '@/services/storage'
 import { toDigitalHumanWav, extractVideoLastFrame } from '@/services/ffmpeg'
-import type { AspectRatio, CanvasNode, ID, Project, Scene, Shot, Subject, VideoGenModel, VideoResolution } from '@/types'
+import type { AspectRatio, CanvasNode, ID, Project, Scene, Shot, StoryProp, Subject, VideoGenModel, VideoResolution } from '@/types'
 import {
   isH3VideoFamily,
   normalizeH3GenMode,
@@ -222,6 +223,8 @@ function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof us
       return '写完整剧本'
     case 'subject':
       return `四视图「${subjects.find((s) => s.id === node.data.subjectId)?.name || '角色'}」`
+    case 'prop':
+      return `道具多角度「${(p.props ?? []).find((item) => item.id === node.data.propId)?.name || '道具'}」`
     case 'subjectProps':
       return `资产图「${subjects.find((s) => s.id === node.data.subjectId)?.name || '角色'}」`
     case 'scene':
@@ -363,6 +366,52 @@ export async function generateSubjectSheet(sub: Subject, onProgress?: (msg: stri
       asset.id,
       latest.designSheetHistoryIds
     )
+  })
+  await project.save()
+  return asset
+}
+
+export async function generatePropSheet(prop: StoryProp, onProgress?: (msg: string) => void, signal?: AbortSignal) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  if (!project.current) throw new Error('没有打开的项目')
+  const latest = (project.current.props ?? []).find((item) => item.id === prop.id) || prop
+  const look = lookFromScript(project.current.script)
+  const extras = await extraRefBlobs(latest.referenceAssetIds, `道具「${latest.name}」补充参考，形状材质必须一致`)
+  const prompt = propSendPrompt(latest, project.current)
+  if (prompt !== (latest.sheetPrompt || '')) {
+    project.updateProp(latest.id, { sheetPrompt: prompt })
+  }
+  onProgress?.(extras.blobs.length ? `生成道具多角度图（${extras.blobs.length} 张参考）...` : '生成道具多角度图...')
+  const size = imageGenSize('sheet')
+  const result = await generateImage(
+    {
+      prompt,
+      style: look.style,
+      width: size.width,
+      height: size.height,
+      aspectRatio: '16:9',
+      resolution: docImageResolution(findCanvasNode((node) => node.type === 'prop' && node.data.propId === latest.id)),
+      referenceImages: extras.blobs.length ? extras.blobs : undefined,
+      referenceLabels: extras.labels.length ? extras.labels : undefined,
+      model: imageModelForProject(project.current.pipelineMode),
+      signal
+    },
+    onProgress
+  )
+  const asset = await assets.add(result.blob, 'image', 'ai-generated', {
+    filename: `prop_${latest.name}_${Date.now().toString(36)}`,
+    prompt,
+    projectId: project.current.id
+  })
+  onProgress?.('校验道具图片文件...')
+  const quality = await reviewImageQuality(result.blob, prompt, signal)
+  if (!quality.passed) throw new Error(`道具多角度图文件无效：${quality.issues.join('；')}`)
+  await saveGeneratedImageToSharedLibrary(result.blob, '道具', asset.filename, prompt, onProgress)
+  project.updateProp(latest.id, {
+    designSheetAssetId: asset.id,
+    designSheetHistoryIds: pushHistory(latest.designSheetAssetId, asset.id, latest.designSheetHistoryIds)
   })
   await project.save()
   return asset
@@ -1651,11 +1700,10 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     continuity: shot.continuity,
     purpose: shot.purpose,
     promptStyle: getVideoPromptStyle(),
-    mode: 'R2VA',
-    forceIntegrated: true,
+    mode: normalizeH3GenMode(shot.h3GenMode) === 'fl2va' ? 'FL2VA' : 'R2VA',
     signal
   }),
-    { prompt: '', imageSlots, duration: shot.duration }
+    { prompt: '', imageSlots, duration: shot.duration, mode: normalizeH3GenMode(shot.h3GenMode) === 'fl2va' ? 'FL2VA' : 'R2VA' }
   )
   project.setShotVideoPrompt(shot.id, compiled)
   await project.save()
@@ -1951,6 +1999,17 @@ function mergeByName<T extends { id: string; name: string }>(
   })
 }
 
+function mergePropAssets(next: StoryProp[], prev: StoryProp[]): StoryProp[] {
+  return mergeByName(next, prev, 'prop', (fresh, old) => ({
+    ...fresh,
+    id: old.id,
+    designSheetAssetId: old.designSheetAssetId,
+    designSheetHistoryIds: old.designSheetHistoryIds,
+    referenceAssetIds: old.referenceAssetIds,
+    sheetPrompt: old.sheetPrompt || fresh.sheetPrompt
+  }))
+}
+
 function mergeSubjectAssets(next: Subject[], prev: Subject[]): Subject[] {
   return mergeByName(next, prev, 'sub', (fresh, old) => ({
     ...fresh,
@@ -2076,6 +2135,9 @@ export async function runExtractStoryboard(
     if (!project.current) return
     if (done === 'subjects') {
       project.setSubjects(mergeSubjectAssets(partial.subjects ?? [], project.current.subjects ?? []))
+      if (Array.isArray(partial.props)) {
+        project.setProps(mergePropAssets(partial.props, project.current.props ?? []))
+      }
     } else if (done === 'scenes') {
       project.setScenes(mergeSceneAssets(partial.scenes ?? [], project.current.scenes ?? []))
       if (project.current.script) {
@@ -2100,7 +2162,7 @@ export async function runExtractStoryboard(
     project.setCanvas(rebuildCanvasGraph(project.current, true))
     const landed =
       done === 'subjects'
-        ? `✓ 人物已上画布（${project.current.subjects?.length || 0} 个），本步完成`
+        ? `✓ 人物已上画布（${project.current.subjects?.length || 0} 个，道具 ${project.current.props?.length || 0} 个），本步完成`
         : done === 'scenes'
           ? `✓ 场景已上画布（${project.current.scenes?.length || 0} 个），本步完成`
           : meta?.partial
@@ -2180,6 +2242,7 @@ export async function runExtractStoryboard(
 
 const GROUP_GEN_TYPES = new Set([
   'subject',
+  'prop',
   'scene',
   'shotBoard',
   'shotImage',
@@ -2206,6 +2269,7 @@ export async function runGenerateGroup(
 ) {
   if (
     groupId !== 'group-subjects' &&
+    groupId !== 'group-props' &&
     groupId !== 'group-scenes' &&
     groupId !== 'group-shots' &&
     groupId !== 'group-frames' &&
@@ -2233,6 +2297,8 @@ export async function runGenerateGroup(
     const noun =
       groupId === 'group-subjects'
         ? '人物四视图'
+        : groupId === 'group-props'
+          ? '道具多角度图'
         : groupId === 'group-scenes'
           ? '场景锚点图'
           : groupId === 'group-videos'
@@ -2655,11 +2721,15 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
     aspectRatio,
     cameraMovement: 'static',
     promptStyle: getVideoPromptStyle(),
-    mode: 'R2VA',
-    forceIntegrated: true,
+    mode: normalizeH3GenMode(node.data.h3GenMode) === 'fl2va' ? 'FL2VA' : 'R2VA',
     signal
   }),
-    { prompt: '', imageSlots, duration: clampVideoDuration(node.data.duration, videoModel, 8) }
+    {
+      prompt: '',
+      imageSlots,
+      duration: clampVideoDuration(node.data.duration, videoModel, 8),
+      mode: normalizeH3GenMode(node.data.h3GenMode) === 'fl2va' ? 'FL2VA' : 'R2VA'
+    }
   )
   project.setCanvasNodePrompt(nodeId, compiled)
   await project.save()
@@ -2691,6 +2761,7 @@ export async function runCanvasNode(
       node.type !== 'imageGen' &&
       node.type !== 'videoGen' &&
       node.type !== 'subject' &&
+      node.type !== 'prop' &&
       node.type !== 'scene' &&
       node.type !== 'sceneProps' &&
       !isPlayApproved(p)
@@ -2708,6 +2779,10 @@ export async function runCanvasNode(
         const sub = (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
         if (!sub) throw new Error('找不到主体')
         await generateSubjectSheet(sub, report, signal)
+      } else if (node.type === 'prop' && node.data.propId) {
+        const prop = (p.props ?? []).find((item) => item.id === node.data.propId)
+        if (!prop) throw new Error('找不到道具')
+        await generatePropSheet(prop, report, signal)
       } else if (node.type === 'sceneProps' && node.data.sceneId) {
         const scn = (p.scenes ?? []).find((s) => s.id === node.data.sceneId)
         if (!scn) throw new Error('找不到场景')

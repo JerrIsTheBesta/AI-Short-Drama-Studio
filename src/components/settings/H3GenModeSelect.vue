@@ -20,10 +20,10 @@ function setMode(mode: H3VideoGenMode) {
     <button
       type="button"
       :class="{ on: value === 'reference' }"
-      title="多张参考图锁身份、场景和看板，当前默认"
+      title="多模态参考：人设、场景、看板按官方六段写，不是首帧"
       @click="setMode('reference')"
     >
-      参考图生成
+      多模态参考
     </button>
     <button
       type="button"

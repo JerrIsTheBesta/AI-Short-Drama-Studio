@@ -4,6 +4,7 @@ import type { TaskStatus } from './pipeline'
 export type CanvasNodeType =
   | 'script'
   | 'subject'
+  | 'prop'
   | 'subjectProps'
   | 'scene'
   | 'sceneProps'
@@ -112,6 +113,7 @@ export interface CanvasNode {
   position: { x: number; y: number }
   data: {
     subjectId?: string
+    propId?: string
     sceneId?: string
     shotId?: string
     label?: string

@@ -28,7 +28,7 @@ import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/m
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
-import { fillEmptyGeneratePrompt, shotFrameSendPrompt } from '@/utils/nodePrompt'
+import { defaultPropSheetPrompt, fillEmptyGeneratePrompt, shotFrameSendPrompt } from '@/utils/nodePrompt'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/utils/mediaEdit'
 import {
@@ -52,6 +52,7 @@ const props = defineProps<{
   selected?: boolean
   data: {
     subjectId?: string
+    propId?: string
     sceneId?: string
     shotId?: string
     label?: string
@@ -93,6 +94,11 @@ const shot = computed(() =>
 const subject = computed(() =>
   props.data.subjectId
     ? (project.current?.subjects ?? []).find((s) => s.id === props.data.subjectId)
+    : undefined
+)
+const propItem = computed(() =>
+  props.data.propId
+    ? (project.current?.props ?? []).find((item) => item.id === props.data.propId)
     : undefined
 )
 const scene = computed(() =>
@@ -225,6 +231,7 @@ const durationLabel = computed(() => {
 const title = computed(() => {
   if (type.value === 'script') return project.current?.script?.topic || project.current?.name || '文案'
   if (subject.value) return subject.value.name
+  if (propItem.value) return propItem.value.name
   if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
   if (type.value === 'export') return '合成视频'
@@ -234,6 +241,7 @@ const title = computed(() => {
 
 const kindLabel = computed(() => {
   if (type.value === 'subject') return '四视图'
+  if (type.value === 'prop') return '道具多角度'
   if (type.value === 'sceneProps') return '关键道具'
   if (type.value === 'scene') return '锚点图'
   if (type.value === 'shotBoard') return '看板'
@@ -251,6 +259,7 @@ const assetId = computed(() => {
   if (!p) return undefined
   if (type.value === 'final') return p.finalVideoAssetId
   if (type.value === 'subject') return subject.value?.designSheetAssetId
+  if (type.value === 'prop') return propItem.value?.designSheetAssetId
   if (type.value === 'sceneProps') return scene.value?.propSheetAssetId
   if (type.value === 'scene') return scene.value?.plateAssetId
   if (!shot.value) return undefined
@@ -264,7 +273,7 @@ const assetId = computed(() => {
 })
 
 const mediaAspect = computed(() => {
-  if (type.value === 'subject' || type.value === 'sceneProps' || type.value === 'scene') {
+  if (type.value === 'subject' || type.value === 'prop' || type.value === 'sceneProps' || type.value === 'scene') {
     return cssAspectRatio('16:9')
   }
   if (type.value === 'audio' || type.value === 'export') return '16 / 10'
@@ -391,6 +400,7 @@ async function loadFrames() {
 const extraRefIds = computed({
   get(): ID[] {
     if (type.value === 'subject') return subject.value?.referenceAssetIds ?? []
+    if (type.value === 'prop') return propItem.value?.referenceAssetIds ?? []
     if (type.value === 'sceneProps') return scene.value?.propReferenceAssetIds ?? []
     if (type.value === 'scene') return scene.value?.referenceAssetIds ?? []
     return []
@@ -398,6 +408,8 @@ const extraRefIds = computed({
   set(ids: ID[]) {
     if (type.value === 'subject' && subject.value) {
       project.updateSubject(subject.value.id, { referenceAssetIds: ids })
+    } else if (type.value === 'prop' && propItem.value) {
+      project.updateProp(propItem.value.id, { referenceAssetIds: ids })
     } else if (type.value === 'sceneProps' && scene.value) {
       project.updateScene(scene.value.id, { propReferenceAssetIds: ids })
     } else if (type.value === 'scene' && scene.value) {
@@ -411,6 +423,7 @@ const promptValue = computed({
     const p = project.current
     if (!p) return ''
     if (type.value === 'subject' && subject.value) return subject.value.sheetPrompt ?? ''
+    if (type.value === 'prop' && propItem.value) return propItem.value.sheetPrompt ?? ''
     if (type.value === 'sceneProps' && scene.value) return scene.value.propSheetPrompt ?? ''
     if (type.value === 'scene' && scene.value) return scene.value.platePrompt ?? ''
     if (type.value === 'shotBoard' && shot.value) return shot.value.boardPrompt ?? ''
@@ -421,6 +434,7 @@ const promptValue = computed({
   },
   set(v: string) {
     if (type.value === 'subject' && subject.value) project.updateSubject(subject.value.id, { sheetPrompt: v })
+    else if (type.value === 'prop' && propItem.value) project.updateProp(propItem.value.id, { sheetPrompt: v })
     else if (type.value === 'sceneProps' && scene.value) {
       project.updateScene(scene.value.id, { propSheetPrompt: v })
     }
@@ -455,6 +469,7 @@ const genLabel = computed(() => {
   if (gateBlocked.value) return '先验收剧本'
   const again = hasAsset.value
   if (type.value === 'subject') return again ? '重新生成' : '生成四视图'
+  if (type.value === 'prop') return again ? '重新生成' : '生成多角度图'
   if (type.value === 'sceneProps') return again ? '重新生成' : '生成关键道具图'
   if (type.value === 'scene') return again ? '重新生成' : '生成锚点图'
   if (type.value === 'shotBoard') return again ? '重新生成' : '生成看板'
@@ -491,6 +506,7 @@ watch(
     () => type.value,
     () => shot.value?.id,
     () => subject.value?.id,
+    () => propItem.value?.id,
     () => scene.value?.id
   ],
   ([on]) => {
@@ -506,6 +522,8 @@ watch(
     if (t === 'subject' && subject.value) {
       const patch = fillEmptyGeneratePrompt('subject', p, subject.value)
       if (patch) project.updateSubject(subject.value.id, patch)
+    } else if (t === 'prop' && propItem.value && propItem.value.sheetPrompt == null) {
+      project.updateProp(propItem.value.id, { sheetPrompt: defaultPropSheetPrompt(propItem.value, p) })
     } else if (t === 'scene' && scene.value) {
       const patch = fillEmptyGeneratePrompt('scene', p, scene.value)
       if (patch) project.updateScene(scene.value.id, patch)

@@ -179,7 +179,7 @@ function parseIntentJson(raw: string): AgentIntentKind | null {
   }
 }
 
-/** 正式模式的意图识别：LLM 分类，不用正则。失败时保守落到问答。 */
+/** 正式模式的意图识别：LLM 分类，不用正则。模型没接通或调用失败时把错误抛回去，不用固定文案顶上。 */
 async function detectIntentWithLlm(
   text: string,
   ctx: IntentContext,
@@ -191,27 +191,22 @@ async function detectIntentWithLlm(
     (p?.shots?.length ?? 0) > 0 ? `有${p!.shots.length}个分镜` : '无分镜',
     ctx.hasSelectedGenNode ? '画布上选中了一个生成节点' : '没有选中节点'
   ].join('，')
-  try {
-    const resp = await callLLM({
-      messages: [
-        { role: 'system', content: INTENT_LLM_SYSTEM },
-        {
-          role: 'user',
-          content: `项目当前状态：${state}\n\n用户消息：\n${text}`
-        }
-      ],
-      temperature: 0,
-      jsonMode: true,
-      maxTokens: 60,
-      signal,
-      timeoutMs: 30_000
-    })
-    const kind = parseIntentJson(resp.content || '')
-    if (kind) return intent(kind)
-  } catch (e: any) {
-    if (signal?.aborted) throw e
-    /* 分类失败走兜底 */
-  }
+  const resp = await callLLM({
+    messages: [
+      { role: 'system', content: INTENT_LLM_SYSTEM },
+      {
+        role: 'user',
+        content: `项目当前状态：${state}\n\n用户消息：\n${text}`
+      }
+    ],
+    temperature: 0,
+    jsonMode: true,
+    maxTokens: 60,
+    signal,
+    timeoutMs: 30_000
+  })
+  const kind = parseIntentJson(resp.content || '')
+  if (kind) return intent(kind)
   return intent('question', 'low')
 }
 

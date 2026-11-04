@@ -101,7 +101,7 @@ export interface VideoGenInput {
   /** 走 MiniMax H3 图+音频同步工作流 */
   audioSync?: boolean
   /** H3 任务类型。多图人设/场景/看板用 R2VA；单张首帧用 I2VA。 */
-  mode?: 'I2VA' | 'T2VA' | 'R2VA'
+  mode?: 'I2VA' | 'T2VA' | 'R2VA' | 'FL2VA' | 'L2VA'
   /** 已提交的 AutoDL 工作流 task_id；传入后跳过提交，直接恢复轮询。 */
   resumeTaskId?: string
   /** 新任务提交成功后立即回传 task_id，调用方应持久化用于断点恢复。 */
@@ -1011,9 +1011,14 @@ export function composeVideoPrompt(input: VideoGenInput): string {
   return buildPrompt(input)
 }
 
-function inferH3Mode(input: VideoGenInput): 'I2VA' | 'T2VA' | 'R2VA' {
-  if (input.mode) return input.mode
+function inferH3Mode(input: VideoGenInput): 'I2VA' | 'T2VA' | 'R2VA' | 'FL2VA' | 'L2VA' {
+  if (input.h3GenMode === 'fl2va') return 'FL2VA'
+  if (input.mode === 'FL2VA' || input.mode === 'L2VA' || input.mode === 'I2VA' || input.mode === 'T2VA') {
+    return input.mode
+  }
   if (
+    input.h3GenMode === 'reference' ||
+    input.mode === 'R2VA' ||
     isRef2VA({
       prompt: input.prompt,
       duration: input.duration,

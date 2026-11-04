@@ -192,9 +192,10 @@ export function rescueStrandedFreeformNodes(nodes: CanvasNode[]): CanvasNode[] |
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
   const prevList = project.canvas?.nodes ?? []
   const subjects = project.subjects ?? []
+  const storyProps = project.props ?? []
   const scenes = project.scenes ?? []
   const shots = project.shots
-  const hasPipelineData = subjects.length > 0 || scenes.length > 0 || shots.length > 0
+  const hasPipelineData = subjects.length > 0 || storyProps.length > 0 || scenes.length > 0 || shots.length > 0
   // 还没进流水线时只铺用户手动加的节点，不铺空的角色/场景/分镜分组
   const bare = !hasPipelineData
   const hasScriptNode = prevList.some((n) => n.id === 'script' || n.type === 'script')
@@ -277,6 +278,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   }
 
   const subBox = groupBox(subjects.length, 1, sheetH)
+  const propBox = groupBox(storyProps.length, 1, sheetH)
   const scnBox = groupBox(scenes.length, 1, sheetH)
   const shotBox = groupBox(shots.length, 1, shotH)
   const frameBox = groupBox(shots.length, 1, shotH)
@@ -305,6 +307,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   }
 
   if (!bare || subjects.length) pushGroup('group-subjects', '人物角色', 'subject', subBox)
+  if (storyProps.length) pushGroup('group-props', '反复出现的道具', 'prop', propBox)
   if (!bare || scenes.length) pushGroup('group-scenes', '场景锚点', 'scene', scnBox)
   if ((!bare || shots.length) && useStills) {
     pushGroup('group-shots', stillGroupLabel, 'shot', shotBox)
@@ -352,6 +355,27 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       data: { subjectId: s.id, label: s.name },
       status: persistStatus(prev.get(id)?.status, Boolean(s.designSheetAssetId)),
       parentGroupId: 'group-subjects'
+    })
+    if (keepScript) {
+      edges.push({
+        id: `e-script-${id}`,
+        source: 'script',
+        target: id,
+        sourceHandle: 'out',
+        targetHandle: 'in'
+      })
+    }
+  })
+
+  storyProps.forEach((item, i) => {
+    const id = `prop:${item.id}`
+    attach('group-props', {
+      id,
+      type: 'prop',
+      position: cell(i, 0, sheetH),
+      data: { propId: item.id, label: item.name },
+      status: persistStatus(prev.get(id)?.status, Boolean(item.designSheetAssetId)),
+      parentGroupId: 'group-props'
     })
     if (keepScript) {
       edges.push({

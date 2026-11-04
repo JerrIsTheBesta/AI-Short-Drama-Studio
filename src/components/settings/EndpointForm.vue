@@ -37,7 +37,10 @@ const providerId = computed({
   },
   set(id: string) {
     const preset = findProvider(id, props.presets)
-    emit('patch', applyProviderPreset(props, preset))
+    // 换官方来源时只留下该来源的默认模型名。其余目录名要点「加入」才算配置。
+    const base =
+      preset.id === 'custom' ? props : { ...props, model: '', models: [] as string[] }
+    emit('patch', applyProviderPreset(base, preset))
   }
 })
 

@@ -161,30 +161,6 @@ export function isGreetingOrChitchat(text: string) {
   return false
 }
 
-export function greetingReply(p: Project | null | undefined): string {
-  const next = nextPipelineStep(p)
-  if (!p?.script?.content?.trim()) {
-    return [
-      '你好，我是画布里的制作助手。',
-      '把主题或口播文案发我，我先写成带背景、人物和环境的完整剧本；之后一次只拆一步：先人物，再场景，再分镜。',
-      '也可以直接说「全流程」。'
-    ].join('\n')
-  }
-  if (!p.script?.playReady) {
-    return '你好。草稿已经有了，回「写剧本」或「继续」我先写成完整剧本。'
-  }
-  if (!p.shots.length) {
-    return `你好。完整剧本在左侧，回「继续」我先${extractStageLabel(p)}，不会一次拆完。`
-  }
-  if (needsPlayReview(p)) {
-    return '你好。分镜节点已铺上画布，看完回「确认通过」或「继续」，我再往下做人设和场景。'
-  }
-  if (next) {
-    return `你好。当前下一步是「${next.label}」。回「继续」只做这一步；说「全流程」会一次做完。`
-  }
-  return '你好。素材基本齐了，可以点「合成视频」出结果；要改某一镜直接点节点重新生成就行。'
-}
-
 export function isVagueRequest(text: string, p: Project | null | undefined) {
   const t = text.trim()
   if (!t) return true

@@ -31,6 +31,7 @@ import { cssAspectRatio } from '@/services/canvas/layout'
 import { nextExtractStage, type ExtractStage } from '@/services/canvas/pipeline'
 import { canBuildExport } from '@/utils/timeline'
 import {
+  defaultPropSheetPrompt,
   fillEmptyGeneratePrompt,
   rebuildGeneratePrompt
 } from '@/utils/nodePrompt'
@@ -78,6 +79,10 @@ const subject = computed(() => {
   const id = props.node?.data.subjectId
   return (project.current?.subjects ?? []).find((s) => s.id === id)
 })
+const propItem = computed(() => {
+  const id = props.node?.data.propId
+  return (project.current?.props ?? []).find((item) => item.id === id)
+})
 const scene = computed(() => {
   const id = props.node?.data.sceneId
   return (project.current?.scenes ?? []).find((s) => s.id === id)
@@ -87,6 +92,7 @@ const extraRefIds = computed({
   get(): ID[] {
     const t = props.node?.type
     if (t === 'subject') return subject.value?.referenceAssetIds ?? []
+    if (t === 'prop') return propItem.value?.referenceAssetIds ?? []
     if (t === 'sceneProps') return scene.value?.propReferenceAssetIds ?? []
     if (t === 'scene') return scene.value?.referenceAssetIds ?? []
     return []
@@ -95,6 +101,8 @@ const extraRefIds = computed({
     const t = props.node?.type
     if (t === 'subject' && subject.value) {
       project.updateSubject(subject.value.id, { referenceAssetIds: ids })
+    } else if (t === 'prop' && propItem.value) {
+      project.updateProp(propItem.value.id, { referenceAssetIds: ids })
     } else if (t === 'sceneProps' && scene.value) {
       project.updateScene(scene.value.id, { propReferenceAssetIds: ids })
     } else if (t === 'scene' && scene.value) {
@@ -133,6 +141,7 @@ const currentAssetId = computed(() => {
   const t = props.node?.type
   if (t === 'final') return project.current?.finalVideoAssetId
   if (t === 'subject') return subject.value?.designSheetAssetId
+  if (t === 'prop') return propItem.value?.designSheetAssetId
   if (t === 'sceneProps') return scene.value?.propSheetAssetId
   if (t === 'scene') return scene.value?.plateAssetId
   if (t === 'shotBoard') return shot.value?.boardAssetId
@@ -166,6 +175,7 @@ const actionLabel = computed(() => {
     return isPlayReady(project.current?.script) ? '重新写剧本' : '写剧本'
   }
   if (t === 'subject') return again ? '重新生成四视图' : '生成四视图'
+  if (t === 'prop') return again ? '重新生成多角度图' : '生成多角度图'
   if (t === 'sceneProps') return again ? '重新生成关键道具图' : '生成关键道具图'
   if (t === 'scene') return again ? '重新生成锚点图' : '生成锚点图'
   if (t === 'shotBoard') return again ? '重新生成故事看板' : '生成故事看板'
@@ -388,7 +398,7 @@ const canRun = computed(() => {
 })
 
 const previewAspect = computed(() => {
-  if (props.node?.type === 'subject' || props.node?.type === 'sceneProps' || props.node?.type === 'scene') {
+  if (props.node?.type === 'subject' || props.node?.type === 'prop' || props.node?.type === 'sceneProps' || props.node?.type === 'scene') {
     return cssAspectRatio('16:9')
   }
   return cssAspectRatio(nodeAspectRatio.value)
@@ -398,6 +408,7 @@ const kindLabel = computed(() => {
   const t = props.node?.type
   if (t === 'script') return '完整剧本'
   if (t === 'subject') return '人物 · 四视图'
+  if (t === 'prop') return '道具 · 多角度'
   if (t === 'sceneProps') return '场景 · 关键道具图'
   if (t === 'scene') return '场景 · 锚点图'
   if (t === 'shotBoard') return '分镜 · 故事看板'
@@ -419,6 +430,7 @@ const title = computed(() => {
   if (!props.node) return '未选择'
   if (props.node.type === 'script') return project.current?.script?.topic || '文案'
   if (subject.value) return subject.value.name
+  if (propItem.value) return propItem.value.name
   if (scene.value) return scene.value.name
   if (shot.value) return `${shot.value.index + 1}. ${shot.value.title}`
   if (props.node.type === 'export') return '合成视频'
@@ -446,6 +458,7 @@ watch(
     () => props.node?.id,
     () => props.node?.type,
     () => subject.value?.id,
+    () => propItem.value?.id,
     () => scene.value?.id,
     () => shot.value?.id
   ],
@@ -457,6 +470,8 @@ watch(
     if (t === 'subject' && subject.value) {
       const patch = fillEmptyGeneratePrompt('subject', p, subject.value)
       if (patch) project.updateSubject(subject.value.id, patch)
+    } else if (t === 'prop' && propItem.value && propItem.value.sheetPrompt == null) {
+      project.updateProp(propItem.value.id, { sheetPrompt: defaultPropSheetPrompt(propItem.value, p) })
     } else if (t === 'scene' && scene.value) {
       const patch = fillEmptyGeneratePrompt('scene', p, scene.value)
       if (patch) project.updateScene(scene.value.id, patch)
@@ -662,6 +677,8 @@ function rebuildPrompt() {
   const t = node.type
   if (t === 'subject' && subject.value) {
     project.updateSubject(subject.value.id, rebuildGeneratePrompt('subject', p, subject.value))
+  } else if (t === 'prop' && propItem.value) {
+    project.updateProp(propItem.value.id, { sheetPrompt: defaultPropSheetPrompt(propItem.value, p) })
   } else if (t === 'scene' && scene.value) {
     project.updateScene(scene.value.id, rebuildGeneratePrompt('scene', p, scene.value))
   } else if (t === 'sceneProps' && scene.value) {
@@ -840,6 +857,25 @@ async function optimizeVideoPrompt() {
             <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">{{ m }}</option>
           </optgroup>
         </select>
+      </template>
+
+      <template v-else-if="node.type === 'prop' && propItem">
+        <label>实际出图提示词</label>
+        <div class="lab-row">
+          <p class="hint">纯白背景，正面、侧面、背面、细节。框里是什么就发什么。</p>
+          <button class="link" type="button" @click="rebuildPrompt">按这个画风重铺</button>
+        </div>
+        <textarea
+          rows="12"
+          :value="propItem.sheetPrompt ?? ''"
+          placeholder="同一件道具的多角度图。形状、材质、颜色。改完点重新生成。"
+          @input="project.updateProp(propItem.id, { sheetPrompt: ($event.target as HTMLTextAreaElement).value })"
+        />
+        <label>道具名</label>
+        <input
+          :value="propItem.name"
+          @change="project.updateProp(propItem.id, { name: ($event.target as HTMLInputElement).value.trim() || propItem.name })"
+        />
       </template>
 
       <template v-else-if="node.type === 'subject' && subject">
@@ -1034,7 +1070,7 @@ async function optimizeVideoPrompt() {
         :mode="node.type === 'shotVideo' ? 'video' : node.type === 'shotBoard' ? 'board' : 'image'"
       />
       <ShotRefStrip
-        v-else-if="node.type === 'subject' || node.type === 'sceneProps' || node.type === 'scene'"
+        v-else-if="node.type === 'subject' || node.type === 'prop' || node.type === 'sceneProps' || node.type === 'scene'"
         v-model:extra-ids="extraRefIds"
       />
       <template v-if="node.type === 'videoGen'">

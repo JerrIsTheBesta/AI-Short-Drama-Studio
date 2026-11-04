@@ -195,7 +195,7 @@ function mergePreset(kind: SetupKind, action: Record<string, unknown>) {
       provider: 'custom',
       baseUrl: current.baseUrl,
       model: current.model || preset.defaultModel,
-      models: current.models.length ? current.models : preset.models
+      models: current.models.length ? current.models : current.model ? [current.model] : []
     }
   }
   return applyProviderPreset(current, preset)

@@ -1,12 +1,12 @@
 ---
 name: h3-prompt-writing
-description: Write shot-video prompts as integrated_multimodal_description. Bind each character picture as a stable (S1)/(S2), put Chinese only inside <d>, and give each spoken line its own turn.
+description: Write shot-video prompts in the official MiniMax layout. Multimodal reference is six sections. First frame, first-and-last frame, last frame, and text-only stay three fields plus the matching alignment line. Bind each character as a stable (S1)/(S2).
 compatibility: Portable to any agent that can read local files; no external tools are required.
 ---
 
 # Shot Prompt Writing
 
-For this product's shot-video nodes, write one clip as `integrated_multimodal_description` + `overall_soundscape` + `non_diegetic_music: N/A`.
+For this product's shot-video nodes, match the node mode. Multimodal reference is the official six-section Ref2VA body. First-and-last frame is FL2VA: the alignment sentence, then the three fields. A single first frame is I2VA. A last frame only is L2VA. Text with no picture is T2VA.
 
 ## Speaker lock (mandatory)
 
@@ -20,7 +20,7 @@ Speaker lock (these labels are the pictures):
 Only one (S#) speaks at a time. Everyone else keeps their lips completely closed.
 ```
 
-Do not write `Picture 1 aligns with 0.00 seconds`. Do not emit `subject_definitions` / `summary` / `retention_analysis`. Do not write `图1 / this person's character design`.
+On multimodal reference, identity lives in `subject_definitions` as `<Subject N> is 「name」 (S#) in <Picture N>`. Do not write `Picture 1 aligns with 0.00 seconds` in that mode. The alignment sentence belongs only to I2VA, FL2VA, and L2VA. Do not mix the six-section body with the three-field body.
 
 ## Body
 

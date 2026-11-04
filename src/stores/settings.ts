@@ -12,6 +12,7 @@ import { stillModeForVideoModel, type VideoGenModel, type VideoStillMode } from 
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 import { normalizeModelNodeOptions, type ModelNodeOptions } from '@/services/ai/modelOptions'
+import { LLM_PROVIDERS } from '@/services/ai/providers'
 
 export type { AdapterConfig }
 
@@ -147,6 +148,21 @@ export const MUSIC_PRESETS = ['music-3.0']
 
 function uniq(list: string[]): string[] {
   return [...new Set(list.map((s) => s.trim()).filter(Boolean))]
+}
+
+const LLM_CATALOG = new Set(LLM_PROVIDERS.flatMap((preset) => preset.models))
+
+/**
+ * 下拉里只保留真正配置过的模型名。
+ * 内置目录里的名字，除非就是当前正在用的那一个，否则不算已配置。
+ * 用户手打或点「加入」后仍留在列表里的非目录名会保留。
+ */
+function configuredLlmModels(models: string[] | undefined, active: string): string[] {
+  const saved = uniq(models ?? [])
+  const current = active.trim()
+  const manual = saved.filter((name) => !LLM_CATALOG.has(name))
+  const chosen = current && (saved.includes(current) || !saved.length) ? [current] : []
+  return uniq([...chosen, ...manual])
 }
 
 export function uniqueProfileName(existing: string[], base: string): string {
@@ -402,7 +418,7 @@ function normalizeDirectorSkill(raw: unknown): DirectorSkillDoc | null {
 
 function buildDefaults(): AppSettings {
   const env = envDefaults()
-  const llm = endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, LLM_PRESETS)
+  const llm = endpoint(env.llm.baseUrl, env.llm.apiKey, env.llm.model, [])
   const first = profileFromEndpoint(llm, '默认 LLM', newId('llm'))
   const vision = endpoint(env.vision.baseUrl, env.vision.apiKey, env.vision.model, VISION_PRESETS)
   const visionFirst = profileFromEndpoint(vision, '默认视觉', newId('vis'))
@@ -462,11 +478,12 @@ function parseSettings(raw: string | null): AppSettings {
     const savedLlm = parsed.llm
     const legacyQwenPrimary = /^qwen/i.test(savedLlm?.model ?? '')
     const llmSnap = legacyQwenPrimary
-      ? defaults.llm
+      ? { ...defaults.llm, models: configuredLlmModels(defaults.llm.models, defaults.llm.model) }
       : {
           ...defaults.llm,
           ...savedLlm,
-          models: uniq([...(savedLlm?.models ?? []), ...defaults.llm.models]).filter(
+          model: savedLlm?.model || defaults.llm.model,
+          models: configuredLlmModels(savedLlm?.models, savedLlm?.model || defaults.llm.model).filter(
             (model) => !/^qwen/i.test(model)
           )
         }
@@ -480,7 +497,13 @@ function parseSettings(raw: string | null): AppSettings {
         (model) => !/^(qwen3\.7|qwen-vl-)/i.test(model)
       )
     }
-    const llm = hydrateNamed(parsed.llms, llmSnap, '默认 LLM', parsed.activeLlmId, 'llm')
+    const llmRaw = hydrateNamed(parsed.llms, llmSnap, '默认 LLM', parsed.activeLlmId, 'llm')
+    const llmList = llmRaw.list.map((profile) => {
+      const models = configuredLlmModels(profile.models, profile.model)
+      return { ...profile, models, model: models.includes(profile.model) ? profile.model : models[0] || '' }
+    })
+    const llmActive = llmList.find((profile) => profile.id === llmRaw.activeId) || llmList[0]
+    const llm = { list: llmList, activeId: llmActive.id, active: asEndpoint(llmActive) }
     const vision = hydrateNamed(parsed.visions, visionSnap, '默认视觉', parsed.activeVisionId, 'vis')
     const image = hydrateNamed(
       parsed.images,

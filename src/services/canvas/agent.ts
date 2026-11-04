@@ -15,7 +15,6 @@ import {
   clarifyMessage,
   isContinueRequest,
   isVagueRequest,
-  greetingReply,
   nextPipelineStep,
   extractStageFromText,
   TOOL_LABEL,
@@ -258,21 +257,9 @@ export async function runAgentTurn(
   )
   onEvent({ kind: 'intent', label: intent.label })
 
-  // 闲聊 / 打招呼 / 「先看看」「等一下」这类暂停：不进规划
+  // 闲聊也交给语言模型写回复，不用固定开场白
   if (intent.kind === 'chitchat') {
-    const n = nextPipelineStep(p0)
-    return {
-      reply: greetingReply(p0),
-      results: [],
-      chips: n
-        ? nextChips(n)
-        : p0.script?.content?.trim()
-          ? clarifyChips(p0)
-          : [
-              { label: '发主题拆剧本', text: '帮我拆剧本' },
-              { label: '全流程', text: '全流程跑完' }
-            ]
-    }
+    return answerQuestion(userText, history, p0, onEvent, options)
   }
 
   // 合并模式：不再按项目模式分叉，而是按「这句话 + 画布当前状态」决定走节点路径还是流水线路径
@@ -457,16 +444,18 @@ export async function runAgentTurn(
   }
 
   if (!plan.actions.length) {
+    const say = String(plan.say || '').trim()
+    if (!say) throw new Error('模型没有返回可执行的回复')
     onEvent({ kind: 'log', label: '先等你确认方向' })
     if (nodePath) {
       return {
-        reply: plan.say || '直接说你想画什么、改哪个节点，我来动手。',
+        reply: say,
         results: [],
         chips: statusChips(project.current)
       }
     }
     const chips = gated ? reviewChips() : clarifyChips(project.current)
-    return { reply: plan.say || clarifyMessage(project.current), results: [], chips }
+    return { reply: say, results: [], chips }
   }
 
   // ── 任务规划：把动作整理成用户可读的计划卡片，执行中同步状态 ──
@@ -723,17 +712,13 @@ async function answerQuestion(
   onEvent: AgentProgress,
   options: AgentRunOptions
 ): Promise<AgentTurnResult> {
-  if (getAIMode() !== 'real') {
-    return { reply: capabilityNotes(p), results: [], chips: statusChips(p) }
-  }
   onEvent({ kind: 'think', label: '在组织回答…' })
   const memoryText = await memoryContextPrompt()
   const chat = history
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(-8)
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-  try {
-    const resp = await callLLM({
+  const resp = await callLLM({
       messages: [
         {
           role: 'system',
@@ -758,36 +743,12 @@ ${memoryText ? `\n${memoryText}` : ''}`
       timeoutMs: 90_000
     })
     const reply = resp.content.trim()
+    if (!reply) throw new Error('模型没有返回内容')
     return {
-      reply: reply || '这个问题我一时没组织好语言，换个问法试试。',
+      reply,
       results: [],
       chips: statusChips(p)
     }
-  } catch (e: any) {
-    if (options.signal?.aborted) throw e
-    return { reply: capabilityNotes(p), results: [], chips: [] }
-  }
-}
-
-/** 演示模式 / 问答兜底：说清自己能干什么（两种创作方式合一） */
-function capabilityNotes(p: Project): string {
-  const hasScript = Boolean(p.script?.content?.trim())
-  return `**我能做的事**
-
-- 写 / 改 / 续写剧本，拆人物、场景、分镜
-- 出人设图、场景图、关键帧、分镜视频和口播
-- 按你一句话创建图片 / 视频节点并直接生成
-- 改任意一镜或任意节点的提示词、运镜、时长
-- 检查进度、补齐缺漏（说「全流程」会整条跑完）
-- 记住你的偏好（说「记住…」）
-
-两种用法都行：左边直接说一句话我一路做下去，也可以在画布空白处右键手动加节点自己拼。
-
-${
-  hasScript
-    ? '当前已有剧本，回「继续」往下走，或直接点明要改哪一镜。'
-    : '先给我一个故事主题或一段剧情，我来拆剧本；或者直接说「画一张…」。'
-}`
 }
 
 /** 演示模式下自由画布的规则规划 */

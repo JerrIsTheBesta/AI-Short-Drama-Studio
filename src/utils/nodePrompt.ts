@@ -5,6 +5,7 @@
 import {
   characterPropSheetPrompt,
   characterSheetPrompt,
+  propTurnaroundPrompt,
   ensureCharacterSheetWhiteBackground,
   scenePlatePrompt,
   scenePropSheetPrompt,
@@ -13,7 +14,7 @@ import {
 } from '@/services/ai/consistency'
 import { spokenTextOnly } from '@/services/ai/dialogue'
 import { buildH3ImageSlots, pictureIdentityBlock } from '@/services/ai/h3Prompt'
-import type { Project, Scene, Shot, Subject } from '@/types'
+import type { Project, Scene, Shot, StoryProp, Subject } from '@/types'
 import {
   collectShotRefIds,
   collectShotVideoEntries,
@@ -167,6 +168,16 @@ export function ensureStyleLock(prompt: string, project: Project): string {
   const body = prompt.trim()
   if (body.includes(look.medium) && /画风|绘制媒介|必须按/.test(body)) return body
   return `${body}\n${line}`.trim()
+}
+
+export function defaultPropSheetPrompt(prop: StoryProp, project: Project): string {
+  const look = lookFromScript(project.script)
+  return ensureStyleLock(ensureCharacterSheetWhiteBackground(propTurnaroundPrompt(prop, look)), project)
+}
+
+export function propSendPrompt(prop: StoryProp, project: Project): string {
+  const raw = prop.sheetPrompt?.trim() || defaultPropSheetPrompt(prop, project)
+  return ensureStyleLock(ensureCharacterSheetWhiteBackground(raw), project)
 }
 
 export function subjectSendPrompt(subject: Subject, project: Project): string {

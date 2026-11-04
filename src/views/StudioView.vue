@@ -134,6 +134,7 @@ watch(rightOpen, clampAgentToViewport)
 const nodeTypes = {
   script: ScriptDocNode,
   subject: PipelineNode,
+  prop: PipelineNode,
   subjectProps: PipelineNode,
   scene: PipelineNode,
   sceneProps: PipelineNode,
@@ -498,7 +499,15 @@ function deleteCtxNode(id: string | null | undefined) {
     return
   }
   const p = project.current
-  if (n.type === 'subject' || n.type === 'subjectProps') {
+  if (n.type === 'prop') {
+    const pid = n.data.propId
+    if (pid) {
+      project.setProps((p.props ?? []).filter((item) => item.id !== pid))
+      project.setCanvas(rebuildCanvasGraph(project.current, true))
+    } else {
+      project.removeCanvasNode(id)
+    }
+  } else if (n.type === 'subject' || n.type === 'subjectProps') {
     const sid = n.data.subjectId
     if (sid) {
       project.setSubjects((p.subjects ?? []).filter((s) => s.id !== sid))
@@ -662,7 +671,7 @@ function addScriptNode() {
   closeCtxMenu()
 }
 
-function addPipelineEntity(kind: 'subject' | 'scene' | 'shot') {
+function addPipelineEntity(kind: 'subject' | 'scene' | 'shot' | 'prop') {
   if (!project.current) return
   const flow = ctxMenu.value?.flow ?? { x: 120, y: 120 }
   const before = new Set((project.current.canvas?.nodes ?? []).map((n) => n.id))
@@ -676,6 +685,14 @@ function addPipelineEntity(kind: 'subject' | 'scene' | 'shot') {
       { id, name: `角色 ${n}`, kind: 'person', description: '' }
     ])
     selectId = `subject:${id}`
+  } else if (kind === 'prop') {
+    const n = (project.current.props ?? []).length + 1
+    const id = `prop_${stamp}`
+    project.setProps([
+      ...(project.current.props ?? []),
+      { id, name: `道具 ${n}`, description: '' }
+    ])
+    selectId = `prop:${id}`
   } else if (kind === 'scene') {
     const n = (project.current.scenes ?? []).length + 1
     const id = `scn_${stamp}`
@@ -703,7 +720,8 @@ function addPipelineEntity(kind: 'subject' | 'scene' | 'shot') {
     selectId = `shotImage:${id}`
   }
   project.setCanvas(rebuildCanvasGraph(project.current, true))
-  const groupId = kind === 'subject' ? 'group-subjects' : kind === 'scene' ? 'group-scenes' : 'group-shots'
+  const groupId =
+    kind === 'subject' ? 'group-subjects' : kind === 'prop' ? 'group-props' : kind === 'scene' ? 'group-scenes' : 'group-shots'
   if (project.current.canvas && !before.has(groupId)) {
     project.setCanvas({
       ...project.current.canvas,
@@ -847,7 +865,7 @@ function goClassic() {
           <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
         <div v-if="!project.current?.canvas?.nodes.length" class="empty-hint">
-          在左边说一句话让我开工，或在空白处右键添加图片 / 视频 / 剧本 / 角色 / 场景 / 分镜
+          在左边说一句话让我开工，或在空白处右键添加图片 / 视频 / 剧本 / 角色 / 道具 / 场景 / 分镜
         </div>
       </div>
       <Teleport to="body">
@@ -893,6 +911,13 @@ function goClassic() {
               <path d="M6.5 18.5c.8-3.2 2.8-4.8 5.5-4.8s4.7 1.6 5.5 4.8" />
             </svg>
             {{ ctxMenu.nodeId ? '追加角色节点' : '添加角色节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addPipelineEntity('prop')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 8.5h8l1.2 2.2H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4.3a2 2 0 0 1 2-2h.8L8 8.5Z" />
+              <path d="M9 8.5V7.2A1.2 1.2 0 0 1 10.2 6h3.6A1.2 1.2 0 0 1 15 7.2v1.3" />
+            </svg>
+            {{ ctxMenu.nodeId ? '追加道具节点' : '添加道具节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addPipelineEntity('scene')">
             <svg viewBox="0 0 24 24" aria-hidden="true">

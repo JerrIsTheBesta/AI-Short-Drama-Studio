@@ -10,6 +10,9 @@ export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID
     const subject = (project.subjects ?? []).find((item) => item.id === node.data.subjectId)
     return node.type === 'subject' ? subject?.designSheetAssetId : subject?.propSheetAssetId
   }
+  if (node.type === 'prop') {
+    return (project.props ?? []).find((item) => item.id === node.data.propId)?.designSheetAssetId
+  }
   if (node.type === 'scene') {
     return (project.scenes ?? []).find((item) => item.id === node.data.sceneId)?.plateAssetId
   }
@@ -30,7 +33,7 @@ export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID
 export function canvasNodeProducesImage(node?: CanvasNode): boolean {
   return Boolean(
     node &&
-      ['imageGen', 'subject', 'subjectProps', 'scene', 'sceneProps', 'shotBoard', 'shotImage', 'shotFrames'].includes(
+      ['imageGen', 'subject', 'prop', 'subjectProps', 'scene', 'sceneProps', 'shotBoard', 'shotImage', 'shotFrames'].includes(
         node.type
       )
   )
@@ -85,7 +88,7 @@ export function appendCanvasReferenceSource(project: Project, targetId: ID, sour
 export function canvasReferenceSlotEntries(
   project: Project,
   node?: CanvasNode
-): Array<{ kind: 'character' | 'scene' | 'board' | 'extra' | 'keyframe'; name: string }> {
+): Array<{ kind: 'character' | 'scene' | 'prop' | 'board' | 'extra' | 'keyframe'; name: string }> {
   const ids = resolvedCanvasReferenceAssetIds(project, node)
   const nodes = project.canvas?.nodes ?? []
   return ids.map((id, i) => {
@@ -100,6 +103,10 @@ export function canvasReferenceSlotEntries(
         kind: 'character' as const,
         name: sub?.name || source.data.label || `person ${i + 1}`
       }
+    }
+    if (source?.type === 'prop') {
+      const prop = (project.props ?? []).find((item) => item.id === source.data.propId)
+      return { kind: 'prop' as const, name: prop?.name || source.data.label || `prop ${i + 1}` }
     }
     if (source?.type === 'scene') {
       const scn = (project.scenes ?? []).find((item) => item.id === source.data.sceneId)

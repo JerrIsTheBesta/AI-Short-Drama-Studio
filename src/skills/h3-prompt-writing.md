@@ -1,12 +1,18 @@
 ---
 name: h3-prompt-writing
-description: 分镜出片提示词：integrated_multimodal_description + (S1)(S2) 绑定参考图 + 独占台词 + 台词只进 <d>。
+description: 分镜出片提示词。多模态参考用官方六段；首尾帧/首帧/尾帧/纯文本用三段加对齐句。(S1)(S2) 绑定人物，台词只进 <d>。
 triggers: 视频,Comfy,H3,配音,口播,图生视频,提示词,优化提示词
 ---
 
 # 分镜视频提示词
 
-点「优化提示词」必须产出下面这个格式。画布上仍然是 **一镜一条成片**。
+点「优化提示词」按节点模式出官方格式。画布上仍然是 **一镜一条成片**。
+
+- 多模态参考：六段 `subject_definitions` / `summary` / `retention_analysis` / `detailed_description` / `overall_soundscape` / `non_diegetic_music`。人物是 `<Subject N> (S#)`，图是身份锁定，不是首帧。summary 以 `[reference generation]` 开头。
+- 首尾帧 FL2VA：对齐句（Picture 1 = 0.00 秒，Picture 2 = 片尾）加三段 `integrated_multimodal_description`。
+- 单张首帧 I2VA：`at 0.00 seconds` 对齐句加三段。
+- 只有尾帧 L2VA：Picture 1 对齐片尾，加三段。
+- 纯文本 T2VA：只有三段，没有对齐句。
 
 ## 人物图用 (S1) (S2)，不要用「图1 是人设」
 
@@ -20,16 +26,27 @@ Speaker lock (these labels are the pictures):
 Only one (S#) speaks at a time, and each person says their own line once. Everyone else keeps their lips completely closed. No overlap, no chorus, no second person repeating the same line.
 ```
 
-不要写 `Picture 1 aligns with 0.00 seconds`。不要写 Ref2VA 六段。
+多模态参考不要写 `Picture 1 aligns with 0.00 seconds`。首尾帧才写那句对齐。不要把六段和三段混在同一条稿里。
 
-## 标本格式
+## 多模态参考的六段
+
+`subject_definitions` 写 `<Subject N> is 「名字」 (S#) in <Picture N>`。下面这段镜头正文放进 `detailed_description`，不要再外包一层 `integrated_multimodal_description`。首尾帧 / 首帧 / 尾帧 / 纯文本才用三段，而且对齐句在三段前面。
 
 ```text
-integrated_multimodal_description:
-Speaker lock (these labels are the pictures):
-(S1) is 「阿凯」 / <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-(S2) is 「大斌」 / <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+subject_definitions:
+<Subject 1> is 「阿凯」 (S1) in <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Subject 2> is 「大斌」 (S2) in <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Subject 3> is 「出租屋」 in <Picture 3>, the location for [Shot 1].
 
+summary:
+[reference generation] The target video is one continuous [Shot 1] of <Subject 1> and <Subject 2> in <Subject 3>. Character sheets lock identity only.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - face, hair, body, age and outfit from <Picture 1>.
+<Subject 2> (appears in [Shot 1]): fully_preserved - face, hair, body, age and outfit from <Picture 2>.
+<Subject 3> (appears in [Shot 1]): fully_preserved - space, materials, weather and light from <Picture 3>.
+
+detailed_description:
 [Shot 1] Grounded contemporary comedy, photorealistic live-action, 9:16. Afternoon light through the living-room window. (S1) 「阿凯」 squats at the left sofa, digging through cushions. (S2) 「大斌」 sprawls on the right sofa with a bag of chips. Neither looks into the lens.
 
 [00:00.000–00:01.200]

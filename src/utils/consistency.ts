@@ -1,4 +1,4 @@
-import type { ID, Project, Scene, Shot, Subject } from '@/types'
+import type { ID, Project, Scene, Shot, StoryProp, Subject } from '@/types'
 import { sceneForShotPlace, shotMentionsScene } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
@@ -55,6 +55,14 @@ export function shotCastText(shot: Pick<Shot, 'title' | 'visualPrompt' | 'videoP
 }
 
 /** 这一镜真正该用的人物：既认 id，也认名字/称呼，并从文案里补漏绑 */
+/** 这一镜正文里点名的反复道具。没写到的道具不塞进这一镜。 */
+export function propsForShot(shot: Shot, project: Project): StoryProp[] {
+  const text = [shot.title, shot.visualPrompt, shot.videoPrompt, shot.propFocus, shot.blocking, shot.purpose]
+    .map((item) => String(item ?? ''))
+    .join('\n')
+  return (project.props ?? []).filter((item) => item.name && text.includes(item.name))
+}
+
 export function boundSubjectIds(shot: Shot, subjects: Subject[]): ID[] {
   const explicit = (shot.subjectIds ?? [])
     .map((token) => matchSubject(String(token), subjects)?.id)
@@ -95,7 +103,7 @@ export function collectShotBoardRefIds(shot: Shot, project: Project): ShotRefBun
   return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 6 })
 }
 
-export type VideoRefKind = 'character' | 'scene' | 'board' | 'extra' | 'keyframe'
+export type VideoRefKind = 'character' | 'scene' | 'board' | 'extra' | 'keyframe' | 'prop'
 
 export interface VideoRefEntry {
   id: ID
@@ -122,6 +130,15 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       kind: 'character',
       name: sub.name,
       label: `CHARACTER DESIGN SHEET of ${sub.name}; lock only this person's face, hair, body and outfit; do not generate a four-view grid`
+    })
+  }
+  for (const prop of propsForShot(shot, project)) {
+    if (!prop.designSheetAssetId || omitted.has(prop.designSheetAssetId)) continue
+    out.push({
+      id: prop.designSheetAssetId,
+      kind: 'prop',
+      name: prop.name,
+      label: `multi-angle PROP SHEET of ${prop.name}; this picture is the recurring prop; lock shape, material, color and wear; not a first frame`
     })
   }
   const scene = sceneAssetForShot(shot, project)
@@ -177,6 +194,7 @@ export function collectShotVideoRefIds(shot: Shot, project: Project): ShotRefBun
 /** 最多 9 张。普通创作关键帧作为成片第一帧排在最前。 */
 export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRefEntry[] {
   const chars = entries.filter((entry) => entry.kind === 'character')
+  const props = entries.filter((entry) => entry.kind === 'prop')
   const extras = entries.filter((entry) => entry.kind === 'extra')
   const scene = entries.find((entry) => entry.kind === 'scene')
   const board = entries.find((entry) => entry.kind === 'board')
@@ -185,14 +203,16 @@ export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRef
     const reserved = [keyframe, scene].filter((entry): entry is VideoRefEntry => Boolean(entry))
     const leftover = Math.max(0, max - reserved.length)
     const extraTake = Math.min(extras.length, leftover)
-    const charTake = Math.max(0, leftover - extraTake)
-    return [keyframe, ...chars.slice(0, charTake), ...reserved.slice(1), ...extras.slice(0, extraTake)]
+    const propTake = Math.min(props.length, Math.max(0, leftover - extraTake))
+    const charTake = Math.max(0, leftover - extraTake - propTake)
+    return [keyframe, ...chars.slice(0, charTake), ...props.slice(0, propTake), ...reserved.slice(1), ...extras.slice(0, extraTake)]
   }
   const reserved = [scene, board].filter((entry): entry is VideoRefEntry => Boolean(entry))
   const leftover = Math.max(0, max - reserved.length)
   const extraTake = Math.min(extras.length, leftover)
-  const charTake = Math.max(0, leftover - extraTake)
-  return [...chars.slice(0, charTake), ...reserved, ...extras.slice(0, extraTake)]
+  const propTake = Math.min(props.length, Math.max(0, leftover - extraTake))
+  const charTake = Math.max(0, leftover - extraTake - propTake)
+  return [...chars.slice(0, charTake), ...props.slice(0, propTake), ...reserved, ...extras.slice(0, extraTake)]
 }
 
 /**
@@ -202,14 +222,14 @@ export function packVideoRefEntries(entries: VideoRefEntry[], max = 9): VideoRef
 export function collectShotRefIds(shot: Shot, project: Project): ShotRefBundle {
   return packShotRefs(shot, project, {
     includeBoard: videoRequiresStoryboard(project),
-    includeProps: false,
+    includeProps: true,
     max: 8
   })
 }
 
 /** 普通创作关键帧：只用人设、场景、道具，不带故事看板。 */
 export function collectShotKeyframeRefIds(shot: Shot, project: Project): ShotRefBundle {
-  return packShotRefs(shot, project, { includeBoard: false, includeProps: false, max: 8 })
+  return packShotRefs(shot, project, { includeBoard: false, includeProps: true, max: 8 })
 }
 
 function packShotRefs(
@@ -228,6 +248,15 @@ function packShotRefs(
         label: `four-panel scene anchor sheet of "${scene.name}"; same place, no people; use overall space, main anchor, floor and light`
       }
     : null
+  const storyPropEntries = opts.includeProps
+    ? propsForShot(shot, project)
+        .filter((item) => item.designSheetAssetId)
+        .slice(0, 2)
+        .map((item) => ({
+          id: item.designSheetAssetId as ID,
+          label: `multi-angle prop sheet of "${item.name}"; this picture is that prop, lock shape, material and color`
+        }))
+    : []
   const scenePropEntry = opts.includeProps && sceneHasKeyProps(scene || {}) && scene?.propSheetAssetId
     ? {
         id: scene.propSheetAssetId,
@@ -277,10 +306,11 @@ function packShotRefs(
 
   const fourViews = chars.filter((c) => c.label.includes('four-view'))
   const props = chars.filter((c) => !c.label.includes('four-view'))
-  if (chars.length > 0 || sceneEntry || boardEntry) {
+  if (chars.length > 0 || storyPropEntries.length > 0 || sceneEntry || boardEntry) {
     const ordered = [
       ...(boardEntry ? [boardEntry] : []),
       ...fourViews.slice(0, 2),
+      ...storyPropEntries,
       ...props.slice(0, 2),
       ...(scenePropEntry ? [scenePropEntry] : []),
       ...(sceneEntry ? [sceneEntry] : [])

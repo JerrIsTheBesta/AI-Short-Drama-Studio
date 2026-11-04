@@ -16,7 +16,7 @@ import { parseJsonRobust } from '@/utils/jsonRepair'
 
 export interface H3ImageSlot {
   index: number
-  kind: 'character' | 'scene' | 'board' | 'extra'
+  kind: 'character' | 'scene' | 'prop' | 'board' | 'extra'
   name: string
   sourceName?: string
   job: string
@@ -61,15 +61,15 @@ export interface H3PromptInput {
   eyeline?: string
   continuity?: string
   purpose?: string
-  mode?: 'I2VA' | 'T2VA' | 'R2VA'
+  mode?: 'I2VA' | 'T2VA' | 'R2VA' | 'FL2VA' | 'L2VA'
   promptStyle?: VideoPromptStyle
-  /** 分镜出片：只用 integrated_multimodal_description，内部可切 [Shot 2]/[Shot 3]。 */
+  /** 为 true 时压成三段 integrated，不按官方模式加对齐句或六段。 */
   forceIntegrated?: boolean
   signal?: AbortSignal
 }
 
 type LabeledSlot = {
-  kind: 'character' | 'scene' | 'board' | 'extra'
+  kind: 'character' | 'scene' | 'prop' | 'board' | 'extra'
   picture: number
   subject?: number
   name: string
@@ -118,6 +118,17 @@ export function ensureFl2vaLead(prompt: string, duration: number): string {
   return body ? `${lead}\n\n${body}` : lead
 }
 
+/** 官方 L2VA 首行：唯一参考图对齐成片结尾。 */
+export function ensureL2vaLead(prompt: string, duration: number): string {
+  const body = String(prompt || '').trim()
+  if (/<Picture 1> \(from \[Shot \d+\]\) aligns with the \d+\.\d{2}-second mark/i.test(body)) return body
+  const shots = [...body.matchAll(/\[Shot\s*(\d+)\]/gi)].map((item) => Number(item[1]))
+  const last = shots.length ? Math.max(...shots) : 1
+  const end = Math.max(1, Number(duration) || 5).toFixed(2)
+  const lead = `How the reference pictures align with the target video — <Picture 1> (from [Shot ${last}]) aligns with the ${end}-second mark of the target video.`
+  return body ? `${lead}\n\n${body}` : lead
+}
+
 /** 只有槽位和套话、没有这一镜具体戏的空模板 */
 export function isH3FillTemplate(text: string): boolean {
   const t = String(text || '')
@@ -129,12 +140,25 @@ export function isH3FillTemplate(text: string): boolean {
   )
 }
 
-/** 把中文场记原样塞进英文模板、或混用 Ref2VA 六段的脏稿。不能发给 H3。 */
+/** 官方多模态参考：六段齐了才算成稿。缺段的 subject_definitions 仍是脏稿。 */
+export function isCompleteRef2VA(text: string): boolean {
+  const t = String(text || '')
+  return (
+    /subject_definitions\s*:/i.test(t) &&
+    /summary\s*:/i.test(t) &&
+    /retention_analysis\s*:/i.test(t) &&
+    /detailed_description\s*:/i.test(t) &&
+    /overall_soundscape\s*:/i.test(t) &&
+    /non_diegetic_music\s*:/i.test(t)
+  )
+}
+
+/** 把中文场记原样塞进英文模板、或六段写残的脏稿。完整 Ref2VA 可以发给 H3。 */
 export function isMessyH3Prompt(text: string): boolean {
   const t = String(text || '').trim()
   if (!t) return false
   if (/Play the following director notes/i.test(t)) return true
-  if (/subject_definitions\s*:/i.test(t)) return true
+  if (/subject_definitions\s*:/i.test(t) && !isCompleteRef2VA(t)) return true
   if (/the place named in the director notes/i.test(t)) return true
   return /[㐀-鿿]/.test(stripAllowedCjk(t))
 }
@@ -330,7 +354,7 @@ function cameraBeatEn(
 }
 
 export function buildH3ImageSlots(
-  entries: Array<{ kind: 'character' | 'scene' | 'board' | 'extra' | 'keyframe'; name?: string }>
+  entries: Array<{ kind: 'character' | 'scene' | 'prop' | 'board' | 'extra' | 'keyframe'; name?: string }>
 ): H3ImageSlot[] {
   const map = h3NameMap(entries.filter((entry) => entry.kind === 'character').map((entry) => entry.name))
   let place = 0
@@ -345,6 +369,16 @@ export function buildH3ImageSlots(
         name,
         sourceName: entry.name,
         job: `<Subject identity from Picture ${index}> ${name} is the person in <Picture ${index}>. Lock only this person's face, hair, body, age and outfit. Do not generate a four-view grid or extra people.`
+      }
+    }
+    if (entry.kind === 'prop') {
+      const name = entry.name || `prop ${index}`
+      return {
+        index,
+        kind: 'prop',
+        name,
+        sourceName: entry.name,
+        job: `<Picture ${index}> is the recurring prop ${name}. Lock shape, material, color and wear. Multi-angle reference only, not a first frame.`
       }
     }
     if (entry.kind === 'scene') {
@@ -396,6 +430,9 @@ function slotsOf(input: H3PromptInput): H3ImageSlot[] {
     if (/storyboard/i.test(cleaned)) {
       return { index, kind: 'board' as const, name: 'the storyboard', job: cleaned }
     }
+    if (/recurring prop|PROP SHEET|multi-angle prop/i.test(cleaned)) {
+      return { index, kind: 'prop' as const, name: `Prop ${index}`, job: cleaned }
+    }
     if (/scene plate|location|SCENE PLATE/i.test(cleaned)) {
       return { index, kind: 'scene' as const, name: `Place ${index}`, job: cleaned }
     }
@@ -406,7 +443,7 @@ function slotsOf(input: H3PromptInput): H3ImageSlot[] {
 function labeledSlots(input: H3PromptInput): LabeledSlot[] {
   let subject = 0
   return slotsOf(input).map((slot) => {
-    if (slot.kind === 'board' || slot.kind === 'extra') {
+    if (slot.kind === 'board' || slot.kind === 'extra' || slot.kind === 'prop') {
       return { kind: slot.kind, picture: slot.index, name: slot.name, sourceName: slot.sourceName }
     }
     subject += 1
@@ -423,7 +460,7 @@ function labeledSlots(input: H3PromptInput): LabeledSlot[] {
 /** 人设/场景/看板多图参考走 Ref2VA；单张作为成片第一帧才走 I2VA。 */
 export function isRef2VA(input?: H3PromptInput): boolean {
   if (!input) return false
-  if (input.mode === 'T2VA' || input.mode === 'I2VA') return false
+  if (input.mode === 'T2VA' || input.mode === 'I2VA' || input.mode === 'FL2VA' || input.mode === 'L2VA') return false
   if (input.mode === 'R2VA') return true
   const slots = slotsOf(input)
   if (slots.some((slot) => slot.kind === 'board')) return true
@@ -452,6 +489,12 @@ export function pictureIdentityBlock(input: H3PromptInput): string {
   let speaker = 0
   for (const slot of slots) {
     const who = identityLabel(slot)
+    if (slot.kind === 'prop') {
+      lines.push(
+        `(P${slot.picture}) is ${who} / <Picture ${slot.picture}>. Lock shape, material, color and wear. Multi-angle reference only, not the first frame.`
+      )
+      continue
+    }
     if (slot.kind === 'character') {
       speaker += 1
       lines.push(
@@ -485,8 +528,8 @@ export function promptHasPictureIdentity(text: string, count: number): boolean {
   if (count <= 0) return true
   const src = String(text || '')
   for (let i = 1; i <= count; i++) {
-    const hit = new RegExp(
-      `(?:图\\s*${i}\\s*[/：:=是]|\\(S\\d+\\)\\s+is\\b[^\\n]*<Picture\\s*${i}>|<Picture\\s*${i}>\\s+is\\b)`,
+      const hit = new RegExp(
+      `(?:图\\s*${i}\\s*[/：:=是]|\\(S\\d+\\)\\s+is\\b[^\\n]*<Picture\\s*${i}>|<Picture\\s*${i}>\\s+is\\b|<Subject\\s*\\d+>[^\\n]*<Picture\\s*${i}>)`,
       'i'
     ).test(src)
     if (!hit) return false
@@ -496,6 +539,17 @@ export function promptHasPictureIdentity(text: string, count: number): boolean {
 
 /** 用代码写死的图1/图2/图3 身份块覆盖模型稿；不依赖模型自觉写。 */
 export function ensurePictureIdentity(prompt: string, input: H3PromptInput): string {
+  const src0 = String(prompt || '').trim()
+  if (
+    input.mode === 'I2VA' ||
+    input.mode === 'FL2VA' ||
+    input.mode === 'L2VA' ||
+    input.mode === 'T2VA' ||
+    /aligns with the \d+\.\d{2}-second mark/i.test(src0) ||
+    /at 0\.00 seconds into the target video/i.test(src0)
+  ) {
+    return src0
+  }
   const block = pictureIdentityBlock(input)
   if (!block) return String(prompt || '').trim()
   let src = String(prompt || '').trim()
@@ -507,6 +561,13 @@ export function ensurePictureIdentity(prompt: string, input: H3PromptInput): str
     .replace(/(?:^|\n)\(S\d+\)\s+is\b[^\n]*\n?/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+  if (/subject_definitions\s*:/i.test(src) && /detailed_description\s*:/i.test(src)) {
+    const defs = subjectDefinitions(input)
+    if (defs && /subject_definitions\s*:[\s\S]*?(?=\n\s*summary\s*:)/i.test(src)) {
+      return src.replace(/subject_definitions\s*:[\s\S]*?(?=\n\s*summary\s*:)/i, `subject_definitions:\n${defs}\n\n`)
+    }
+    return src
+  }
   if (/integrated_multimodal_description\s*:/i.test(src)) {
     return src.replace(/(integrated_multimodal_description\s*:\s*)/i, `$1${block}\n\n`)
   }
@@ -678,6 +739,12 @@ function subjectDefinitions(input: H3PromptInput): string {
       )
       continue
     }
+    if (slot.kind === 'prop') {
+      lines.push(
+        `${pic} is the recurring prop ${identityLabel(slot)} (P${slot.picture}). Lock shape, material, color and wear. Multi-angle reference only, not the first frame.`
+      )
+      continue
+    }
     if (slot.kind === 'extra') {
       lines.push(
         `${pic} is an additional user reference. Match people, clothing, product, setting or style from this image. Do not copy a grid or treat it as another first frame.`
@@ -688,13 +755,13 @@ function subjectDefinitions(input: H3PromptInput): string {
       const extra = englishOrOmit(input.sceneLighting)
       lines.push(
         extra
-          ? `<Subject ${slot.subject}> is ${slot.name} in ${pic}, a unified location with ${extra}.`
-          : `<Subject ${slot.subject}> is ${slot.name} in ${pic}, the location for [Shot 1].`
+          ? `<Subject ${slot.subject}> is ${identityLabel(slot)} in ${pic}, a unified location with ${extra}.`
+          : `<Subject ${slot.subject}> is ${identityLabel(slot)} in ${pic}, the location for [Shot 1].`
       )
       continue
     }
     lines.push(
-      `<Subject ${slot.subject}> is ${slot.name} in ${pic}, the person whose face, hair, body, age and outfit must stay locked.`
+      `<Subject ${slot.subject}> is ${identityLabel(slot)} (S${slot.subject}) in ${pic}. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.`
     )
   }
   return lines.join('\n')
@@ -714,7 +781,11 @@ function summaryBlock(input: H3PromptInput): string {
   const extraLine = extraCount
     ? ` Also lock ${extraCount} additional user reference image${extraCount > 1 ? 's' : ''}.`
     : ''
-  return `[reference generation] The target video is one continuous [Shot 1] of ${who} in ${where}.${boardLine}${extraLine} Character sheets lock identity only. The location plate locks space and light only. The storyboard never appears on screen.`
+  const propSlots = labeled.filter((slot) => slot.kind === 'prop')
+  const propLine = propSlots.length
+    ? ` Recurring props stay on ${propSlots.map((slot) => `<Picture ${slot.picture}>`).join(', ')}.`
+    : ''
+  return `[reference generation] The target video is one continuous [Shot 1] of ${who} in ${where}.${boardLine}${propLine}${extraLine} Character sheets lock identity only. Prop sheets lock the object only. The location plate locks space and light only. The storyboard never appears on screen.`
 }
 
 function retentionAnalysis(input: H3PromptInput): string {
@@ -722,6 +793,9 @@ function retentionAnalysis(input: H3PromptInput): string {
     .map((slot) => {
       if (slot.kind === 'board') {
         return `<Picture ${slot.picture}> (storyboard for [Shot 1]): weak_reference - viewpoint, blocking and order only; the panel grid never appears on screen.`
+      }
+      if (slot.kind === 'prop') {
+        return `<Picture ${slot.picture}> (recurring prop (P${slot.picture})): fully_preserved - shape, material, color and wear from this multi-angle sheet.`
       }
       if (slot.kind === 'extra') {
         return `<Picture ${slot.picture}> (additional user reference): fully_preserved - people, clothing, product, setting or style from this image.`
@@ -734,10 +808,59 @@ function retentionAnalysis(input: H3PromptInput): string {
     .join('\n')
 }
 
+function useSixSection(input?: H3PromptInput): boolean {
+  if (!input || input.forceIntegrated === true) return false
+  if (input.mode === 'FL2VA' || input.mode === 'L2VA' || input.mode === 'I2VA' || input.mode === 'T2VA') {
+    return false
+  }
+  if (input.mode === 'R2VA') return true
+  return isRef2VA(input)
+}
+
+function visualShotBody(desc: string): string {
+  const text = String(desc || '').trim()
+  const cut = text.search(/\[Shot\s*1\]/i)
+  return (cut >= 0 ? text.slice(cut) : text).trim()
+}
+
+/** 多模态参考：官方六段。人物绑定写在 subject_definitions，镜头正文从 [Shot 1] 开始。 */
+function assembleRef2VA(desc: string, sound: string, music: string, input: H3PromptInput): string {
+  let body = sanitizeDTagContents(stripCjkOutsideSpokenTags(visualShotBody(desc)))
+  body = ensureVoiceRoster(body, input.voiceRoster || '')
+  const defs = subjectDefinitions(input).trim() || 'No separate reference subject. Generate from the written shot only.'
+  return `subject_definitions:
+${defs}
+
+summary:
+${summaryBlock(input).trim()}
+
+retention_analysis:
+${retentionAnalysis(input).trim()}
+
+detailed_description:
+${body}
+
+overall_soundscape:
+${stripCjkOutsideSpokenTags(sound.trim())}
+
+non_diegetic_music:
+${music.trim() || 'N/A'}`
+}
+
+function assembleByMode(desc: string, sound: string, music = 'N/A', input?: H3PromptInput): string {
+  if (input && useSixSection(input)) return assembleRef2VA(desc, sound, music, input)
+  let text = assembleOfficial(desc, sound, music, input)
+  if (!input || input.forceIntegrated === true) return text
+  if (input.mode === 'FL2VA') return ensureFl2vaLead(text, input.duration || 5)
+  if (input.mode === 'L2VA') return ensureL2vaLead(text, input.duration || 5)
+  return text
+}
+
 function assembleOfficial(desc: string, sound: string, music = 'N/A', input?: H3PromptInput): string {
   let body = stripCjkOutsideSpokenTags(desc.trim())
   if (input) {
-    body = ensurePictureIdentity(body, input)
+    const keyframe = input.mode === 'I2VA' || input.mode === 'FL2VA' || input.mode === 'L2VA'
+    if (!keyframe) body = ensurePictureIdentity(body, input)
     body = ensureVoiceRoster(body, input.voiceRoster || '')
   }
   const extraJobs = input
@@ -1188,6 +1311,7 @@ export function compiledH3PromptNeedsRebuild(text: string | undefined): boolean 
   }
   // 只有人物名单、没有 [Shot 1] 的空壳，或还在用旧的「图1 是人设」而没有 (S1) 绑定
   if (/integrated_multimodal_description\s*:/i.test(t) && !/\[Shot\s*1\]/i.test(t)) return true
+  if (/subject_definitions\s*:/i.test(t) && !/\[Shot\s*1\]/i.test(t)) return true
   if (/is this person's character design/i.test(t) && !/\(S1\)\s+is\b/.test(t)) return true
   return false
 }
@@ -1282,6 +1406,7 @@ export function validateH3Prompt(prompt: string, expectedDialogue?: string): H3P
     /<Picture\s*1>/i.test(prompt) &&
     !/\[Shot\s*[2-9]\]/i.test(prompt) &&
     !/at 0\.00 seconds into the target video/i.test(prompt) &&
+    !/aligns with the \d+\.\d{2}-second mark/i.test(prompt) &&
     !/Identity reference only, not the first frame/i.test(prompt) &&
     !/图\s*1\s*[/：:=是]/i.test(prompt)
   ) {
@@ -1335,12 +1460,15 @@ export function validateH3Prompt(prompt: string, expectedDialogue?: string): H3P
 }
 
 function resolvePromptInput(input: H3PromptInput, source: string): H3PromptInput {
-  if (/subject_definitions\s*:/i.test(source)) return { ...input, mode: 'R2VA' }
+  if (input.mode) return input
+  if (isCompleteRef2VA(source) || /subject_definitions\s*:/i.test(source)) return { ...input, mode: 'R2VA' }
+  if (/aligns with the 0\.00-second mark/i.test(source) && /Picture 2/i.test(source)) return { ...input, mode: 'FL2VA' }
+  if (/<Picture 1> \(from \[Shot \d+\]\) aligns with the/i.test(source)) return { ...input, mode: 'L2VA' }
   if (/at 0\.00 seconds into the target video/i.test(source)) return { ...input, mode: 'I2VA' }
   return input
 }
 
-/** 按官方 I2VA 三段生成最终提示词。中文场记不得进正文。 */
+/** 按官方模式出最终提示词：多模态参考六段，首帧/首尾帧/尾帧/纯文本走三段加对齐句。中文场记不得进正文。 */
 export function composeH3VideoPrompt(input: H3PromptInput): string {
   const source = stripFrameLead(input.prompt || '')
   const resolved = resolvePromptInput(input, source)
@@ -1355,7 +1483,7 @@ export function composeH3VideoPrompt(input: H3PromptInput): string {
     )
     const sound = extractField(source, 'overall_soundscape') || defaultSoundscape(resolved, spoken)
     const music = extractField(source, 'non_diegetic_music') || 'N/A'
-    return assembleOfficial(desc, sound, music, resolved)
+    return assembleByMode(desc, sound, music, resolved)
   }
 
   if (isStructuredShotBody(source) && !isMessyH3Prompt(source)) {
@@ -1365,11 +1493,11 @@ export function composeH3VideoPrompt(input: H3PromptInput): string {
     )
     const sound = extractField(source, 'overall_soundscape') || defaultSoundscape(resolved, spoken)
     const music = extractField(source, 'non_diegetic_music') || 'N/A'
-    return assembleOfficial(desc, sound, music, resolved)
+    return assembleByMode(desc, sound, music, resolved)
   }
 
   const desc = applyDialogue(descriptionFromNotes(resolved), resolved)
-  return assembleOfficial(desc, defaultSoundscape(resolved, spoken), 'N/A', resolved)
+  return assembleByMode(desc, defaultSoundscape(resolved, spoken), 'N/A', resolved)
 }
 
 function stripJsonFence(text: string): string {
@@ -1443,7 +1571,7 @@ function isLLMRequestFailure(error: unknown): boolean {
 
 /** 把中文场记编译成 H3 官方英文：integrated_multimodal_description + 内部切镜；失败则回退模板。 */
 export async function compileH3OfficialPrompt(input: H3PromptInput): Promise<string> {
-  const resolved: H3PromptInput = { ...input, forceIntegrated: input.forceIntegrated !== false }
+  const resolved: H3PromptInput = { ...input, forceIntegrated: input.forceIntegrated === true }
   const source = stripFrameLead(resolved.prompt || '')
   if (getAIMode() === 'mock') {
     return composeH3VideoPrompt(resolved)
@@ -1502,11 +1630,11 @@ Rules:
 - STYLE LOCK: when reference pictures are supplied, their art style is authoritative. Match the reference pictures' rendering (medium, palette, texture, character design) exactly. Ignore the Style line above if it conflicts; never switch the referenced subject to a different medium such as live-action, CG, or a generic "cinematic" look.
 - Write direct, decisive filmmaking prose like a director describing the finished moving image. The format is a container, not a prose template.
 - English for action, camera, light, performance. Chinese is allowed ONLY inside <d> and inside 「source names」 in the speaker lock. Any other Chinese is deleted, so a Chinese scene description will ship as an empty roster. Write the actual blocking in English: who is left/right, what they hold, what a prop does over time.
-- In action prose, call people (S1), (S2) exactly as the speaker lock defines them. Do not invent a new S number per line. Do not anonymize a known character as “the man.”
+- In action prose, call people (S1), (S2) exactly as the speaker lock defines them. Do not invent a new S number per line. Do not anonymize a known character as “the man.” Recurring props keep the (P#) and <Picture N> written in the lock. When a hand touches that object, name that picture.
 - Spoken lines already extracted below are the ONLY dialogue. If the list is empty, write No dialogue. No lips moving. NEVER invent speech from 场记, timestamps, style, or the speaker lock. Never put 无 or director notes inside a d tag.
 - MUST COPY the speaker-lock block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder (S1)/(S2)/<Picture N>.
 - overall_soundscape names the script's real sounds (chip crunch, cushion rustle, room tone). Do not write a generic sentence such as "close breath stay synchronized with the picture. Spoken words appear only inside the d tag."
-- Do not write subject_definitions, summary, retention_analysis.
+- Delivery format is chosen by the app, not by you. Write the shot body only. Multimodal reference (R2VA) is wrapped into six sections: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. First-frame (I2VA), first-and-last-frame (FL2VA), last-frame (L2VA) and text-only (T2VA) stay three fields, with the official alignment line added outside your JSON. Do not emit those headers yourself.
 - Do not show grids, four-view sheets, storyboards, collage, captions, subtitles, or labels on screen.
 - End the visual description once with: The complete action develops continuously and finishes naturally within ${durationText(resolved)} seconds.
 - overall_soundscape must follow the visible chronology and name the exact synchronized sounds of each action. English ambience and physical sounds only; spoken words are represented by their d tags and should not be quoted again. No music.
@@ -1623,7 +1751,7 @@ ${desc || '(empty)'}`
       shaped = applyDialogue(descriptionFromNotes(resolvedWithSpeech), resolvedWithSpeech)
     }
     const spoken = trusted.join(' ')
-    const assembled = assembleOfficial(
+    const assembled = assembleByMode(
       shaped,
       sound || defaultSoundscape(resolvedWithSpeech, spoken),
       'N/A',

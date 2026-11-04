@@ -569,6 +569,73 @@ export function isFieldLabelName(name: string): boolean {
   return FIELD_LABEL_WORDS.some((w) => n.includes(w))
 }
 
+/** 名字在正文里出现几次。短于 2 个字不计数。 */
+export function countNameMentions(text: string, name: string): number {
+  const token = String(name || '').trim()
+  if (token.length < 2) return 0
+  let count = 0
+  let from = 0
+  const source = String(text || '')
+  while (from <= source.length) {
+    const at = source.indexOf(token, from)
+    if (at < 0) break
+    count += 1
+    from = at + token.length
+  }
+  return count
+}
+
+/** 剧本里单独成章的道具名单。没有这一章就返回空，交给模型从正文里找。 */
+export function propsListedInPlay(markdown: string): Array<{ name: string; description: string }> {
+  const sections = splitH2(markdown || '')
+  const section = sections.find((item) => /道具|物件|关键物品/.test(item.title))
+  if (!section) return []
+  const out: Array<{ name: string; description: string }> = []
+  const add = (name: string, description: string) => {
+    const clean = name.replace(/\*\*/g, '').replace(/[「」]/g, '').trim()
+    if (clean.length < 2 || clean.length > 12) return
+    if (out.some((item) => item.name === clean)) return
+    out.push({ name: clean, description: description.trim().slice(0, 400) })
+  }
+  for (const block of splitH3(section.body)) add(block.name, block.body)
+  for (const line of section.body.split('\n')) {
+    const match = line.match(/^\s*[-*]?\s*([^：:\n]{2,12})[：:]\s*(.+)$/)
+    if (match) add(match[1], match[2])
+  }
+  return out
+}
+
+/**
+ * 只留下剧本正文里至少出现两次、且不是人物名的道具。
+ * 出现一次的杯子、路牌、一次性食物不建档。
+ */
+export function keepRecurringProps(
+  play: string,
+  rows: Array<{ name?: string; description?: string }>,
+  subjectNames: string[] = []
+): Array<{ name: string; description: string; mentions: number }> {
+  const banned = new Set(subjectNames.map((name) => name.replace(/\s+/g, '')))
+  const seen = new Set<string>()
+  const out: Array<{ name: string; description: string; mentions: number }> = []
+  for (const row of rows) {
+    const name = String(row.name || '').replace(/[「」*]/g, '').trim()
+    if (name.length < 2 || name.length > 12) continue
+    if (/^(?:人物|场景|地点|主角|镜头|道具|服装|衣服)$/.test(name)) continue
+    const key = name.replace(/\s+/g, '')
+    if (seen.has(key) || banned.has(key)) continue
+    const mentions = countNameMentions(play, name)
+    if (mentions < 2) continue
+    seen.add(key)
+    out.push({
+      name,
+      description: String(row.description || `${name}，形状、材质、颜色和新旧按剧本锁定`).slice(0, 400),
+      mentions
+    })
+    if (out.length >= 6) break
+  }
+  return out
+}
+
 /** 不靠模型：从「## 人物」和对白名抽出角色。 */
 export function extractSubjectsFromPlay(markdown: string): Array<{
   name: string

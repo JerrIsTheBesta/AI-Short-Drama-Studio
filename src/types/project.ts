@@ -451,6 +451,22 @@ export interface Subject {
   clonedVoiceModel?: string
 }
 
+/** 剧本里会反复入镜的同一件道具。只收出现至少两次的物件，并出多角度图。 */
+export interface StoryProp {
+  id: ID
+  name: string
+  /** 形状、材质、颜色、新旧，不含所在房间 */
+  description: string
+  /** 剧本正文里这个名字出现的次数 */
+  mentions?: number
+  /** 正面 / 侧面 / 背面 / 细节，纯白底 */
+  designSheetAssetId?: ID
+  designSheetHistoryIds?: ID[]
+  referenceAssetIds?: ID[]
+  /** 实际发给出图接口的多角度全文 */
+  sheetPrompt?: string
+}
+
 /** 整片锁定的场景锚点图（四宫格：全景 / 主锚 / 地面 / 光线） */
 export interface Scene {
   id: ID
@@ -495,6 +511,8 @@ export interface Project {
   shots: Shot[]
   /** 整片主体（人设），配图/视频前先生成多角度设计图 */
   subjects?: Subject[]
+  /** 剧本中反复出现的道具，配图/视频前先生成多角度设计图 */
+  props?: StoryProp[]
   /** 整片场景底板 */
   scenes?: Scene[]
   timeline: TimelineClip[]

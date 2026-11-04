@@ -26,6 +26,7 @@ const extractable = computed(() => {
 const generatable = computed(
   () =>
     props.data.kind === 'subject' ||
+    props.data.kind === 'prop' ||
     props.data.kind === 'scene' ||
     props.data.kind === 'shot' ||
     props.data.kind === 'frames' ||
@@ -39,6 +40,7 @@ const playReady = computed(
 )
 const hasItems = computed(() => {
   if (props.data.kind === 'subject') return Boolean(project.current?.subjects?.length)
+  if (props.data.kind === 'prop') return Boolean(project.current?.props?.length)
   if (props.data.kind === 'scene') return Boolean(project.current?.scenes?.length)
   return Boolean(project.current?.shots.length)
 })
@@ -48,6 +50,7 @@ const childCount = computed(
       (n) =>
         n.parentGroupId === props.id &&
         (n.type === 'subject' ||
+          n.type === 'prop' ||
           n.type === 'scene' ||
           n.type === 'shotBoard' ||
           n.type === 'shotImage' ||
@@ -111,6 +114,8 @@ async function generateAll(ev: Event) {
     toast.success(
       props.data.kind === 'subject'
         ? '人物四视图已全部跑完'
+        : props.data.kind === 'prop'
+          ? '道具多角度图已全部跑完'
         : props.data.kind === 'scene'
           ? '场景锚点图已全部跑完'
           : props.data.kind === 'video'

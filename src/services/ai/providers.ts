@@ -254,11 +254,13 @@ export function applyProviderPreset(
   preset: ProviderPreset
 ): { provider: string; baseUrl: string; model: string; models: string[] } {
   const keepUrl = preset.id === 'custom'
-  const model = preset.defaultModel || current.model
+  const model = (keepUrl ? current.model : current.model || preset.defaultModel).trim()
+  // 预设目录只当建议，不写进已配置列表。已配置的名字只来自当前这一项和调用方显式传入的模型名。
+  const models = uniq([...(model ? [model] : []), ...current.models])
   return {
     provider: preset.id,
     baseUrl: keepUrl ? current.baseUrl : preset.baseUrl || current.baseUrl,
     model,
-    models: uniq([...preset.models, ...current.models, model])
+    models
   }
 }

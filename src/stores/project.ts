@@ -33,6 +33,7 @@ import type {
   AspectRatio,
   ID,
   Subject,
+  StoryProp,
   Scene,
   CanvasGraph,
   CanvasNode,
@@ -314,6 +315,23 @@ export const useProjectStore = defineStore('project', () => {
   function setSubjects(subjects: Subject[]) {
     if (!current.value) return
     current.value.subjects = subjects
+    touch()
+  }
+
+  function setProps(props: StoryProp[]) {
+    if (!current.value) return
+    current.value.props = props
+    touch()
+  }
+
+  function updateProp(id: ID, patch: Partial<StoryProp>) {
+    if (!current.value) return
+    const list = current.value.props ?? []
+    const idx = list.findIndex((item) => item.id === id)
+    if (idx === -1) return
+    const next = [...list]
+    next[idx] = { ...next[idx], ...patch }
+    current.value.props = next
     touch()
   }
 
@@ -801,6 +819,8 @@ export const useProjectStore = defineStore('project', () => {
     applyPlayTitle,
     setShots,
     setSubjects,
+    setProps,
+    updateProp,
     updateSubject,
     setScenes,
     updateScene,
