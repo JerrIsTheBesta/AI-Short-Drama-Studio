@@ -512,7 +512,11 @@ function requestBodyForProvider(
   body.size = ratio || source.size || '1:1'
   const tier = String(source.resolution || '2k').toLowerCase()
   body.resolution = tier.includes('4k') ? '4k' : tier === '1k' ? '1k' : '2k'
-  if (images.length) body.image_urls = images.slice(0, 15)
+  if (images.length) {
+    const refs = images.slice(0, 15)
+    body.image = refs
+    body.image_urls = refs
+  }
   return body
 }
 

@@ -80,7 +80,7 @@ async function realCustomOrComfy(input: ImageGenInput): Promise<ImageGenOutput> 
       prompt,
       adapter: cfg.adapter,
       extraBody: {
-        ...(imageUrls.length ? { image_urls: imageUrls } : {}),
+        ...(imageUrls.length ? { image: imageUrls, image_urls: imageUrls } : {}),
         ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
         ...(input.resolution ? { resolution: input.resolution } : {}),
         n: 1

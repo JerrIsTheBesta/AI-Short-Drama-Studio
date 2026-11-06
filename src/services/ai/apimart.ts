@@ -321,20 +321,40 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-function multipartFile(bytes: Uint8Array, filename: string, mime: string) {
+function multipartBody(
+  parts: Array<{ name: string; filename?: string; mime?: string; bytes: Uint8Array }>
+) {
   const boundary = `----AiCut${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`
-  const head = new TextEncoder().encode(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`
-  )
-  const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`)
-  const body = new Uint8Array(head.length + bytes.length + tail.length)
-  body.set(head, 0)
-  body.set(bytes, head.length)
-  body.set(tail, head.length + bytes.length)
+  const encoder = new TextEncoder()
+  const chunks: Uint8Array[] = []
+  for (const part of parts) {
+    const disposition = part.filename
+      ? `Content-Disposition: form-data; name="${part.name}"; filename="${part.filename}"`
+      : `Content-Disposition: form-data; name="${part.name}"`
+    const typeLine = part.mime ? `\r\nContent-Type: ${part.mime}` : ''
+    chunks.push(encoder.encode(`--${boundary}\r\n${disposition}${typeLine}\r\n\r\n`))
+    chunks.push(part.bytes)
+    chunks.push(encoder.encode('\r\n'))
+  }
+  chunks.push(encoder.encode(`--${boundary}--\r\n`))
+  const body = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.length
+  }
   return {
     bodyBase64: bytesToBase64(body),
     contentType: `multipart/form-data; boundary=${boundary}`
   }
+}
+
+function textPart(name: string, value: string) {
+  return { name, bytes: new TextEncoder().encode(value) }
+}
+
+function multipartFile(bytes: Uint8Array, filename: string, mime: string) {
+  return multipartBody([{ name: 'file', filename, mime, bytes }])
 }
 
 function isCancelled(error: unknown, signal?: AbortSignal): boolean {
@@ -414,6 +434,78 @@ async function referenceImageUrls(
   return referenceImageDataUrls(list, signal, onProgress)
 }
 
+function editsPixelSize(ratio: string): string {
+  if (ratio === '9:16' || ratio === '2:3' || ratio === '3:4') return '1024x1536'
+  if (ratio === '1:1' || ratio === '4:5' || ratio === '5:4') return '1024x1024'
+  return '1536x1024'
+}
+
+function missingImageEdits(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /invalid url|404|405|not found|cannot post|no route|接口不存在/i.test(message)
+}
+
+async function imageFromSubmit(
+  json: any,
+  root: string,
+  authorization: string,
+  signal?: AbortSignal,
+  onProgress?: (msg: string) => void
+): Promise<{ blob: Blob; mimeType: string }> {
+  const ready = await mediaFromJson(json, 'image', authorization, signal)
+  if (ready) return ready
+  const taskId = taskIdOf(json)
+  if (!taskId) throw new Error('提交成功但没有返回 task_id')
+  onProgress?.('已提交，正在查询...')
+  return pollTask({ root, taskId, authorization, kind: 'image', signal, onProgress })
+}
+
+/** gpt-image 的参考图必须走编辑接口，把文件本身传上去。文生图接口会丢掉 image_urls。 */
+async function postImageEdits(opts: {
+  root: string
+  authorization: string
+  model: string
+  prompt: string
+  n: number
+  images: Blob[]
+  size: string
+  signal?: AbortSignal
+  onProgress?: (msg: string) => void
+}): Promise<{ blob: Blob; mimeType: string }> {
+  const parts: Array<{ name: string; filename?: string; mime?: string; bytes: Uint8Array }> = [
+    textPart('model', opts.model),
+    textPart('prompt', opts.prompt),
+    textPart('n', String(opts.n)),
+    textPart('size', opts.size),
+    textPart('response_format', 'url')
+  ]
+  for (let i = 0; i < opts.images.length; i++) {
+    if (opts.signal?.aborted) throw new Error('已取消')
+    opts.onProgress?.(`准备参考图 ${i + 1}/${opts.images.length}...`)
+    const file = dataUriToBlob(await referenceDataUrl(opts.images[i]))
+    const bytes = new Uint8Array(await file.blob.arrayBuffer())
+    if (bytes.byteLength > 20 * 1024 * 1024) throw new Error('参考图超过 20MB，无法提交')
+    parts.push({
+      name: 'image',
+      filename: `reference-${i + 1}.jpg`,
+      mime: file.mimeType || 'image/jpeg',
+      bytes
+    })
+  }
+  const part = multipartBody(parts)
+  opts.onProgress?.(`提交参考图（${opts.images.length} 张）...`)
+  const resp = await providerHttp(`${opts.root}/v1/images/edits`, {
+    method: 'POST',
+    headers: { Authorization: opts.authorization, Accept: 'application/json' },
+    bodyBase64: part.bodyBase64,
+    contentType: part.contentType,
+    signal: opts.signal,
+    timeoutMs: 180_000
+  })
+  const json = await readJson(resp)
+  return imageFromSubmit(json, opts.root, opts.authorization, opts.signal, opts.onProgress)
+}
+
 export async function apimartGenerateImage(opts: {
   baseUrl?: string
   apiKey: string
@@ -429,38 +521,49 @@ export async function apimartGenerateImage(opts: {
   const root = apimartRoot(opts.baseUrl)
   const authorization = bearer(opts.apiKey)
   const model = pickModel(opts.model, APIMART_IMAGE_MODEL)
-  const imageUrls = await referenceImageUrls(
-    root,
-    authorization,
-    opts.referenceImages || [],
-    15,
-    opts.signal,
-    opts.onProgress
-  )
+  const refs = (opts.referenceImages || []).slice(0, 15)
   const count = Math.max(1, Math.round(Number(opts.n) || 1))
+  const ratio = !opts.aspectRatio || opts.aspectRatio === 'auto' ? '1:1' : concreteAspectRatio(opts.aspectRatio)
+  if (refs.length && /gpt-image/i.test(model)) {
+    const edit = (size: string) =>
+      postImageEdits({
+        root,
+        authorization,
+        model,
+        prompt: opts.prompt,
+        n: count,
+        images: refs,
+        size,
+        signal: opts.signal,
+        onProgress: opts.onProgress
+      })
+    try {
+      return await edit(editsPixelSize(ratio))
+    } catch (error) {
+      if (isCancelled(error, opts.signal)) throw error
+      const message = error instanceof Error ? error.message : String(error ?? '')
+      if (/size|尺寸/.test(message)) return await edit(ratio)
+      if (!missingImageEdits(error)) throw error
+      opts.onProgress?.('编辑接口不可用，改为在生成请求里带上参考图...')
+    }
+  }
+  const imageUrls = await referenceImageUrls(root, authorization, refs, 15, opts.signal, opts.onProgress)
   const body: Record<string, unknown> = {
     model,
     prompt: opts.prompt,
     n: count,
-    size: !opts.aspectRatio || opts.aspectRatio === 'auto' ? '1:1' : concreteAspectRatio(opts.aspectRatio),
+    size: ratio,
     resolution: imageResolution(opts.resolution)
   }
-  if (imageUrls.length) body.image_urls = imageUrls
-  opts.onProgress?.(imageUrls.length ? '提交图生图任务...' : '提交文生图任务...')
+  if (imageUrls.length) {
+    body.image = imageUrls
+    body.image_urls = imageUrls
+  }
+  opts.onProgress?.(
+    imageUrls.length ? `提交图生图任务（${imageUrls.length} 张参考）...` : '提交文生图任务...'
+  )
   const json = await postJson(root, '/v1/images/generations', authorization, body, opts.signal)
-  const ready = await mediaFromJson(json, 'image', authorization, opts.signal)
-  if (ready) return ready
-  const taskId = taskIdOf(json)
-  if (!taskId) throw new Error('提交成功但没有返回 task_id')
-  opts.onProgress?.('已提交，正在查询...')
-  return pollTask({
-    root,
-    taskId,
-    authorization,
-    kind: 'image',
-    signal: opts.signal,
-    onProgress: opts.onProgress
-  })
+  return imageFromSubmit(json, root, authorization, opts.signal, opts.onProgress)
 }
 
 export async function apimartGenerateVideo(opts: {
