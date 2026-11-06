@@ -716,7 +716,7 @@ async function optimizeVideoPrompt() {
     } else {
       return
     }
-    toast.success('已按 H3 格式优化提示词')
+    toast.success('已优化提示词')
   } catch (e: any) {
     toast.error(friendlyAiError(e) || '优化失败')
   } finally {

@@ -337,6 +337,16 @@ function multipartFile(bytes: Uint8Array, filename: string, mime: string) {
   }
 }
 
+function isCancelled(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  const name = error instanceof Error ? error.name : ''
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return name === 'AbortError' || /已取消|任务已取消/i.test(message)
+}
+
+/** 这个地址没有上传接口时记住，后面的参考图不再重复打它。 */
+const uploadUnsupported = new Set<string>()
+
 async function uploadReferenceImage(
   root: string,
   authorization: string,
@@ -361,7 +371,22 @@ async function uploadReferenceImage(
   return url
 }
 
-async function uploadReferenceImages(
+async function referenceImageDataUrls(
+  blobs: Blob[],
+  signal?: AbortSignal,
+  onProgress?: (msg: string) => void
+): Promise<string[]> {
+  const urls: string[] = []
+  for (let i = 0; i < blobs.length; i++) {
+    if (signal?.aborted) throw new Error('已取消')
+    onProgress?.(`准备参考图 ${i + 1}/${blobs.length}...`)
+    urls.push(await referenceDataUrl(blobs[i]))
+  }
+  return urls
+}
+
+/** 先走上传接口。接口不存在或上传失败时，改为把图直接交给生成接口。 */
+async function referenceImageUrls(
   root: string,
   authorization: string,
   blobs: Blob[],
@@ -370,12 +395,23 @@ async function uploadReferenceImages(
   onProgress?: (msg: string) => void
 ): Promise<string[]> {
   const list = blobs.slice(0, limit)
-  const urls: string[] = []
-  for (let i = 0; i < list.length; i++) {
-    onProgress?.(`上传参考图 ${i + 1}/${list.length}...`)
-    urls.push(await uploadReferenceImage(root, authorization, list[i], signal))
+  if (!list.length) return []
+  if (!uploadUnsupported.has(root)) {
+    try {
+      const urls: string[] = []
+      for (let i = 0; i < list.length; i++) {
+        if (signal?.aborted) throw new Error('已取消')
+        onProgress?.(`上传参考图 ${i + 1}/${list.length}...`)
+        urls.push(await uploadReferenceImage(root, authorization, list[i], signal))
+      }
+      return urls
+    } catch (error) {
+      if (isCancelled(error, signal)) throw error
+      uploadUnsupported.add(root)
+      onProgress?.('上传接口不可用，改为直接提交参考图...')
+    }
   }
-  return urls
+  return referenceImageDataUrls(list, signal, onProgress)
 }
 
 export async function apimartGenerateImage(opts: {
@@ -393,7 +429,7 @@ export async function apimartGenerateImage(opts: {
   const root = apimartRoot(opts.baseUrl)
   const authorization = bearer(opts.apiKey)
   const model = pickModel(opts.model, APIMART_IMAGE_MODEL)
-  const imageUrls = await uploadReferenceImages(
+  const imageUrls = await referenceImageUrls(
     root,
     authorization,
     opts.referenceImages || [],
@@ -451,7 +487,7 @@ export async function apimartGenerateVideo(opts: {
   const duration = videoSeconds(model, opts.duration)
   let taskId = String(opts.resumeTaskId || '').trim()
   if (!taskId) {
-    const imageUrls = await uploadReferenceImages(
+    const imageUrls = await referenceImageUrls(
       root,
       authorization,
       opts.images || [],
