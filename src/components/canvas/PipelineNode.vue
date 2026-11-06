@@ -653,7 +653,7 @@ async function optimizePrompt(ev?: Event) {
   optimizingPrompt.value = true
   try {
     await optimizeShotVideoPrompt(shot.value)
-    toast.success('已按 H3 格式优化提示词')
+    toast.success('已优化提示词')
   } catch (e: any) {
     toast.error(friendlyAiError(e) || '优化失败')
   } finally {
@@ -1992,8 +1992,8 @@ const cropStyle = computed(() => ({
   left: 50%;
   top: calc(100% + 8px);
   z-index: 5;
-  width: 400px;
-  min-width: 400px;
+  width: 800px;
+  min-width: 800px;
   transform: translateX(-50%);
   transform-origin: 50% 0;
   overflow: visible;

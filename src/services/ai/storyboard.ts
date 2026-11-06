@@ -12,7 +12,6 @@ import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './clie
 import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } from './abort'
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
-import { getSkillBody } from '@/skills'
 import { directorPlaybookText, importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { getLlmConfig, getVideoPromptStyle } from './runtime'
 import {
@@ -3192,11 +3191,6 @@ const PLAY_MARKDOWN_SPEC = `playMarkdown 必须是能拍、能拆镜的完整剧
 - 带货/口播：主持人和产品也要写进人物；口播原词放进对白，但场面仍要写清在哪、看着什么、手里拿什么。
 - 不要机械一场一句。同一意图的连续对白留在同一场；有交流的场必须有对白往来，不能整场哑巴。`
 
-const SCREENWRITER_LANDING = `写故事时必须遵循「AI 短剧与 AI 短电影编剧」手册：先锁定故事引擎，再按节拍写，遵守改编硬约束、AI 制作约束、逐场规则、台词规则和成稿自检。
-交付物落到本产品剧本结构里：一句话故事、对抗引擎、完整梗概写入「故事背景」；人物小传写入「## 人物」（每人含欲望、恐惧、关系、弧光、外形识别点和跨场状态）；场景与道具写入「## 环境与场景」；节拍/分集钩子写入情绪线；完整剧本写入分场（每场含场次任务）；连续性写入人物状态与场间承接。
-分场标题仍用「## 场景N｜标题」和「内景或外景｜地点｜天气时辰」，对白用「**人物名：**」加原词。场次内部按编剧手册写目标/阻力/结果、现在时可见动作和克制镜头，不要改成无法提炼的格式。
-硬性禁止：把传说/IP 压成两人高潮切片；把「控制角色数量」理解成删除对手和关键亲人；用「本片从某一帧开始」代替完整梗概；把短剧/短电影写成默片或把前情塞进成年旁白。`
-
 /**
  * 目标成片时长 → 剧本规模约束。
  * 这是控制分镜数量的最上游闸门：剧本写多长，后面就拆多少个镜。
@@ -3211,159 +3205,65 @@ function playScaleBrief(targetSec: number | undefined): string {
 }
 
 async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayDraftResult; model?: string }> {
-  const directorPlaybook = directorPlaybookText()
-  const screenwriterPlaybook = getSkillBody('ai-short-film-screenwriter')
-  const look = lookFromTexts(input.style, input.topic, input.content, input.keywords)
-  const styleCn = styleLabel(look.style)
-  const mediumPhrase = extractUserMediumPhrase(
-    input.topic,
-    input.content,
-    ...(input.keywords ?? [])
-  )
   const continueMode = input.playMode === 'continue'
   const existingPlay = continueMode ? (input.content || '').trim() : ''
   const hint = (input.continueHint || '').trim()
   const targetSec =
     Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content, hint)
   const scaleBrief = playScaleBrief(targetSec)
-
-  const messages: LLMMessage[] = continueMode
-    ? [
-        {
-          role: 'system',
-          content: `${screenwriterPlaybook}
-
-${SCREENWRITER_LANDING}
-
-${directorPlaybook}
-
-${NARRATIVE_CONTINUITY_RULES}
-${SPEAKER_STAGING_RULES}
-
-你这一步是**续写剧本**，不是重写。
-- 必须保留已有标题、故事背景、人物、环境与场景和已经写过的场次原文，禁止删场、合并场、改写已演过的对白。
-- 新人物补进「## 人物」，新地点补进「## 环境与场景」。
-- 「## 故事背景」「## 本章情绪线」可改成覆盖到新结局，但前面已经发生的事不能改口。
-- 从已有最后一场之后接着写「## 场景N｜标题」。禁止把新场压成口播/画面/时长四格。
-- 默认再写 2–3 场；用户指定场数或情节点时按用户的来。
-${PLAY_MARKDOWN_SPEC}
-- 说话镜头先看动作、空间关系、环境信息和情绪节奏，再决定景别。表情是重点时可以收近；关系、动作或环境更重要时保留中景、双人或多人同框。禁止把所有说话镜头模板化为特写，并明确谁在说、其他人怎么反应。
-- 不要输出 subjects/scenes/shots JSON。
-
-【输出 JSON】
-{
-  "topic": "<沿用或微调短标题>",
-  "playMarkdown": "<完整 Markdown 剧本：旧内容 + 新场，结构不变>",
-  "aesthetic": "<一两句人话，全片味道>",
-  "styleBrief": "<这片图啥、凭什么不划走>",
-  "colorPalette": "<能看见的颜色>",
-  "lightingNote": "<时辰和光从哪来>"
-}
-
-画风「${mediumPhrase || styleCn}」融进新场画面。只输出合法 JSON。`
-        },
-        {
-          role: 'user',
-          content: `在下面这份已经写好的剧本后面续写。保留原文，只往后加。
-
-主题：
-"""
-${input.topic || '（未填）'}
-"""
-
-续写方向：
-"""
-${hint || '顺着已经发生的事再写 2–3 场，把故事往下推，不要重讲已经演过的。'}
-"""
-
-当前完整剧本：
-"""
-${existingPlay || '（空）'}
-"""
-比例：${input.aspectRatio}；单场节奏参考约 ${input.shotDuration} 秒。${scaleBrief ? `\n${scaleBrief}\n续写后全片仍要落在上述时长预算内，不要因为续写而把规模撑大。` : ''}`
-        }
-      ]
-    : [
-        {
-          role: 'system',
-          content: `${screenwriterPlaybook}
-
-${SCREENWRITER_LANDING}
-
-${directorPlaybook}
-
-${NARRATIVE_CONTINUITY_RULES}
-${SPEAKER_STAGING_RULES}
-
-你这一步**只写完整剧本**，不要输出 subjects/scenes/shots JSON，也不要写英文 videoPrompt。用户给定目标成片时长时，它是硬约束：先按时长定场次、正文长度和对白句数，再写故事，不要先写长再指望后面砍。
-目标：一份能直接给人读的 Markdown 剧本，方便用户改字；下一轮才会从剧本提炼画布节点。
-传说/IP/完整短片必须写全对抗引擎与关键人物，禁止压成两人高潮切片。有人物交流的场必须有出镜对白，禁止默片，禁止用成年旁白复述前情。
-
-【输出 JSON】
-{
-  "topic": "<短标题>",
-  "playMarkdown": "<完整 Markdown 剧本，见下方结构>",
-  "aesthetic": "<一两句人话，全片味道>",
-  "styleBrief": "<这片图啥、凭什么不划走>",
-  "colorPalette": "<能看见的颜色>",
-  "lightingNote": "<时辰和光从哪来>"
-}
-
-playMarkdown 必须用简体中文。
-${PLAY_MARKDOWN_SPEC}
-说话构图：按画面感、动作、空间关系和情绪节奏选择景别。需要强调细微表情时可以中近景、近景或特写；需要保留人物关系、动作路径或环境信息时应继续使用中景、双人或多人同框。不要因为人物开口就机械切特写，但要明确当前谁说话、其他人如何反应，不能所有人一起张嘴。
-事实保真：带货/口播不新增原文没有的价格、功效。改编传说或完整短片时，母题里构成因果的人物（父母、对手、导师、执法者）必须建档并进入剧情，不算「新增人物关系」。对白像人在场上说话，不要旁白腔，不要默片。画风「${mediumPhrase || styleCn}」融进画面描述，不要单独堆技法套话。
-只输出合法 JSON。`
-        },
-        {
-          role: 'user',
-          content: `把下面的主题/草稿写成完整剧本（只要 Markdown 剧本，不要拆画布节点）。
-必须先写故事背景（一句话故事、对抗引擎、完整梗概）、人物（主角+对手+关键亲人；每人含欲望/恐惧/弧光/视觉锚点）、环境与场景，再写分场（每场有场次任务和对白）。禁止口播/画面/时长四格表。禁止把传说/IP 压成两人高潮切片。禁止默片：相认、唤名、对峙、问答必须写出可念的对白往来。
-
-主题：
-"""
-${input.topic || '（未填）'}
-"""
-
-草稿：
-"""
-${input.content?.trim() || '（没写正文）'}
-"""
-${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
-比例：${input.aspectRatio}。${scaleBrief ? `\n${scaleBrief}` : `建议时长按内容来，单场不必强行 ${input.shotDuration} 秒。`}`
-        }
-      ]
-
   const { model: cfgModel } = getLlmConfig()
   const model = resolvePlayModel(input) || cfgModel
   log(`→ ${continueMode ? '续写剧本' : '写剧本'} LLM: ${model}`)
   const resp = await callLLM({
-    messages,
-    model,
-    temperature: continueMode ? 0.5 : 0.45,
-    jsonMode: true,
-    maxTokens: 24576,
-    signal: input.signal,
-    timeoutMs: PLAY_LLM_TIMEOUT_MS
-  })
+    disableThinking: true,
+    messages: [
+      {
+        role: 'system',
+        content: `你是编剧。根据用户的要求和已有内容，直接写出剧本。
+只输出 Markdown 正文，不要 JSON，不要解释，不要自检。
+用简体中文。先写标题、故事背景、人物、环境与场景，再写分场。分场标题用「## 场景N｜标题」，对白用「**人物名：**」。
+用户给了时长，就按这个时长写完。有交流的地方写出能念的对白。不要新增用户没提的价格和功效。`
+      },
+      {
+        role: 'user',
+        content: continueMode
+          ? `在已有剧本后面续写。保留已有场次原文，只往后加。
 
-  const raw = await parseJsonWithModelRepair(resp.content, input, continueMode ? '续写剧本' : '剧本草稿')
-  let playMarkdown = String(raw?.playMarkdown || raw?.play || raw?.markdown || '').trim()
-  if (continueMode) {
-    playMarkdown = mergeContinuedPlay(existingPlay, playMarkdown)
-  }
-  if (playMarkdown.length < 80) {
-    throw new Error('剧本过短或未返回 playMarkdown，请重试')
-  }
+续写方向：
+${hint || '顺着已经发生的事再写下去。'}
+
+当前剧本：
+${existingPlay || '（空）'}
+${scaleBrief}`
+          : `按下面的要求写完整剧本。
+
+要求：
+${input.topic || '（未填）'}
+
+已有内容：
+${input.content?.trim() || '（没有）'}
+${input.keywords?.length ? `关键词：${input.keywords.join('、')}` : ''}
+比例：${input.aspectRatio || '16:9'}
+${scaleBrief}`
+      }
+    ],
+    model,
+    temperature: 0.5,
+    maxTokens: 4000,
+    timeoutMs: 90_000,
+    signal: input.signal
+  })
+  let playMarkdown = String(resp.content || '')
+    .replace(/^```(?:markdown|md|text)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim()
+  if (continueMode) playMarkdown = mergeContinuedPlay(existingPlay, playMarkdown)
+  if (playMarkdown.length < 40) throw new Error('模型没有返回剧本')
   const result: PlayDraftResult = {
-    topic: String(raw?.topic || input.topic || '短视频剧本').trim() || '短视频剧本',
-    playMarkdown,
-    aesthetic: raw?.aesthetic ? String(raw.aesthetic) : undefined,
-    styleBrief: raw?.styleBrief ? String(raw.styleBrief) : undefined,
-    colorPalette: raw?.colorPalette ? String(raw.colorPalette) : undefined,
-    lightingNote: raw?.lightingNote ? String(raw.lightingNote) : undefined
+    topic: playMarkdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || input.topic?.trim() || '短视频剧本',
+    playMarkdown
   }
-  return { result: await fillPlayBibleIfThin(result, input, model), model: resp.model ?? model }
+  return { result, model: resp.model ?? model }
 }
 
 /** 第一步：只生成完整剧本 Markdown，不拆节点 */

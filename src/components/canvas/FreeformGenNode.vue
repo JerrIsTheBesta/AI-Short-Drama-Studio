@@ -506,7 +506,7 @@ async function optimizePrompt(ev?: Event) {
   optimizingPrompt.value = true
   try {
     await optimizeFreeformVideoPrompt(props.id)
-    toast.success('已按 H3 格式优化提示词')
+    toast.success('已优化提示词')
   } catch (e: unknown) {
     toast.error(friendlyAiError(e) || '优化失败')
   } finally {
@@ -682,7 +682,7 @@ function removeSelf() {
             isVideo
               ? videoModel === 'wan-prime'
                 ? '写视频提示词。多张参考图时可用图1、图2指代人物/场景…'
-                : '写视频提示词，描述动作、镜头和声音。点「优化提示词」会编成 H3 格式。'
+                : '写视频提示词，描述动作、镜头和声音。点「优化提示词」会直接改写成正文。'
               : '写提示词，可加参考图做图生图…'
           "
         />
@@ -964,8 +964,8 @@ function removeSelf() {
   left: 0;
   top: calc(100% + 8px);
   z-index: 5;
-  width: 420px;
-  min-width: 280px;
+  width: 840px;
+  min-width: 560px;
   transform-origin: 0 0;
   overflow: visible;
   background: var(--color-bg-1);

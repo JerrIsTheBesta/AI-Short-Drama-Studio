@@ -27,6 +27,8 @@ export interface LLMRequest {
   temperature?: number
   maxTokens?: number
   jsonMode?: boolean
+  /** 豆包会先思考再回答。只要正文时关掉，直接返回文本。 */
+  disableThinking?: boolean
   signal?: AbortSignal
   timeoutMs?: number
 }
@@ -201,6 +203,9 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   if (req.jsonMode) {
     body.response_format = { type: 'json_object' }
   }
+  if (req.disableThinking && /volces\.com|doubao/i.test(`${baseUrl} ${model}`)) {
+    body.thinking = { type: 'disabled' }
+  }
 
   const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`
 
@@ -280,6 +285,10 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       throw new Error(
         `当前视觉模型不支持看图。请到设置页把「视觉理解」换成能看图的模型。`
       )
+    }
+    if (!ok && body.thinking && /thinking|unknown|unexpected|extra|invalid/i.test(errText)) {
+      delete body.thinking
+      ;({ ok, status, errText, json } = await post(body))
     }
     if (!ok) throw llmHttpError(status, errText, baseUrl, req.provider)
     let data = await json()
