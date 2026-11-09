@@ -61,6 +61,14 @@
         "nsis"
       ]
     },
+    "mac": {
+      "icon": "logo.icns",
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
     "nsis": {
       "installerIcon": "logo.ico",
       "uninstallerIcon": "logo.ico",

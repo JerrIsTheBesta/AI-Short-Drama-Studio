@@ -405,7 +405,8 @@ function slugName(name: string, id: string) {
 }
 
 function resolveAppIcon() {
-  const names = ['logo.ico', 'logo.png', 'icon.png']
+  const names =
+    process.platform === 'win32' ? ['logo.ico', 'logo.png'] : ['logo.png', 'icon.png']
   const dirs = [
     process.resourcesPath,
     path.join(mainDir, '..'),

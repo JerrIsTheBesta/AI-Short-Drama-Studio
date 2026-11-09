@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 export type DesktopAPI = {
   isDesktop: true
+  platform: string
   getRoot: () => Promise<string>
   setRoot: (root: string) => Promise<string>
   getVersion: () => Promise<string>
@@ -65,6 +66,7 @@ export type DesktopAPI = {
 
 const api: DesktopAPI = {
   isDesktop: true,
+  platform: process.platform,
   getRoot: () => ipcRenderer.invoke('desktop:getRoot'),
   setRoot: (root) => ipcRenderer.invoke('desktop:setRoot', root),
   getVersion: () => ipcRenderer.invoke('desktop:getVersion'),

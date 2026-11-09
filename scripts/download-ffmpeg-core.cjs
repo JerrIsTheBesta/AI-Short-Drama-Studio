@@ -1,5 +1,5 @@
 /**
- * 下载 FFmpeg core 到 public/ffmpeg/
+ * 下载 FFmpeg core 到 src/assets/ffmpeg/
  *
  * 用法：
  *   node scripts/download-ffmpeg-core.cjs
@@ -31,7 +31,7 @@ const SOURCES = {
     files: ['ffmpeg-core.js', 'ffmpeg-core.wasm']
   },
   npmmirror: {
-    base: `https://registry.npmmirror.com/@ffmpeg/core@${CORE_VERSION}/files/dist/esm`,
+    base: `https://registry.npmmirror.com/@ffmpeg/core/${CORE_VERSION}/files/dist/esm`,
     files: ['ffmpeg-core.js', 'ffmpeg-core.wasm']
   }
 }
@@ -146,12 +146,16 @@ async function main() {
   // ESM 版 core 必须叫 .esm.js，否则 vite 会按 UMD 处理
   const esmSrc = path.join(OUT_DIR, 'ffmpeg-core.js')
   const esmDest = path.join(OUT_DIR, 'ffmpeg-core.esm.js')
-  if (fs.existsSync(esmSrc) && !fs.existsSync(esmDest)) {
-    fs.renameSync(esmSrc, esmDest)
-    console.log(`  ↻ ffmpeg-core.js → ffmpeg-core.esm.js`)
+  if (fs.existsSync(esmSrc)) {
+    if (fs.existsSync(esmDest)) {
+      fs.unlinkSync(esmSrc)
+    } else {
+      fs.renameSync(esmSrc, esmDest)
+      console.log(`  ↻ ffmpeg-core.js → ffmpeg-core.esm.js`)
+    }
   }
 
-  console.log(`\n✅ 完成！文件已放到 public/ffmpeg/`)
+  console.log(`\n✅ 完成！文件已放到 src/assets/ffmpeg/`)
   console.log(`\n下一步：重启 npm run dev，FFmpeg 会优先用本地文件。\n`)
 }
 
