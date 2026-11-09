@@ -520,7 +520,7 @@ function navReady(id: SettingsSection) {
             </div>
           </section>
 
-          <section v-if="isDesktop()" class="panel">
+          <section v-if="isDesktop() && desktop().platform === 'win32'" class="panel">
             <h2>本机文件权限</h2>
             <p class="card-desc">
               选参考图、视频素材时走的是系统文件框。正常情况下不需要额外授权；如果被系统拦住了，点下面的按钮放行一次。

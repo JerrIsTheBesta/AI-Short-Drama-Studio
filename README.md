@@ -98,16 +98,22 @@
 
 ### 环境要求
 
-- Node.js 20+
+- Node.js 22.12+
 - npm 10+
-- Windows 10/11（Electron 桌面版）
+- Windows 10/11 或 macOS（Electron 桌面版）
 
-### 安装
+### 安装并运行桌面版
 
 ```bash
 git clone https://github.com/JerrIsTheBesta/AI-Short-Drama-Studio.git
 cd AI-Short-Drama-Studio
-npm install
+npm ci
+```
+
+如果 macOS 上安装 Electron 时遇到网络或代理下载错误，可通过 Electron 镜像并启用 Node 24.5+ 的系统代理支持：
+
+```bash
+NODE_OPTIONS=--use-env-proxy ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm ci
 ```
 
 下载本地 FFmpeg 核心：
@@ -120,25 +126,27 @@ node scripts/download-ffmpeg-core.cjs
 node scripts/download-ffmpeg-core.cjs --source=npmmirror
 ```
 
-启动开发环境：
+启动 Electron 桌面开发版：
 
 ```bash
 npm run dev
 ```
 
-只运行 Web 版本：
+如需单独运行 Web 版本：
 
 ```bash
 npm run web
 ```
 
-## 构建 Windows 安装包
+## 构建桌面安装包
+
+在 macOS 上运行以下命令会为当前 Mac 芯片架构生成 `.dmg` 和 `.zip`；在 Windows 上会生成 `.exe` 安装包：
 
 ```bash
 npm run electron:build
 ```
 
-安装包会生成到 `release/`。构建流程会自动执行类型检查、源码凭据扫描、生产构建和打包内容检查。
+安装包会生成到 `release/`。macOS 首次打开未签名应用时，按住 Control 点击应用并选择“打开”。构建流程会自动执行类型检查、源码凭据扫描、生产构建和打包内容检查。
 
 也可以分别执行：
 

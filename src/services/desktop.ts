@@ -1,5 +1,6 @@
 export type DesktopAPI = {
   isDesktop: true
+  platform: string
   getRoot: () => Promise<string>
   setRoot: (root: string) => Promise<string>
   getVersion: () => Promise<string>
