@@ -19,6 +19,7 @@ import { pickScriptFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
 import { parseScriptDoc, serializeScriptDoc, toEpisodes, updateEpisode } from '@/utils/scriptEpisodes'
 import { callLLM } from '@/services/ai/client'
+import { assertScriptCompletion } from '@/services/ai/scriptCompletion'
 import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference, scriptReferenceBrief } from '@/services/ai/scriptReference'
 import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { desktop, isDesktop } from '@/services/desktop'
@@ -358,13 +359,14 @@ async function writeStoryPlan(brief: string, revision = false) {
   addWritingMessage(id, { role: 'user', content: request, episode: -1, time: Date.now() })
   try {
     const resp = await callLLM({
-      model: llmModel.value, disableThinking: true, temperature: 0.6, maxTokens: 6000,
-      timeoutMs: 120_000, signal: controller.signal,
+      model: llmModel.value, disableThinking: true, temperature: 0.6, useProviderOutputLimit: true,
+      timeoutMs: 300_000, signal: controller.signal,
       messages: [
         { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。先为整部剧策划大纲与分集目录，不写剧本正文。尊重用户指定的集数、时长、题材和结局；未指定集数时先规划适合短剧的 8 集，并在大纲中说明可修改。每集明确戏剧任务、冲突变化和下集钩子，人物关系和事件因果前后一致。只输出合法 JSON：{"outline":"故事梗概、人物设定及关系、世界规则和情绪主线","episodes":[{"title":"第1集标题","summary":"本集推进与结尾"}]}。不要用 Markdown 代码块。\n${scriptReferenceBrief(settings.config.scriptReferenceType, request)}` },
         { role: 'user', content: `${revision && oldPlan ? `原大纲：${oldPlan.outline}\n原分集目录：${JSON.stringify(oldPlan.episodes)}\n修改要求：` : '创作需求：'}${request}` }
       ]
     })
+    assertScriptCompletion(resp)
     const parsed = parseJsonRobust(resp.content)
     const outline = typeof parsed?.outline === 'string' ? parsed.outline.trim() : ''
     const rows = Array.isArray(parsed?.episodes) ? parsed.episodes : []
@@ -402,11 +404,12 @@ async function writePlannedEpisode() {
   const controller = startWriting()
   addWritingMessage(id, { role: 'assistant', content: `开始写第 ${index + 1} 集：${episode.title}。完成后会等你确认。`, episode: index, time: Date.now() })
   try {
-    const resp = await callLLM({ model: llmModel.value, disableThinking: true, temperature: 0.6, maxTokens: 5000, timeoutMs: 120_000, signal: controller.signal,
+    const resp = await callLLM({ model: llmModel.value, disableThinking: true, temperature: 0.6, useProviderOutputLimit: true, timeoutMs: 300_000, signal: controller.signal,
       messages: [
         { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文，包含具体场次、行动与自然对白。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。场次使用三级标题，禁止输出一级或二级标题。只输出本集 Markdown 正文。\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
         { role: 'user', content: `用户创作需求：${plan.brief}\n已确认大纲：${plan.outline}\n完整分集目录：${JSON.stringify(plan.episodes)}\n已完成前文${prior.length > 30000 ? '（仅显示最近部分，更早剧情请参考分集目录）' : ''}：\n${prior.slice(-30000) || '（第一集）'}\n当前要写：第 ${index + 1} 集 ${episode.title}\n本集任务：${episode.summary}\n${existing ? `需要替换的原正文：\n${existing}` : ''}` }
       ] })
+    assertScriptCompletion(resp)
     const body = String(resp.content || '').replace(/^```(?:markdown|md|text)?\s*/i, '').replace(/\s*```$/, '').trim().replace(/^#{1,2}\s+/gm, '### ')
     if (!body) throw new Error('模型没有返回正文')
     if (controller.signal.aborted || activeId.value !== id || markdown.value !== snapshot) throw new Error('剧本已切换或正文发生变化，结果未覆盖原文，请重试。')
@@ -510,6 +513,8 @@ async function writeCurrentEpisode() {
     const resp = await callLLM({
       model: llmModel.value,
       disableThinking: true,
+      useProviderOutputLimit: true,
+      timeoutMs: 300_000,
       temperature: 0.7,
       signal: episodeAbort.signal,
       messages: [
@@ -524,6 +529,7 @@ async function writeCurrentEpisode() {
         }
       ]
     })
+    assertScriptCompletion(resp)
     const text = String(resp.content || '').trim()
     if (!text) throw new Error('模型没有返回内容')
     if (episodeAbort.signal.aborted) throw new Error('已取消')

@@ -26,6 +26,8 @@ export interface LLMRequest {
   model?: string
   temperature?: number
   maxTokens?: number
+  /** 不发送 max_tokens，由服务商和模型决定输出上限。 */
+  useProviderOutputLimit?: boolean
   jsonMode?: boolean
   /** 豆包会先思考再回答。只要正文时关掉，直接返回文本。 */
   disableThinking?: boolean
@@ -36,6 +38,7 @@ export interface LLMRequest {
 export interface LLMResponse {
   content: string
   model: string
+  finishReason?: string
   usage?: {
     promptTokens: number
     completionTokens: number
@@ -218,9 +221,9 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
   const body: Record<string, unknown> = {
     model,
     messages: req.messages,
-    temperature: req.temperature ?? 0.7,
-    max_tokens: req.maxTokens ?? (withImages ? 8192 : 4000)
+    temperature: req.temperature ?? 0.7
   }
+  if (!req.useProviderOutputLimit) body.max_tokens = req.maxTokens ?? (withImages ? 8192 : 4000)
   if (req.jsonMode) {
     body.response_format = { type: 'json_object' }
   }
@@ -354,6 +357,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     return {
       content,
       model: data.model ?? model,
+      finishReason: data.choices?.[0]?.finish_reason ?? undefined,
       usage: data.usage
         ? {
             promptTokens: data.usage.prompt_tokens,

@@ -9,6 +9,7 @@
  */
 
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
+import { assertScriptCompletion } from './scriptCompletion'
 import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } from './abort'
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
@@ -3284,10 +3285,11 @@ ${scaleBrief}`
     ],
     model,
     temperature: 0.5,
-    maxTokens: 4000,
-    timeoutMs: 90_000,
+    useProviderOutputLimit: true,
+    timeoutMs: 300_000,
     signal: input.signal
   })
+  assertScriptCompletion(resp)
   let playMarkdown = String(resp.content || '')
     .replace(/^```(?:markdown|md|text)?\s*/i, '')
     .replace(/\s*```$/, '')
