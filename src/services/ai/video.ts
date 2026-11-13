@@ -1162,6 +1162,9 @@ async function realZealmanVideo(
   }
   if (!workflow) throw new Error(`[video] 未识别的 Zealman 工作流：${cfg.workflowId || '空'}`)
 
+  if (workflow.mode !== 'fl2va' && [input.imageBlob, ...(input.referenceImages || [])].filter(Boolean).length > workflow.maxImages) {
+    throw new Error(`[video] 当前工作流最多支持 ${workflow.maxImages} 张参考图，请减少参考图后再生成；不能静默丢弃图片，否则人物编号会失效。`)
+  }
   const blobs = workflow.mode === 'fl2va'
     ? [input.imageBlob, input.lastFrameBlob].filter((item): item is Blob => Boolean(item))
     : [input.imageBlob, ...(input.referenceImages || [])]

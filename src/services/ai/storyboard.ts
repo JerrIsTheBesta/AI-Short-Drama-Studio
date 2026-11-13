@@ -10,6 +10,7 @@
 
 import { callLLM, getAIMode, type LLMMessage, type LLMContentPart } from './client'
 import { assertScriptCompletion } from './scriptCompletion'
+import { dialogueVerbatimIssues } from '@/utils/dialogueVerbatim'
 import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } from './abort'
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
@@ -501,6 +502,7 @@ const NARRATIVE_CONTINUITY_RULES = `
 8. 不用旁白代替本集本应看见的关键过程，也不为了补过程虚构用户未要求的新事实。`
 
 const SPEAKER_STAGING_RULES = `
+【对白原文锁定】已有剧本是台词的唯一来源。voiceover 必须逐字保留原台词、说话人和先后顺序，不得润色、缩写、换词、补写或把两个人的台词并到一人名下。时长放不下就增加或拆分镜头，不得靠删改台词压缩；videoPrompt 只描述说话时的表演，不另编一份台词。
 【出镜对白与站位】
 1. 开口的人嘴要可读，但不等于他必须正面朝向镜头、站在画面正中。说话者可以在后面、侧面、跪着。
 2. 画面里每一个人都要写进 blocking / eyeline / videoPrompt：在近处还是后面、身体朝哪、眼睛看谁或看什么。没写占位的人会被生成模型摆成合影看镜头。
@@ -904,7 +906,7 @@ function buildShotWorkBatches(play: string, targetBatches?: number): ShotWorkBat
 }
 
 function verbatimSplitRule(verbatim?: boolean): string {
-  if (!verbatim) return ''
+  if (!verbatim) return '【对白原文锁定】只拆分镜，不改已有剧本的台词。逐字保留每句原词、说话人和顺序；时长不足则拆镜，不得删减、润色或改派给其他角色。videoPrompt 只描述表演，台词统一以 voiceover 为准。\n'
   return `【导入剧本 · 只拆不改】这是用户导入的成稿，拆分镜时禁止改写正文。不润色、不补情节、不换说法、不增删对白，也不要把对白改成旁白或把旁白改成对白。voiceover 必须逐字抄原文对白。visualPrompt 和 videoPrompt 只拍摄原文已经写明的人物、动作和场景，禁止添加原文没有的事件、道具、反应或结局。镜头顺序跟原文一致。\n`
 }
 
@@ -2235,6 +2237,7 @@ export function storyboardQualityIssues(
   input: Pick<StoryboardInput, 'content' | 'topic' | 'targetDurationSec' | 'maxShotDuration'>
 ): string[] {
   const issues: string[] = []
+  issues.push(...dialogueVerbatimIssues(input.content || '', result.shots, (result.subjects || []).map((subject) => subject.name)))
   if (!result.shots.length) issues.push('严重：没有生成任何分镜')
   const targetSec = Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
   const shotCap = shotBudgetFromDuration(targetSec, input.maxShotDuration) || 12

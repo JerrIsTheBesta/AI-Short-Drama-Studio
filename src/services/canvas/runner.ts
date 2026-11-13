@@ -95,6 +95,7 @@ import {
 } from '@/types'
 import { canvasReferenceSlotEntries, resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 import { isH3PromptProfile } from './videoPromptProfile'
+import { withVideoReferenceBlock } from '@/utils/videoReferenceBlock'
 
 export type RunProgress = (nodeId: string, msg: string) => void
 export type NodeRunOpts = { hd?: boolean }
@@ -1527,7 +1528,12 @@ export async function generateShotVideo(shot: Shot, onProgress?: (msg: string) =
   const hasKeyframeFrame = packed.some((entry) => entry.kind === 'keyframe')
   const h3Mode = hasKeyframeFrame || hasIdentityRefs || packed.length > 1 ? 'R2VA' : 'I2VA'
   shot = refreshShot(shot.id)
-  const officialPrompt = videoSendPrompt(shot, project.current)
+  const officialPrompt = withVideoReferenceBlock(videoSendPrompt(shot, project.current), packed)
+  if (officialPrompt !== shot.compiledVideoPrompt) {
+    project.setShotVideoPrompt(shot.id, officialPrompt)
+    await project.save()
+    onProgress?.('已按实际参考图顺序更新节点中的图片对应关系')
+  }
   onProgress?.('使用节点上的完整提示词出视频…')
   const slotNames = packed.map((entry, index) =>
     entry.kind === 'character'
@@ -1771,6 +1777,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   if ((currentShot.compiledVideoPrompt || '').trim() !== box || (currentShot.videoPrompt || '').trim() !== performance || JSON.stringify(packVideoRefEntries(collectShotVideoEntries(currentShot, project.current!))) !== JSON.stringify(packed)) {
     throw new Error('优化期间提示词或参考图已变更，请重新优化')
   }
+  compiled = withVideoReferenceBlock(compiled, packed)
   project.setShotVideoPrompt(shot.id, compiled)
   await project.save()
   return compiled

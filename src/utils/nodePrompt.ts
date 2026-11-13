@@ -61,7 +61,8 @@ export function defaultBoardPrompt(shot: Shot, project: Project): string {
 export function defaultShotImagePrompt(shot: Shot, project: Project): string {
   if (!videoRequiresStoryboard(project)) {
     const look = lookFromScript(project.script)
-    return shotKeyframePrompt(shot, look, { aspectRatio: project.settings.aspectRatio })
+    const roster = shotRefRoster(shot, project, collectShotRefIds(shot, project).ids)
+    return [roster, shotKeyframePrompt(shot, look, { aspectRatio: project.settings.aspectRatio })].filter(Boolean).join('\n\n')
   }
   return composeShotImagePrompt(shot, project, (shot.visualPrompt || shot.title).trim())
 }
@@ -145,6 +146,7 @@ export function defaultVideoSendPrompt(shot: Shot, project: Project): string {
   const performance = String(shot.videoPrompt || '').trim()
   const voices = shotVoiceBlock(shot, project)
   return [
+    shotRefRoster(shot, project, packed.map((entry) => entry.id)),
     roster,
     voices,
     `镜头：${shot.title || `第${shot.index + 1}镜`}`,
@@ -208,6 +210,10 @@ export function boardSendPrompt(shot: Shot, project: Project): string {
 }
 
 export function shotImageSendPrompt(shot: Shot, project: Project): string {
+  const stored = shot.imagePrompt?.trim() || ''
+  if (stored && (shot.voiceover || '').split('\n').some((line) => line.trim().length > 6 && stored.includes(line.trim()))) {
+    throw new Error('关键帧提示词仍夹带口播台词。请先在节点详情中重铺提示词，检查图片对应关系后再生成；原提示词未被覆盖。')
+  }
   return ensureStyleLock(shot.imagePrompt?.trim() || defaultShotImagePrompt(shot, project), project)
 }
 

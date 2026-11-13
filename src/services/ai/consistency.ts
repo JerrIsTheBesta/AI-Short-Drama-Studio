@@ -242,20 +242,26 @@ export function shotKeyframePrompt(
 ): string {
   const ar = options?.aspectRatio || '16:9'
   const frame = ar === '9:16' ? '竖版 9:16' : ar === '1:1' ? '方形 1:1' : `横版 ${ar}`
-  const body = (shot.visualPrompt || shot.title).trim()
+  const visualOnly = (text: string) => {
+    let result = text.replace(/<d>[\s\S]*?<\/d>/gi, '')
+    for (const line of (shot.voiceover || '').split('\n').map((item) => item.trim()).filter(Boolean)) {
+      result = result.split(line).join('')
+      const spoken = line.replace(/^[^：:\n]{1,20}[：:]\s*/, '')
+      if (spoken.length > 2) result = result.split(spoken).join('')
+    }
+    return result.trim()
+  }
+  const body = visualOnly(shot.visualPrompt || shot.title)
   const size = shot.shotSize ? `景别：${shot.shotSize}。` : ''
   const blocking = shot.blocking ? `站位：${shot.blocking}。` : ''
   const prop = shot.propFocus && shot.propFocus !== '无' ? `关键道具：${shot.propFocus}。` : ''
   const continuity = shot.continuity ? `动作承接：${shot.continuity}。` : ''
-  const performance = shot.videoPrompt?.trim() ? `动态表演：${shot.videoPrompt.trim()}。` : ''
+  const performance = shot.videoPrompt?.trim() ? `动态表演：${visualOnly(shot.videoPrompt)}。` : ''
   const voiceMode = shot.audioMode ?? 'h3-dialogue'
   const dialogue = shot.voiceover?.trim()
     ? voiceMode === 'h3-voiceover' || voiceMode === 'tts' || voiceMode === 'none'
-      ? `这是画外音镜头。四格里所有出镜人物都必须闭嘴。口播只用来理解情绪，禁止画字幕或气泡：${shot.voiceover.trim()}。`
-      : (() => {
-          const speaker = shot.voiceover.trim().match(/^([^：:\n]{1,12})[：:]/)?.[1]?.trim()
-          return `这是${speaker ? `「${speaker}」` : '当前说话者'}的对白镜头：开口前构图先落到说话者身上。对白发生在动作中段。画面里禁止对白文字或气泡：${shot.voiceover.trim()}。`
-        })()
+      ? '这是画外音镜头。只画人物动作与表情，不绘制对白、字幕或气泡。'
+      : '这是人物交流场景。只通过人物动作、视线与表情表现互动，不绘制台词、字幕或气泡；不要把整场交流都安排给同一个人。'
     : ''
   const camera =
     shot.cameraMovement === 'static'

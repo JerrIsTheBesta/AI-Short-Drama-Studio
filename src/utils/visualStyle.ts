@@ -215,7 +215,7 @@ export function extractUserMediumPhrase(...texts: Array<string | undefined>): st
   }
   for (const m of blob.matchAll(/([\u4e00-\u9fffA-Za-z]{2,8}风)/g)) {
     const w = m[1]
-    if (w && !MEDIUM_STOP.has(w)) open.push(w)
+    if (w && !MEDIUM_STOP.has(w) && !/的风$|起风$|吹风$|阵风$|冷风$|寒风$|晚风$|微风$|被.*风$/.test(w)) open.push(w)
   }
   open.sort((a, b) => b.length - a.length)
   if (open[0]) return open[0]
