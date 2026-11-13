@@ -20,9 +20,9 @@ triggers: 视频,Comfy,H3,配音,口播,图生视频,提示词,优化提示词
 
 ```text
 Speaker lock (these labels are the pictures):
-(S1) is 「阿凯」 / <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-(S2) is 「大斌」 / <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-<Picture 3> is the location 「出租屋」. Lock space, materials, weather and light. One unified place.
+(S1) is Ah Kai / <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+(S2) is Da Bin / <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Picture 3> is the location rental room. Lock space, materials, weather and light. One unified place.
 Only one (S#) speaks at a time, and each person says their own line once. Everyone else keeps their lips completely closed. No overlap, no chorus, no second person repeating the same line.
 ```
 
@@ -30,13 +30,13 @@ Only one (S#) speaks at a time, and each person says their own line once. Everyo
 
 ## 多模态参考的六段
 
-`subject_definitions` 写 `<Subject N> is 「名字」 (S#) in <Picture N>`。下面这段镜头正文放进 `detailed_description`，不要再外包一层 `integrated_multimodal_description`。首尾帧 / 首帧 / 尾帧 / 纯文本才用三段，而且对齐句在三段前面。
+`subject_definitions` 写 `<Subject N> is EnglishName (S#) in <Picture N>`。名字用英文，不要写「中文名」。下面这段镜头正文放进 `detailed_description`，不要再外包一层 `integrated_multimodal_description`。首尾帧 / 首帧 / 尾帧 / 纯文本才用三段，而且对齐句在三段前面。
 
 ```text
 subject_definitions:
-<Subject 1> is 「阿凯」 (S1) in <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-<Subject 2> is 「大斌」 (S2) in <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
-<Subject 3> is 「出租屋」 in <Picture 3>, the location for [Shot 1].
+<Subject 1> is Ah Kai (S1) in <Picture 1>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Subject 2> is Da Bin (S2) in <Picture 2>. Lock face, hair, body, age and outfit. Identity reference only, not the first frame.
+<Subject 3> is the rental room in <Picture 3>, the location for [Shot 1].
 
 summary:
 [reference generation] The target video is one continuous [Shot 1] of <Subject 1> and <Subject 2> in <Subject 3>. Character sheets lock identity only.
@@ -47,7 +47,7 @@ retention_analysis:
 <Subject 3> (appears in [Shot 1]): fully_preserved - space, materials, weather and light from <Picture 3>.
 
 detailed_description:
-[Shot 1] Grounded contemporary comedy, photorealistic live-action, 9:16. Afternoon light through the living-room window. (S1) 「阿凯」 squats at the left sofa, digging through cushions. (S2) 「大斌」 sprawls on the right sofa with a bag of chips. Neither looks into the lens.
+[Shot 1] Grounded contemporary comedy, photorealistic live-action, 9:16. Afternoon light through the living-room window. (S1) Ah Kai squats at the left sofa, digging through cushions. (S2) Da Bin sprawls on the right sofa with a bag of chips. Neither looks into the lens.
 
 [00:00.000–00:01.200]
 Wide view from the doorway. Both mouths stay closed. Chip crunch and cushion rustle only.
@@ -75,11 +75,11 @@ N/A
 - 每句台词只说一次，由它自己的 (S#) 说，单独占一个时间段。
 - 形式固定：`(S1) says: <d>[Chinese] 原词</d>`，紧跟着写另一个人嘴唇闭合。
 - 场记、时长、画风、人物名单都不是台词。
-- 没有对白就写 `No dialogue. No lips moving.`，不要把「无」放进 `<d>`。
+- 没有对白就不要写 dialogue、lips、mouths、voices。不要把「无」放进 `<d>`。
 
 ## 写法
 
-- 动作、机位、光用英文写。中文只留在 `<d>` 和「人名」里。写中文场面会被删掉，最后只剩人物名单。
+- 动作、机位、光、人名、地名都用英文写。中文只留在 `<d>` 台词里。写中文场面或中文名字会被删掉。
 - 写这场戏里真正发生的事：谁在左谁在右、手里拿什么、道具怎么变少。不要写 “Begin with the opening frame” 或 “let the frame breathe”。
 - `overall_soundscape` 写这场的真实声音，例如薯片咔嚓、靠垫哗啦。不要只写 close breath。
 - `non_diegetic_music` 固定 `N/A`。

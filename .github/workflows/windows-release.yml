@@ -66,7 +66,14 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           $files = @(Get-ChildItem -Path release -Recurse -Filter *Setup*.exe | ForEach-Object { $_.FullName })
+          $version = $tag -replace '^v', ''
+          $changelog = Get-Content CHANGELOG.md -Raw -Encoding UTF8
+          $pattern = '(?ms)^##\s+' + [regex]::Escape($version) + '[^\r\n]*\r?\n(.*?)(?=^##\s|\z)'
+          $match = [regex]::Match($changelog, $pattern)
+          if (-not $match.Success) { throw "更新日志中没有版本 $version 的内容" }
+          $notes = $match.Groups[1].Value.Trim()
           gh release create $tag @files `
             --repo '${{ github.repository }}' `
             --title "剧流 Studio $tag" `
-            --generate-notes
+            --notes "$notes"
+          if ($LASTEXITCODE -ne 0) { throw '发布 GitHub Release 失败' }

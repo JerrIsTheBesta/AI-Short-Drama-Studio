@@ -103,6 +103,7 @@ function run(fn: () => void) {
 }
 .controls {
   display: flex;
+  margin-left: auto;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }

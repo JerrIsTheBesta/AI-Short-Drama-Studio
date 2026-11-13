@@ -25,12 +25,104 @@ function isValueStart(ch: string): boolean {
   )
 }
 
+const THINK_TAG = 'think|thinking|reasoning|analysis'
+
+/** 去掉思考标签。没闭合的标签裁到正式稿开始处，裁不到就整段丢掉。 */
+export function stripThinkTags(content: string): string {
+  const closed = new RegExp(`<(?:${THINK_TAG})\\b[^>]*>[\\s\\S]*?<\\/(?:${THINK_TAG})>`, 'gi')
+  const untilDeliverable = new RegExp(
+    `<(?:${THINK_TAG})\\b[^>]*>[\\s\\S]*?(?=(?:subject_definitions|integrated_multimodal_description|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\\s*:|\\[Shot\\s*\\d+\\]|\\{)`,
+    'i'
+  )
+  const unclosed = new RegExp(`<(?:${THINK_TAG})\\b[^>]*>[\\s\\S]*$`, 'i')
+  return String(content || '')
+    .replace(closed, '')
+    .replace(untilDeliverable, '')
+    .replace(unclosed, '')
+}
+
+function isDeliverableLine(line: string): boolean {
+  return (
+    /^(?:subject_definitions|integrated_multimodal_description|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*:/i.test(
+      line
+    ) ||
+    /^\[Shot\s*\d+\]/i.test(line) ||
+    /^\(S\d+\)/.test(line) ||
+    /^<Picture\s*\d+/i.test(line) ||
+    /^<\s*d\s*>/i.test(line) ||
+    /^(?:No dialogue|The camera|The action|Picture \d)/i.test(line) ||
+    line.trim() === '{'
+  )
+}
+
+/** 这一句是在讲自己怎么写，不是给视频模型看的画面。 */
+function isReasoningLine(line: string): boolean {
+  const t = line.trim()
+  if (!t || isDeliverableLine(t)) return false
+  if (
+    /^(?:let me\b|i need to\b|i'll\b|i will\b|the user\b|here(?:'s| is) (?:the|my|a)\b|to summarize\b|thinking\b|analysis\b)/i.test(
+      t
+    )
+  ) {
+    return true
+  }
+  if (/^(?:ok[,.]|okay[,.]|sure[,.]|certainly[,.])/i.test(t) && t.length < 80) return true
+  if (
+    /思考过程|推理过程|分析过程|我的理解|用户要求|用户希望|用户给的|需要输出|应该输出|只输出|不要解释|改写如下|优化如下|以下是优化|下面是优化|最终提示词|最终稿/.test(
+      t
+    )
+  ) {
+    return true
+  }
+  return (
+    /^(?:好的[，,。！]|嗯[，,。]|让我|我来|我会先|我需要先|我先)/.test(t) &&
+    /提示词|用户|镜头稿|英文|格式|优化|改写|输出|JSON|六段/.test(t)
+  )
+}
+
+function prefixLooksLikeReasoning(prefix: string): boolean {
+  const t = prefix.trim()
+  if (!t) return false
+  if (isReasoningLine(t)) return true
+  return /思考过程|let me\b|the user\b|用户要求|我来把|改写如下|优化如下/.test(t)
+}
+
+function trimReasoningParagraphs(text: string): string {
+  const parts = text.split(/\n{2,}/)
+  let start = 0
+  let end = parts.length
+  while (start < end && parts[start].split(/\n/).every((line) => !line.trim() || isReasoningLine(line))) start += 1
+  while (end > start && parts[end - 1].split(/\n/).every((line) => !line.trim() || isReasoningLine(line))) end -= 1
+  const kept = parts.slice(start, end)
+  if (kept.length) {
+    const sentences = kept[0].split(/(?<=[。！？.!?])\s+/)
+    let i = 0
+    while (i < sentences.length && isReasoningLine(sentences[i])) i += 1
+    kept[0] = sentences.slice(i).join(' ').trim()
+    if (!kept[0]) kept.shift()
+  }
+  return kept.join('\n\n').trim()
+}
+
+/**
+ * 模型有时把思考过程写进要保存的提示词。
+ * 只删标签、开头和结尾的自述，不动中间已经写成的镜头正文。
+ */
+export function stripReasoningLeak(text: string): string {
+  let s = stripThinkTags(text)
+  const marker = s.match(
+    /(?:^|\n)\s*(?:subject_definitions|integrated_multimodal_description|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*:|\[Shot\s*\d+\]/i
+  )
+  if (marker && marker.index !== undefined && marker.index > 0) {
+    const prefix = s.slice(0, marker.index)
+    if (prefixLooksLikeReasoning(prefix)) s = s.slice(marker.index)
+  }
+  s = trimReasoningParagraphs(s)
+  return s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 export function stripModelWrappers(content: string): string {
-  return content
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-    .replace(/<analysis>[\s\S]*?<\/analysis>/gi, '')
+  return stripThinkTags(content)
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/g, '')
     .replace(/｛/g, '{')

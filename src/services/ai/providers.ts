@@ -206,7 +206,7 @@ export const VIDEO_PROVIDERS: ProviderPreset[] = [
     name: 'AutoDL 算力',
     hint: 'H3 图生视频走 AutoDL ComfyUI 工作流，不是海螺官方接口。地址填 https://autodl.art，令牌用 AutoDL Token。',
     baseUrl: 'https://autodl.art',
-    models: ['minimax_h3_lightx2v_v5_15s', 'minimax_h3_lightx2v_v5'],
+    models: ['minimax_h3_lightx2v_v5_15s', 'minimax_h3_lightx2v_v5', 'minimax_h3_zm_u24'],
     defaultModel: 'minimax_h3_lightx2v_v5_15s',
     keyPlaceholder: 'AutoDL Token'
   },

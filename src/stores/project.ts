@@ -374,7 +374,7 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
-  /** 视频提示词的唯一写入口：改字即让旧视频任务失效，绝不续跑旧 prompt。 */
+  /** 改提示词只停掉还没回来的旧任务。已经生成的视频留在节点上，下次点生成才按新词重做。 */
   function setShotVideoPrompt(id: ID, value: string) {
     if (!current.value) return
     const idx = current.value.shots.findIndex((s) => s.id === id)
@@ -384,10 +384,7 @@ export const useProjectStore = defineStore('project', () => {
     current.value.shots[idx] = {
       ...shot,
       compiledVideoPrompt: value,
-      videoTaskId: undefined,
-      videoHistoryIds: pushHistory(shot.videoAssetId, '', shot.videoHistoryIds).filter(Boolean),
-      videoAssetId: undefined,
-      status: shot.imageAssetId ? 'image-generated' : 'draft'
+      videoTaskId: undefined
     }
     touch()
   }
@@ -579,17 +576,18 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
-  /** 自由生成节点的 prompt 单一写入口；修改后禁止复用旧任务或旧输出。 */
+  /** 自由生成节点的 prompt 写入口。视频节点改词后保留已有成片；其它节点仍清掉旧输出。 */
   function setCanvasNodePrompt(id: string, prompt: string) {
     const node = current.value?.canvas?.nodes.find((n) => n.id === id)
     if (!node || (node.data.prompt ?? '') === prompt) return
+    const keepVideo = node.type === 'videoGen'
     node.data = {
       ...node.data,
       prompt,
-      outputAssetId: undefined,
+      ...(keepVideo ? {} : { outputAssetId: undefined }),
       videoTaskId: undefined
     }
-    node.status = 'idle'
+    if (!keepVideo) node.status = 'idle'
     node.error = undefined
     touch()
   }

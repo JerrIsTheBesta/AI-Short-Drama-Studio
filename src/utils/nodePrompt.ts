@@ -25,6 +25,7 @@ import {
   subjectsForShot
 } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
+import { containsSceneDramaText } from '@/utils/scriptMarkdown'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 
@@ -186,6 +187,13 @@ export function subjectSendPrompt(subject: Subject, project: Project): string {
 }
 
 export function sceneSendPrompt(scene: Scene, project: Project): string {
+  const saved = scene.platePrompt?.trim()
+  if (saved && /场景锚点图\s*\/\s*四宫格/.test(saved) && containsSceneDramaText(saved)) {
+    throw new Error('场景锚点提示词混入了人物对白或分镜剧情。请在场景分组点击“重新提取”，或手动修改场景和提示词后再生成；原有内容不会自动覆盖。')
+  }
+  if (!saved && containsSceneDramaText(scene.description)) {
+    throw new Error('场景描述混入了人物对白或分镜剧情。请先重新提取场景，或手动修改场景描述后再生成。')
+  }
   return ensureStyleLock(scene.platePrompt?.trim() || defaultScenePlatePrompt(scene, project), project)
 }
 

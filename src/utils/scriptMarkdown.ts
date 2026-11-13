@@ -485,6 +485,12 @@ export interface PlayLocationDraft {
   props?: string
 }
 
+/** 识别误放进场景环境设定的分镜标题或角色对白。 */
+export function containsSceneDramaText(text: string): boolean {
+  const value = String(text || '').replace(/\\\*/g, '*')
+  return /【\s*镜头\s*[：:]|(?:^|\n)\s*#{2,4}\s*场景\s*[一二三四五六七八九十百\d]+|\*\*\s*[\u3400-\u9fff\s]{1,12}[：:]\s*\*\*|(?:^|\n)\s*[\u3400-\u9fff]{2,6}[（(][^）)\n]{0,16}[）)]\s*[：:]/m.test(value)
+}
+
 function normLocationKey(name: string): string {
   return name.replace(/\s+/g, '').replace(/[，,。．.、]/g, '').toLowerCase()
 }
@@ -517,7 +523,8 @@ export function extractLocationsFromPlay(markdown: string): PlayLocationDraft[] 
     if (!name || key.length < 2 || seen.has(key)) return
     if (/^场景[一二三四五六七八九十百0-9]+$/.test(name)) return
     seen.add(key)
-    const desc = (description || `${name}。无人时的空间、地面、建筑和光线按剧本。`).replace(/\s+/g, ' ').trim()
+    const clean = (description || '').trim()
+    const desc = (clean && !containsSceneDramaText(clean) ? clean : `${name}。空间、建筑、地面与光线需依据剧本补充。`).replace(/\s+/g, ' ').trim()
     const mainAnchor = guessLocationAnchor(name, desc)
     out.push({
       name,
@@ -540,7 +547,7 @@ export function extractLocationsFromPlay(markdown: string): PlayLocationDraft[] 
     const heading = sec.body.match(/(?:内景|外景|半外景)\s*｜\s*([^｜\n*]+)\s*｜\s*([^\n*]+)/)
     const loc = heading?.[1]?.trim()
     const weather = heading?.[2]?.trim()
-    add(loc || sec.title, sec.body.slice(0, 600), weather)
+    if (loc) add(loc, '', weather)
   }
 
   return out

@@ -6,7 +6,7 @@ export type { AIMode } from '@/stores/settings'
 export { getAIMode } from './runtime'
 
 import { desktop, isDesktop } from '@/services/desktop'
-import { parseJsonRobust } from '@/utils/jsonRepair'
+import { extractJsonText, parseJsonRobust, stripReasoningLeak, stripThinkTags } from '@/utils/jsonRepair'
 import { mockLLM } from './mock'
 import { getAIMode, getLlmConfig, getVisionConfig } from './runtime'
 
@@ -68,10 +68,6 @@ function flattenText(value: unknown): string {
   return String(value)
 }
 
-function hasJsonObject(text: string) {
-  return /[{｛]/.test(text)
-}
-
 function isValidJsonOutput(text: string): boolean {
   if (!text.trim()) return false
   try {
@@ -86,16 +82,41 @@ function looksLikeShotList(text: string) {
   return /镜头\s*\d+\s*[：:]/.test(text) && /画面[：:]/.test(text)
 }
 
-/** 推理模型常把正文放进 reasoning_content；必须优先用带 JSON 的字段，不能把思考过程当成答案。 */
+/** 推理模型常把正文放进 reasoning_content。思考里只要出现花括号，也不能拿来覆盖真正的回答。 */
 function pickMessageContent(message: any): string {
-  const content = flattenText(message?.content).trim()
-  const reasoning = flattenText(
-    message?.reasoning_content ?? message?.reasoning ?? message?.reasoningContent
+  const content = stripThinkTags(flattenText(message?.content)).trim()
+  const reasoning = stripThinkTags(
+    flattenText(message?.reasoning_content ?? message?.reasoning ?? message?.reasoningContent)
   ).trim()
-  if (hasJsonObject(content)) return content
-  if (hasJsonObject(reasoning)) return reasoning
-  if (looksLikeShotList(reasoning) && !looksLikeShotList(content)) return reasoning
-  return content || reasoning
+  const cleaned = stripReasoningLeak(content)
+  if (isValidJsonOutput(content)) return content
+  if (cleaned && !isValidJsonOutput(reasoning)) return cleaned
+  if (cleaned && !isReasoningOnly(content)) return cleaned
+  if (isValidJsonOutput(reasoning)) {
+    try {
+      return extractJsonText(reasoning)
+    } catch {
+      /* 推理里的 JSON 抽不出来时，再看正文 */
+    }
+  }
+  if (looksLikeShotList(reasoning) && !looksLikeShotList(cleaned)) return reasoning
+  return cleaned || stripReasoningLeak(reasoning)
+}
+
+function isReasoningOnly(text: string): boolean {
+  const raw = text.trim()
+  const cleaned = stripReasoningLeak(text)
+  if (!cleaned) return true
+  if (cleaned.length < Math.min(80, raw.length * 0.4)) return true
+  const hasDeliverable =
+    /subject_definitions\s*:|integrated_multimodal_description\s*:|\[Shot\s*\d+\]|overall_soundscape\s*:/i.test(
+      raw
+    )
+  if (hasDeliverable) return false
+  const cues = [/思考/, /用户/, /提示词/, /改写/, /let me/i, /the user/i, /i need to/i].filter((re) =>
+    re.test(raw)
+  ).length
+  return cues >= 2
 }
 
 function hasImageParts(messages: LLMMessage[]): boolean {

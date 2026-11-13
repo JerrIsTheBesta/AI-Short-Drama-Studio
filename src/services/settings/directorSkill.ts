@@ -53,22 +53,27 @@ ${skill.body}`
 
 /** 当前选中的分镜技能。通用手册不额外加一层。 */
 export function activeStorySkillOverlay(): string {
-  let id = GENERAL_STORY_SKILL_ID
+  let styleId = GENERAL_STORY_SKILL_ID
+  let genreId = GENERAL_STORY_SKILL_ID
   try {
-    id = useSettingsStore().config.activeStorySkillId || GENERAL_STORY_SKILL_ID
+    const config = useSettingsStore().config
+    styleId = config.storyStyleId || GENERAL_STORY_SKILL_ID
+    genreId = config.storyGenreId || GENERAL_STORY_SKILL_ID
   } catch {
-    id = GENERAL_STORY_SKILL_ID
+    return ''
   }
-  if (id === CUSTOM_STORY_SKILL_ID) {
+  const sections: string[] = []
+  if (styleId === CUSTOM_STORY_SKILL_ID) {
     const imported = currentDirectorSkill()
-    return imported ? manualText(imported) : ''
+    if (imported) sections.push(manualText(imported))
+  } else {
+    const style = storySkillById(styleId)
+    if (style?.group === 'style') sections.push(`【镜头方式：${style.name}】\n${style.body}`)
   }
-  const skill = storySkillById(id)
-  if (!skill) return ''
-  return `【当前分镜技能：${skill.name}】
-拆分镜头、写画面提示词和视频提示词时，在系统硬约束之上按这个技能来。硬约束仍然优先。
-
-${skill.body}`
+  const genre = storySkillById(genreId)
+  if (genre?.group === 'genre') sections.push(`【题材偏好：${genre.name}】\n${genre.body}`)
+  if (!sections.length) return ''
+  return `以下是创作倾向而非固定模板。用户明确要求、剧本事实、时长与模型能力优先；不适用时灵活调整，不要强行添加情节。\n\n${sections.join('\n\n')}`
 }
 
 /** 通用分镜导演手册，再加上当前选中的风格或类型。导入的手册选中时整份替换这一层。 */
@@ -76,7 +81,6 @@ export function directorPlaybookText(): string {
   const base = getSkillBody('storyboard-director')
   const extra = activeStorySkillOverlay()
   if (!extra) return base
-  if (extra.startsWith('【用户导入的导演手册')) return extra
   return `${base}\n\n${extra}`
 }
 

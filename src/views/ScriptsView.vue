@@ -17,8 +17,12 @@ import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
 import { pickScriptFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
-import { parseScriptDoc, toEpisodes, updateEpisode } from '@/utils/scriptEpisodes'
+import { parseScriptDoc, serializeScriptDoc, toEpisodes, updateEpisode } from '@/utils/scriptEpisodes'
 import { callLLM } from '@/services/ai/client'
+import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference, scriptReferenceBrief } from '@/services/ai/scriptReference'
+import { importedDirectorPrefix } from '@/services/settings/directorSkill'
+import { desktop, isDesktop } from '@/services/desktop'
+import { parseJsonRobust } from '@/utils/jsonRepair'
 import type { ScriptEpisode } from '@/types'
 
 type EditorTab = 'episodes' | 'markdown' | 'preview'
@@ -259,8 +263,217 @@ const genChoice = computed({
 })
 
 const episodeHint = ref('')
+type WritingMessage = { role: 'user' | 'assistant'; content: string; episode: number; time: number }
+type StoryPlan = { brief: string; outline: string; episodes: Array<{ title: string; summary: string }>; stage: 'outline-review' | 'ready' | 'episode-review' | 'complete'; nextIndex: number }
+const writingMessages = ref<WritingMessage[]>([])
+const storyPlan = ref<StoryPlan | null>(null)
+const writingMode = ref<'auto' | 'series' | 'episode'>('auto')
+const planEditing = ref(false)
+const planKey = (id: string) => `script-writing-plan:v1:${id}`
+const writingHistoryLoading = ref(false)
+const writingHistoryError = ref(false)
+const writingList = ref<HTMLElement | null>(null)
+const writingKey = (id: string) => `script-writing-chat:v1:${id}`
+let historyLoadToken = 0
+let historyWrites = Promise.resolve()
+
+watch(activeId, async (id) => {
+  const token = ++historyLoadToken
+  writingMessages.value = []
+  storyPlan.value = null
+  planEditing.value = false
+  writingHistoryError.value = false
+  if (!id) return
+  writingHistoryLoading.value = true
+  try {
+    await historyWrites
+    const raw = isDesktop() ? await desktop().kvGet(writingKey(id)) : localStorage.getItem(writingKey(id))
+    const rows: unknown = raw ? JSON.parse(raw) : []
+    if (token !== historyLoadToken) return
+    writingMessages.value = Array.isArray(rows) ? rows.filter((row): row is WritingMessage =>
+      row && (row.role === 'user' || row.role === 'assistant') && typeof row.content === 'string' && typeof row.episode === 'number'
+    ).slice(-100) : []
+    const savedPlan = isDesktop() ? await desktop().kvGet(planKey(id)) : localStorage.getItem(planKey(id))
+    if (token !== historyLoadToken) return
+    if (savedPlan) {
+      const plan = JSON.parse(savedPlan) as StoryPlan
+      if (Array.isArray(plan.episodes) && typeof plan.outline === 'string' && ['outline-review', 'ready', 'episode-review', 'complete'].includes(plan.stage)) storyPlan.value = plan
+    }
+  } catch {
+    if (token === historyLoadToken) writingHistoryError.value = true
+  } finally {
+    if (token === historyLoadToken) writingHistoryLoading.value = false
+  }
+}, { immediate: true })
+
+function addWritingMessage(id: string, message: WritingMessage) {
+  if (id !== activeId.value) return
+  writingMessages.value = [...writingMessages.value, message].slice(-100)
+  const data = JSON.stringify(writingMessages.value)
+  historyWrites = historyWrites.catch(() => {}).then(async () => {
+    if (isDesktop()) await desktop().kvSet(writingKey(id), data)
+    else localStorage.setItem(writingKey(id), data)
+  }).catch(() => { writingHistoryError.value = true })
+  void nextTick(() => { if (writingList.value) writingList.value.scrollTop = writingList.value.scrollHeight })
+}
+async function saveStoryPlan(id: string, plan: StoryPlan | null) {
+  const text = JSON.stringify(plan)
+  if (isDesktop()) await desktop().kvSet(planKey(id), text)
+  else localStorage.setItem(planKey(id), text)
+  if (id === activeId.value) storyPlan.value = plan
+}
+const scriptReferenceType = computed({
+  get: () => normalizeScriptReference(settings.config.scriptReferenceType),
+  set: (value: string) => settings.update({ scriptReferenceType: normalizeScriptReference(value) })
+})
 const episodeWriting = ref(false)
+const writingPhase = ref<'episode' | 'outline'>('episode')
+const episodeElapsed = ref(0)
+let episodeTimer: ReturnType<typeof setInterval> | undefined
 let episodeAbort: AbortController | null = null
+
+function startWriting() {
+  episodeWriting.value = true
+  episodeElapsed.value = 0
+  episodeTimer = setInterval(() => { episodeElapsed.value++ }, 1000)
+  episodeAbort = new AbortController()
+  return episodeAbort
+}
+
+function finishWriting() {
+  if (episodeTimer) clearInterval(episodeTimer)
+  episodeTimer = undefined
+  episodeWriting.value = false
+  episodeAbort = null
+}
+
+async function writeStoryPlan(brief: string, revision = false) {
+  const id = activeId.value
+  if (!id || !llmModel.value || episodeWriting.value) return
+  const oldPlan = revision ? storyPlan.value : null
+  if (!brief.trim() && !oldPlan) { toast.warn('请先描述题材、人物或故事想法'); return }
+  writingPhase.value = 'outline'
+  const controller = startWriting()
+  const request = brief.trim() || oldPlan?.brief || ''
+  addWritingMessage(id, { role: 'user', content: request, episode: -1, time: Date.now() })
+  try {
+    const resp = await callLLM({
+      model: llmModel.value, disableThinking: true, temperature: 0.6, maxTokens: 6000,
+      timeoutMs: 120_000, signal: controller.signal,
+      messages: [
+        { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。先为整部剧策划大纲与分集目录，不写剧本正文。尊重用户指定的集数、时长、题材和结局；未指定集数时先规划适合短剧的 8 集，并在大纲中说明可修改。每集明确戏剧任务、冲突变化和下集钩子，人物关系和事件因果前后一致。只输出合法 JSON：{"outline":"故事梗概、人物设定及关系、世界规则和情绪主线","episodes":[{"title":"第1集标题","summary":"本集推进与结尾"}]}。不要用 Markdown 代码块。\n${scriptReferenceBrief(settings.config.scriptReferenceType, request)}` },
+        { role: 'user', content: `${revision && oldPlan ? `原大纲：${oldPlan.outline}\n原分集目录：${JSON.stringify(oldPlan.episodes)}\n修改要求：` : '创作需求：'}${request}` }
+      ]
+    })
+    const parsed = parseJsonRobust(resp.content)
+    const outline = typeof parsed?.outline === 'string' ? parsed.outline.trim() : ''
+    const rows = Array.isArray(parsed?.episodes) ? parsed.episodes : []
+    const planned = rows.map((row: any) => ({ title: String(row?.title || '').trim(), summary: String(row?.summary || '').trim() }))
+    if (!outline || !planned.length || planned.length > 100 || planned.some((row: { title: string; summary: string }) => !row.title || !row.summary)) throw new Error('大纲格式不完整，请重试或减少单次规划的集数。')
+    if (controller.signal.aborted || activeId.value !== id) throw new Error('写作已取消或已切换剧本')
+    await saveStoryPlan(id, { brief: revision && oldPlan ? `${oldPlan.brief}\n修改：${request}` : request, outline, episodes: planned, stage: 'outline-review', nextIndex: 0 })
+    episodeHint.value = ''
+    planEditing.value = true
+    addWritingMessage(id, { role: 'assistant', content: `已整理故事大纲和 ${planned.length} 集目录。请先检查、修改，确认后我再写第一集。`, episode: -1, time: Date.now() })
+  } catch (error: any) {
+    const message = controller.signal.aborted ? '本次大纲生成已取消。' : `大纲生成未完成：${error?.message || '请重试'}`
+    if (activeId.value === id) addWritingMessage(id, { role: 'assistant', content: message, episode: -1, time: Date.now() })
+    toast.warn(message)
+  } finally { finishWriting() }
+}
+
+async function writePlannedEpisode() {
+  const plan = storyPlan.value
+  const id = activeId.value
+  if (!plan || !id || episodeWriting.value || !llmModel.value || plan.stage !== 'ready') return
+  const index = plan.nextIndex
+  const episode = plan.episodes[index]
+  if (!episode) return
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  flushDraft()
+  const parsed = parseScriptDoc(markdown.value)
+  if (index > parsed.episodes.length) { toast.warn('集数目录已改变，请先检查剧本。'); return }
+  if (index > 0 && parsed.episodes.slice(0, index).some((item) => !item.content.trim())) { toast.warn('前面有尚未完成的集数，请先补全再继续。'); return }
+  const existing = parsed.episodes[index]?.content.trim() || ''
+  if (existing && !confirm(`第 ${index + 1} 集已有正文。继续会用 AI 结果替换这一集，确定吗？`)) return
+  const snapshot = markdown.value
+  const prior = parsed.episodes.slice(0, index).map((ep, i) => `第${i + 1}集 ${ep.title}\n${ep.content}`).join('\n\n')
+  writingPhase.value = 'episode'
+  const controller = startWriting()
+  addWritingMessage(id, { role: 'assistant', content: `开始写第 ${index + 1} 集：${episode.title}。完成后会等你确认。`, episode: index, time: Date.now() })
+  try {
+    const resp = await callLLM({ model: llmModel.value, disableThinking: true, temperature: 0.6, maxTokens: 5000, timeoutMs: 120_000, signal: controller.signal,
+      messages: [
+        { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文，包含具体场次、行动与自然对白。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。场次使用三级标题，禁止输出一级或二级标题。只输出本集 Markdown 正文。\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
+        { role: 'user', content: `用户创作需求：${plan.brief}\n已确认大纲：${plan.outline}\n完整分集目录：${JSON.stringify(plan.episodes)}\n已完成前文${prior.length > 30000 ? '（仅显示最近部分，更早剧情请参考分集目录）' : ''}：\n${prior.slice(-30000) || '（第一集）'}\n当前要写：第 ${index + 1} 集 ${episode.title}\n本集任务：${episode.summary}\n${existing ? `需要替换的原正文：\n${existing}` : ''}` }
+      ] })
+    const body = String(resp.content || '').replace(/^```(?:markdown|md|text)?\s*/i, '').replace(/\s*```$/, '').trim().replace(/^#{1,2}\s+/gm, '### ')
+    if (!body) throw new Error('模型没有返回正文')
+    if (controller.signal.aborted || activeId.value !== id || markdown.value !== snapshot) throw new Error('剧本已切换或正文发生变化，结果未覆盖原文，请重试。')
+    if (index === parsed.episodes.length) parsed.episodes.push({ title: episode.title, content: body })
+    else parsed.episodes[index] = { title: episode.title, content: body }
+    const updated = serializeScriptDoc(parsed)
+    await scripts.setContent(id, updated)
+    markdown.value = updated
+    syncDraft(index)
+    dirty.value = false
+    const reviewPlan: StoryPlan = { ...plan, stage: 'episode-review' }
+    try {
+      await saveStoryPlan(id, reviewPlan)
+    } catch {
+      if (activeId.value === id) storyPlan.value = reviewPlan
+      toast.warn('本集正文已保存，但创作进度保存失败；请检查存储后再确认下一集。')
+    }
+    addWritingMessage(id, { role: 'assistant', content: `第 ${index + 1} 集已写入正文。请检查并修改，确认后我再写下一集。`, episode: index, time: Date.now() })
+  } catch (error: any) {
+    const message = controller.signal.aborted ? '本集写作已取消，正文未更改。' : `本集写作未完成：${error?.message || '请重试'}`
+    if (activeId.value === id) addWritingMessage(id, { role: 'assistant', content: message, episode: index, time: Date.now() })
+    toast.warn(message)
+  } finally { finishWriting() }
+}
+
+async function confirmStoryPlan() {
+  const plan = storyPlan.value
+  if (!plan || !activeId.value || episodeWriting.value) return
+  if (!plan.outline.trim() || plan.episodes.some((episode) => !episode.title.trim() || !episode.summary.trim())) { toast.warn('请先补全大纲和每集内容'); return }
+  try {
+    await saveStoryPlan(activeId.value, { ...plan, stage: 'ready', nextIndex: 0 })
+    planEditing.value = false
+    episodeHint.value = ''
+    await writePlannedEpisode()
+  } catch (error: any) { toast.error(error?.message || '保存大纲失败') }
+}
+
+async function savePlanDraft() {
+  if (!storyPlan.value || !activeId.value || episodeWriting.value) return
+  try {
+    await saveStoryPlan(activeId.value, { ...storyPlan.value, episodes: storyPlan.value.episodes.map((item) => ({ ...item })) })
+    toast.success('大纲草稿已保存')
+  } catch (error: any) { toast.error(error?.message || '保存大纲失败') }
+}
+
+async function confirmEpisodeAndContinue() {
+  const plan = storyPlan.value
+  const id = activeId.value
+  if (!plan || !id || episodeWriting.value || plan.stage !== 'episode-review') return
+  if (draft.value && draft.value.index !== plan.nextIndex) { toast.warn(`请先切换到第 ${plan.nextIndex + 1} 集检查正文`); return }
+  if (!draft.value?.content.trim()) { toast.warn('这一集正文为空，请先补全'); return }
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  markdown.value = updateEpisode(markdown.value, draft.value.index, { title: draft.value.title, content: draft.value.content })
+  try {
+    await scripts.setContent(id, markdown.value)
+    dirty.value = false
+    episodeHint.value = ''
+    const nextIndex = plan.nextIndex + 1
+    if (nextIndex >= plan.episodes.length) {
+      await saveStoryPlan(id, { ...plan, nextIndex, stage: 'complete' })
+      addWritingMessage(id, { role: 'assistant', content: '全部分集已确认完成。', episode: -1, time: Date.now() })
+      return
+    }
+    await saveStoryPlan(id, { ...plan, nextIndex, stage: 'ready' })
+    await writePlannedEpisode()
+  } catch (error: any) { toast.error(error?.message || '保存失败，请重试') }
+}
 
 async function writeCurrentEpisode() {
   if (!draft.value || episodeWriting.value) return
@@ -270,12 +483,29 @@ async function writeCurrentEpisode() {
   }
   const hint = episodeHint.value.trim()
   const existing = draft.value.content.trim()
+  if (writingHistoryLoading.value) { toast.warn('正在读取对话记录，请稍候'); return }
+  if (storyPlan.value?.stage === 'outline-review' && /^\s*(?:确认|通过|开始写|可以|下一步)\s*[。！!]*$/.test(hint)) { await confirmStoryPlan(); return }
+  if (storyPlan.value?.stage === 'episode-review' && /^\s*(?:确认|通过|继续|下一集|可以|下一步)\s*[。！!]*$/.test(hint)) { await confirmEpisodeAndContinue(); return }
+  if (storyPlan.value?.stage === 'outline-review' && hint && writingMode.value !== 'episode') { await writeStoryPlan(hint, true); return }
+  const wantsSeries = writingMode.value === 'series' || (writingMode.value === 'auto' && (/(?:整部|整剧|全集|分集大纲|分集目录|多集)|(?:写|创作|策划|生成).{0,30}(?:短剧|剧本)(?!.*(?:本集|这一集|当前集))/.test(hint) || (!existing && /题材|科幻|悬疑|古装|都市|甜宠|穿越|重生|家庭伦理/.test(hint) && !/本集|这一集|当前集/.test(hint))))
+  if (wantsSeries && hint) {
+    if (storyPlan.value && !confirm('重新规划会替换当前大纲，已写好的剧本正文不会删除。继续吗？')) return
+    await writeStoryPlan(hint)
+    return
+  }
   if (!hint && !existing) {
     toast.warn('先写一句要求，或留一点已有正文')
     return
   }
+  const conversation = writingMessages.value.filter((message) => message.episode === draft.value?.index && message.role === 'user').slice(-6)
   episodeWriting.value = true
+  writingPhase.value = 'episode'
+  episodeElapsed.value = 0
+  episodeTimer = setInterval(() => { episodeElapsed.value++ }, 1000)
   episodeAbort = new AbortController()
+  const targetDocId = activeDoc.value?.id
+  const targetDraft = draft.value
+  if (targetDocId) addWritingMessage(targetDocId, { role: 'user', content: hint || '请根据已有正文写完整这一集。', episode: targetDraft.index, time: Date.now() })
   try {
     const resp = await callLLM({
       model: llmModel.value,
@@ -286,24 +516,34 @@ async function writeCurrentEpisode() {
         {
           role: 'system',
           content:
-            '你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。'
+            `${importedDirectorPrefix()}你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。\n${scriptReferenceBrief(settings.config.scriptReferenceType, activeDoc.value?.title, draft.value.title, existing, hint)}`
         },
         {
           role: 'user',
-          content: `剧本：${activeDoc.value?.title || '未命名剧本'}\n这一集：${draft.value.title}\n已有正文：\n${existing || '（空）'}\n\n要求：${hint || '把这一集写完整，保留已有情节。'}`
+          content: `剧本：${activeDoc.value?.title || '未命名剧本'}\n这一集：${draft.value.title}\n此前本集的用户写作要求（仅供上下文参考，当前要求优先）：\n${conversation.map((item) => item.content).join('\n') || '（无）'}\n已有正文：\n${existing || '（空）'}\n\n当前要求：${hint || '把这一集写完整，保留已有情节。'}`
         }
       ]
     })
     const text = String(resp.content || '').trim()
     if (!text) throw new Error('模型没有返回内容')
+    if (episodeAbort.signal.aborted) throw new Error('已取消')
+    if (activeDoc.value?.id !== targetDocId || draft.value !== targetDraft) {
+      toast.warn('写作期间切换了剧本或集数，结果未覆盖当前正文，请回到原集重试。')
+      return
+    }
     draft.value.content = text
+    if (targetDocId) addWritingMessage(targetDocId, { role: 'assistant', content: '已完成本集正文，内容已写入中间编辑区。可以继续提出修改要求。', episode: targetDraft.index, time: Date.now() })
+    episodeHint.value = ''
     scheduleFlush()
     toast.success('这一集写好了')
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     if (episodeAbort?.signal.aborted) toast.warn('已取消')
     else toast.error(msg || '写这一集失败')
+    if (targetDocId && activeId.value === targetDocId) addWritingMessage(targetDocId, { role: 'assistant', content: episodeAbort?.signal.aborted ? '本次写作已取消，正文未更改。' : `本次写作未完成：${msg || '请重试'}`, episode: targetDraft.index, time: Date.now() })
   } finally {
+    if (episodeTimer) clearInterval(episodeTimer)
+    episodeTimer = undefined
     episodeWriting.value = false
     episodeAbort = null
   }
@@ -418,6 +658,8 @@ watch(activeTab, (tab) => {
 })
 
 onBeforeUnmount(() => {
+  episodeAbort?.abort()
+  if (episodeTimer) clearInterval(episodeTimer)
   if (saveTimer) clearTimeout(saveTimer)
   flushDraft()
 })
@@ -446,6 +688,7 @@ onMounted(async () => {
         </p>
       </div>
       <div class="head-actions">
+        <GradientButton type="ghost" @click="router.push('/')">返回首页</GradientButton>
         <GradientButton v-if="detailOpen" type="ghost" @click="backToLibrary">返回剧本列表</GradientButton>
         <GradientButton type="ghost" @click="router.push('/drafts')">资源库</GradientButton>
         <GradientButton type="secondary" icon="📥" title="支持 Markdown、TXT、README 和 Word" @click="importScript">导入剧本</GradientButton>
@@ -541,30 +784,20 @@ onMounted(async () => {
                 <button type="button" title="删除这一集" class="danger" @click="removeEpisode(draft.index)">删除</button>
               </div>
             </div>
-            <textarea
-              v-model="draft.content"
-              class="episode-body"
-              placeholder="写这一集的正文，支持 Markdown"
-              @input="scheduleFlush"
-            />
-            <div class="ai-bar">
-              <select v-model="genChoice" class="llm-select" :disabled="episodeWriting">
-                <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
-                <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
-                  <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">
-                    {{ m }}
-                  </option>
-                </optgroup>
-              </select>
-              <input
-                v-model="episodeHint"
-                class="ai-hint"
-                placeholder="告诉 AI 这一集怎么写，例如：加一场雨夜对峙"
-                :disabled="episodeWriting"
-                @keydown.enter.prevent="writeCurrentEpisode"
+            <div class="episode-body-wrap" :aria-busy="episodeWriting">
+              <textarea
+                v-model="draft.content"
+                class="episode-body"
+                placeholder="写这一集的正文，支持 Markdown"
+                :readonly="episodeWriting"
+                @input="scheduleFlush"
               />
-              <button v-if="episodeWriting" class="mini-btn danger" type="button" @click="cancelEpisodeWrite">取消</button>
-              <button v-else class="mini-btn primary" type="button" @click="writeCurrentEpisode">AI 写这一集</button>
+              <div v-if="episodeWriting" class="episode-writing-overlay" role="status" aria-live="polite">
+                <span class="episode-writing-spinner" aria-hidden="true" />
+                <strong>{{ writingPhase === 'outline' ? 'AI 正在策划大纲' : 'AI 正在创作这一集' }}</strong>
+                <span>已等待 {{ episodeElapsed }} 秒 · {{ writingPhase === 'outline' ? '完成后请先确认大纲' : '完成后自动填入正文' }}</span>
+                <button type="button" class="mini-btn" @click="cancelEpisodeWrite">取消生成</button>
+              </div>
             </div>
           </div>
           <div class="ed-foot">
@@ -575,6 +808,51 @@ onMounted(async () => {
           </div>
         </GlassCard>
       </section>
+      <aside v-if="activeDoc && draft" class="writing-agent" aria-label="AI 剧本助手">
+        <header class="writing-agent-head">
+          <span class="writing-agent-icon" aria-hidden="true">✦</span>
+          <div><strong>剧本助手</strong><p>一起打磨人物、对白和故事</p></div>
+        </header>
+        <div ref="writingList" class="writing-history" aria-live="polite">
+          <div class="writing-message assistant"><span>剧本助手</span><p>告诉我你想写什么，或说说这一集需要怎样修改。完成后正文会显示在左侧编辑区。</p></div>
+          <p v-if="writingHistoryLoading" class="writing-note">正在读取对话记录…</p>
+          <p v-if="writingHistoryError" class="writing-note">对话记录读取或保存失败，正文不受影响。</p>
+          <div v-for="(message, i) in writingMessages" :key="`${message.time}-${i}`" class="writing-message" :class="message.role">
+            <span>{{ message.role === 'user' ? '你' : '剧本助手' }} · 第 {{ message.episode + 1 }} 集</span>
+            <p>{{ message.content }}</p>
+          </div>
+          <div v-if="episodeWriting" class="writing-message assistant writing-pending" role="status">
+            <span>剧本助手</span><p><i class="writing-pulse" /> {{ writingPhase === 'outline' ? '正在策划大纲' : '正在创作本集' }}，已等待 {{ episodeElapsed }} 秒</p>
+          </div>
+          <section v-if="storyPlan" class="story-plan">
+            <div class="story-plan-heading"><strong>整剧策划 · {{ storyPlan.episodes.length }} 集</strong><button type="button" :disabled="episodeWriting" @click="planEditing = !planEditing">{{ planEditing ? '收起' : '查看大纲' }}</button></div>
+            <p class="story-plan-status">{{ storyPlan.stage === 'outline-review' ? '等待确认大纲' : storyPlan.stage === 'episode-review' ? `第 ${storyPlan.nextIndex + 1} 集等待确认` : storyPlan.stage === 'complete' ? '全部分集已确认' : `准备写第 ${storyPlan.nextIndex + 1} 集` }}</p>
+            <div v-if="planEditing" class="story-plan-content">
+              <label>故事大纲与人物设定<textarea v-model="storyPlan.outline" :readonly="storyPlan.stage !== 'outline-review' || episodeWriting" rows="7" /></label>
+              <label v-for="(episode, index) in storyPlan.episodes" :key="index">第 {{ index + 1 }} 集<input v-model="episode.title" :readonly="storyPlan.stage !== 'outline-review' || episodeWriting" /><textarea v-model="episode.summary" :readonly="storyPlan.stage !== 'outline-review' || episodeWriting" rows="3" /></label>
+              <p v-if="storyPlan.stage === 'outline-review'">可直接修改大纲和每集内容，确认时保存；也可以在下方输入修改要求让 AI 调整。</p>
+              <button v-if="storyPlan.stage === 'outline-review'" type="button" class="story-plan-save" :disabled="episodeWriting" @click="savePlanDraft">保存大纲草稿</button>
+            </div>
+            <button v-if="storyPlan.stage === 'outline-review'" type="button" class="story-plan-confirm" :disabled="episodeWriting" @click="confirmStoryPlan">确认大纲并写第一集</button>
+            <button v-else-if="storyPlan.stage === 'episode-review'" type="button" class="story-plan-confirm" :disabled="episodeWriting" @click="confirmEpisodeAndContinue">{{ storyPlan.nextIndex + 1 >= storyPlan.episodes.length ? '确认本集，完成创作' : '确认本集并写下一集' }}</button>
+            <button v-else-if="storyPlan.stage === 'ready'" type="button" class="story-plan-confirm" :disabled="episodeWriting" @click="writePlannedEpisode">继续写第 {{ storyPlan.nextIndex + 1 }} 集</button>
+          </section>
+        </div>
+        <div class="writing-compose">
+          <div class="writing-options">
+            <label><span>语言模型</span><select v-model="genChoice" :disabled="episodeWriting" aria-label="语言模型">
+              <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
+              <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name"><option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">{{ m }}</option></optgroup>
+            </select></label>
+            <label><span>写作知识库</span><select v-model="scriptReferenceType" :disabled="episodeWriting" aria-label="选择写作知识库参考类型">
+              <option v-for="item in SCRIPT_REFERENCE_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
+            </select></label>
+          </div>
+          <label class="writing-mode"><span>创作方式</span><select v-model="writingMode" :disabled="episodeWriting"><option value="auto">自动判断</option><option value="series">整部剧本 · 先大纲</option><option value="episode">只写当前一集</option></select></label>
+          <textarea v-model="episodeHint" class="writing-input" placeholder="告诉我这一集想怎么写，或需要修改哪里…" :disabled="episodeWriting" @keydown.ctrl.enter.prevent="writeCurrentEpisode" />
+          <div class="writing-actions"><span>Ctrl + Enter 发送</span><button v-if="episodeWriting" class="writing-send cancel" type="button" @click="cancelEpisodeWrite">取消生成</button><button v-else class="writing-send" type="button" :disabled="writingHistoryLoading" @click="writeCurrentEpisode">发送 ✦</button></div>
+        </div>
+      </aside>
     </div>
 
   </div>
@@ -582,11 +860,21 @@ onMounted(async () => {
 
 <style scoped>
 .page {
+  --color-bg-0: #0c0b14;
+  --color-bg-1: #141226;
+  --color-bg-2: #1b192b;
+  --color-bg-card: #151323;
+  --color-border: rgba(196, 180, 255, 0.12);
+  --color-accent: #a28bff;
   padding: var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  background: radial-gradient(750px 420px at 92% 0%, rgba(98, 54, 196, .13), transparent 65%), #0c0b14;
+  color: #f4f1ff;
 }
 .page-head {
   display: flex;
@@ -626,7 +914,15 @@ onMounted(async () => {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  padding: 10px 16px 14px;
+  gap: 10px;
 }
+.page.detail .page-head { align-items: center; gap: 8px; }
+.page.detail .page-head > div:first-child { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.page.detail .kicker { margin: 0; white-space: nowrap; letter-spacing: 0; }
+.page.detail .page-head h1 { margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page.detail .head-actions { gap: 6px; }
+.page.detail .head-actions :deep(button) { min-height: 32px; padding: 5px 11px; font-size: 12px; }
 .library-tools {
   display: flex;
 }
@@ -658,7 +954,7 @@ onMounted(async () => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(320px, 1fr) minmax(280px, 340px);
   gap: 12px;
 }
 .ep-side {
@@ -686,9 +982,62 @@ onMounted(async () => {
   cursor: pointer;
 }
 .ep-item.active {
-  border-color: rgba(126, 180, 255, 0.5);
-  background: var(--grad-primary-soft);
+  border-color: rgba(162, 139, 255, 0.6);
+  background: rgba(109, 77, 255, 0.16);
 }
+.writing-agent {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(196, 180, 255, .14);
+  border-radius: 16px;
+  background: #151323;
+}
+.writing-agent-head { display: flex; align-items: center; gap: 11px; padding: 17px; border-bottom: 1px solid rgba(196, 180, 255, .1); }
+.writing-agent-head strong { color: #f4f1ff; font-size: 14px; }
+.writing-agent-head p { margin: 4px 0 0; color: #9992b3; font-size: 11px; }
+.writing-agent-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 11px; color: #e3d8ff; background: #5940bf; font-size: 20px; }
+.writing-history { flex: 1; min-height: 120px; overflow-y: auto; padding: 18px 14px; display: flex; flex-direction: column; gap: 16px; }
+.writing-message { max-width: 96%; align-self: flex-start; min-width: 0; }
+.writing-message.user { align-self: flex-end; }
+.writing-message > span { display: block; margin: 0 4px 6px; color: #9189aa; font-size: 11px; }
+.writing-message.user > span { text-align: right; }
+.writing-message p { margin: 0; padding: 11px 12px; border: 1px solid rgba(196, 180, 255, .08); border-radius: 4px 13px 13px 13px; background: #211e32; color: #e3dff0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.writing-message.user p { border: 1px solid rgba(156, 130, 255, .3); border-radius: 13px 4px 13px 13px; background: #473987; color: #fff; }
+.writing-note { margin: 0; color: #aaa0bf; font-size: 12px; }
+.writing-compose { padding: 13px; border-top: 1px solid rgba(196, 180, 255, .1); }
+.story-plan { padding: 12px; border: 1px solid rgba(162, 139, 255, .25); border-radius: 12px; background: #201b35; }
+.story-plan-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #f4f1ff; font-size: 12px; }
+.story-plan-heading button { border: 0; background: transparent; color: #b5a4ff; cursor: pointer; font-size: 11px; }
+.story-plan-status { margin: 7px 0; color: #b8aed2; font-size: 11px; }
+.story-plan-content { display: flex; flex-direction: column; gap: 10px; max-height: 300px; overflow: auto; margin: 10px 0; }
+.story-plan-content label { display: flex; flex-direction: column; gap: 5px; color: #c9c1de; font-size: 11px; }
+.story-plan-content textarea, .story-plan-content input, .writing-mode select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid rgba(196, 180, 255, .16); border-radius: 8px; background: #151323; color: #eeeafa; font: inherit; line-height: 1.5; }
+.story-plan-content textarea { resize: vertical; }
+.story-plan-content p { margin: 0; color: #aaa0bf; font-size: 11px; line-height: 1.5; }
+.story-plan-confirm { width: 100%; padding: 9px; border: 1px solid #8a70ef; border-radius: 8px; background: #5d44c7; color: white; cursor: pointer; font-size: 12px; }
+.story-plan-confirm:disabled { opacity: .5; cursor: default; }
+.story-plan-save { align-self: flex-start; padding: 6px 10px; border: 1px solid rgba(162, 139, 255, .35); border-radius: 7px; background: transparent; color: #cabfff; cursor: pointer; font-size: 11px; }
+.writing-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #a8a0bd; font-size: 11px; }
+.writing-mode span { flex-shrink: 0; }
+.writing-mode select { height: 32px; padding: 0 8px; background: #201d30; }
+.writing-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.writing-options label { display: flex; min-width: 0; flex-direction: column; gap: 5px; color: #a8a0bd; font-size: 11px; }
+.writing-options select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; border: 1px solid rgba(196, 180, 255, .16); border-radius: 8px; background: #201d30; color: #e8e3f5; font-size: 11px; }
+.writing-input { display: block; width: 100%; min-height: 86px; box-sizing: border-box; resize: vertical; padding: 11px; border: 1px solid rgba(196, 180, 255, .15); border-radius: 10px; outline: none; background: #201d30; color: #f4f1ff; font: inherit; font-size: 12px; line-height: 1.6; }
+.writing-input:focus { border-color: #927aff; }
+.writing-input::placeholder { color: #817a98; }
+.writing-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.writing-actions > span { color: #817a98; font-size: 10px; }
+.writing-send { padding: 8px 15px; border: 0; border-radius: 9px; background: #7555f5; color: white; font-size: 12px; font-weight: 600; cursor: pointer; }
+.writing-send:hover { background: #896dff; }
+.writing-send:disabled { opacity: .5; cursor: default; }
+.writing-send.cancel { background: #342c48; }
+.writing-pulse { display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; background: #b5a3ff; animation: writing-pulse 1s ease-in-out infinite alternate; }
+@keyframes writing-pulse { to { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .writing-pulse { animation: none; } }
 .ep-item-title {
   font-size: 13px;
   font-weight: 600;
@@ -743,8 +1092,15 @@ onMounted(async () => {
 .episode-move button.danger {
   color: #f87171;
 }
+.episode-body-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 240px;
+  display: flex;
+}
 .episode-body {
   flex: 1;
+  width: 100%;
   min-height: 240px;
   resize: none;
   background: var(--color-bg-2);
@@ -755,12 +1111,37 @@ onMounted(async () => {
   font-size: 14px;
   line-height: 1.7;
 }
+.episode-writing-overlay {
+  position: absolute;
+  inset: 1px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 9px;
+  background: rgba(18, 19, 27, 0.88);
+  color: var(--color-text-1);
+  font-size: 13px;
+}
+.episode-writing-overlay > span:not(.episode-writing-spinner) { color: var(--color-text-3); font-size: 12px; }
+.episode-writing-spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid rgba(126, 180, 255, 0.2);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: episode-writing-spin 0.85s linear infinite;
+}
+@keyframes episode-writing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .episode-writing-spinner { animation: none; } }
 .ai-bar {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 .llm-select,
+.reference-select,
 .ai-hint {
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
@@ -773,6 +1154,15 @@ onMounted(async () => {
 .llm-select {
   max-width: 220px;
 }
+.reference-select-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+.reference-select { max-width: 160px; }
 .ai-hint {
   flex: 1;
   min-width: 0;
@@ -1221,6 +1611,9 @@ onMounted(async () => {
 }
 
 @media (max-width: 1080px) {
+  .workspace { grid-template-columns: 150px minmax(250px, 1fr) minmax(240px, 290px); }
+  .ai-bar { flex-wrap: wrap; }
+  .ai-hint { flex: 1 1 220px; }
   .body {
     grid-template-columns: 1fr;
   }
@@ -1230,6 +1623,13 @@ onMounted(async () => {
   .list {
     max-height: 220px;
   }
+}
+@media (max-width: 760px) {
+  .page.detail { height: auto; overflow: visible; }
+  .workspace { display: flex; flex-direction: column; }
+  .ep-side { max-height: 200px; }
+  .ep-main .editor-card { min-height: 500px; }
+  .writing-agent { min-height: 440px; }
 }
 
 </style>

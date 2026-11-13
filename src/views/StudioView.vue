@@ -1550,7 +1550,7 @@ function goClassic() {
   opacity: 0 !important;
   pointer-events: none !important;
 }
-.flow-wrap :deep(.vue-flow__node:hover) {
+.flow-wrap :deep(.vue-flow__node:hover:not(.vue-flow__node-groupFrame)) {
   z-index: 12 !important;
 }
 .flow-wrap :deep(.vue-flow__node) {

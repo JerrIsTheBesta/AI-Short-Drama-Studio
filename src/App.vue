@@ -18,6 +18,7 @@ const showLayout = computed(
     route.name !== 'home' &&
     route.name !== 'studio' &&
     route.name !== 'smart-speech' &&
+    route.name !== 'scripts' &&
     route.name !== 'settings'
 )
 

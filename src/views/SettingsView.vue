@@ -661,11 +661,17 @@ function navReady(id: SettingsSection) {
 
 <style scoped>
 .settings {
+  --color-bg-0: #0c0b14;
+  --color-bg-1: #151323;
+  --color-bg-2: #201d30;
+  --color-bg-card: #1b192b;
+  --color-border: rgba(196, 180, 255, 0.12);
+  --color-accent: #a28bff;
   height: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--color-bg-0);
+  background: radial-gradient(750px 420px at 90% 0%, rgba(98, 54, 196, .14), transparent 65%), var(--color-bg-0);
 }
 .top {
   display: flex;
@@ -773,7 +779,7 @@ function navReady(id: SettingsSection) {
   color: var(--color-text-1);
 }
 .side a.on {
-  background: rgba(126, 180, 255, 0.1);
+  background: rgba(109, 77, 255, 0.22);
   color: var(--color-text-1);
   font-weight: 600;
 }
@@ -900,16 +906,16 @@ function navReady(id: SettingsSection) {
 .save {
   margin: 0;
   padding: 9px 20px;
-  border: 1px solid rgba(126, 180, 255, 0.5);
+  border: 1px solid rgba(162, 139, 255, 0.6);
   border-radius: 9px;
-  background: rgba(126, 180, 255, 0.16);
-  color: #cfe0ff;
+  background: #6d4dff;
+  color: #fff;
   font-size: 12.5px;
   font-weight: 650;
   cursor: pointer;
 }
 .save:hover:not(:disabled) {
-  background: rgba(126, 180, 255, 0.26);
+  background: #8065ff;
 }
 .save:disabled {
   opacity: 0.5;

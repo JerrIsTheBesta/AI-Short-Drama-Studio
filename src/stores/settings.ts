@@ -6,6 +6,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
+import { AUTODL_BASE_URL, AUTODL_WORKFLOWS } from '@/services/ai/autodl'
 import { envDefaults, migrateVideoBaseUrl, migrateVideoWorkflowId } from '@/services/ai/env'
 import { desktop, isDesktop } from '@/services/desktop'
 import { stillModeForVideoModel, type VideoGenModel, type VideoStillMode } from '@/types/canvas'
@@ -13,7 +14,7 @@ import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 import { normalizeModelNodeOptions, type ModelNodeOptions } from '@/services/ai/modelOptions'
 import { LLM_PROVIDERS } from '@/services/ai/providers'
-import { GENERAL_STORY_SKILL_ID, normalizeStorySkillId } from '@/skills/storyStyles'
+import { GENERAL_STORY_SKILL_ID, normalizeStorySkillId, storySkillById } from '@/skills/storyStyles'
 
 export type { AdapterConfig }
 
@@ -124,6 +125,10 @@ export interface AppSettings {
    * storyboard-director = 通用；custom = 使用 directorSkill；其余为内置风格或短剧类型。
    */
   activeStorySkillId: string
+  storyStyleId: string
+  storyGenreId: string
+  /** 内置短剧对白参考类型。 */
+  scriptReferenceType: string
 }
 
 export interface DirectorSkillDoc {
@@ -353,6 +358,34 @@ function hydrateTts(
   return { list, activeId: active.id, active: asTts(active) }
 }
 
+/** 已有 AutoDL Token 时，把后加的内置工作流补进接入列表。 */
+function ensureBuiltinAutodlWorkflows(list: VideoProfile[]): VideoProfile[] {
+  const donor = list.find((profile) => isAutodlVideoProfile(profile) && String(profile.apiKey || '').trim())
+  const token = String(donor?.apiKey || '').trim()
+  if (!token) return list
+  const missing = AUTODL_WORKFLOWS.filter(
+    (workflow) => !list.some((profile) => isAutodlVideoProfile(profile) && profile.workflowId === workflow.id)
+  )
+  if (!missing.length) return list
+  return [
+    ...list,
+    ...missing.map((workflow) =>
+      videoFromEndpoint(
+        {
+          baseUrl: donor?.baseUrl || AUTODL_BASE_URL,
+          apiKey: token,
+          workflowId: workflow.id,
+          promptStyle: 'scene-narrative',
+          provider: 'autodl',
+          stillMode: 'identity',
+          adapter: { type: 'comfyui-workflow' }
+        },
+        workflow.name
+      )
+    )
+  ]
+}
+
 function isAutodlVideoProfile(profile: { provider?: string; baseUrl?: string; adapter?: AdapterConfig; workflowId?: string }): boolean {
   const normalized = normalizeStoredVideoEndpoint(profile)
   return normalized.provider === 'autodl' || isAutodlHost(normalized.baseUrl || '')
@@ -404,7 +437,7 @@ function hydrateVideo(
         )
       })
     : [videoFromEndpoint(normalizeStoredVideoEndpoint(fallback), '默认视频')]
-  const isolated = isolateVideoKeys(list)
+  const isolated = ensureBuiltinAutodlWorkflows(isolateVideoKeys(list))
   const activeId = isolated.some((p) => p.id === savedActiveId) ? (savedActiveId as string) : isolated[0].id
   const active = isolated.find((p) => p.id === activeId) || isolated[0]
   return { list: isolated, activeId: active.id, active: asVideo(active) }
@@ -473,8 +506,17 @@ function buildDefaults(): AppSettings {
     musics: [musicFirst],
     activeMusicId: musicFirst.id,
     directorSkill: null,
-    activeStorySkillId: GENERAL_STORY_SKILL_ID
+    activeStorySkillId: GENERAL_STORY_SKILL_ID,
+    storyStyleId: GENERAL_STORY_SKILL_ID,
+    storyGenreId: GENERAL_STORY_SKILL_ID,
+    scriptReferenceType: 'auto'
   }
+}
+
+function resolveStoryPreference(value: unknown, legacy: unknown, group: 'style' | 'genre', hasCustom: boolean): string {
+  const id = typeof value === 'string' && value ? value : typeof legacy === 'string' ? legacy : ''
+  if (group === 'style' && id === 'custom' && hasCustom) return id
+  return storySkillById(id)?.group === group ? id : GENERAL_STORY_SKILL_ID
 }
 
 function parseSettings(raw: string | null): AppSettings {
@@ -604,6 +646,9 @@ function parseSettings(raw: string | null): AppSettings {
       musics: music.list,
       activeMusicId: music.activeId,
       directorSkill: normalizeDirectorSkill(parsed.directorSkill),
+      storyStyleId: resolveStoryPreference(parsed.storyStyleId, parsed.activeStorySkillId, 'style', Boolean(normalizeDirectorSkill(parsed.directorSkill))),
+      storyGenreId: resolveStoryPreference(parsed.storyGenreId, parsed.activeStorySkillId, 'genre', Boolean(normalizeDirectorSkill(parsed.directorSkill))),
+      scriptReferenceType: typeof parsed.scriptReferenceType === 'string' ? parsed.scriptReferenceType : 'auto',
       activeStorySkillId: normalizeStorySkillId(
         parsed.activeStorySkillId,
         Boolean(normalizeDirectorSkill(parsed.directorSkill))
@@ -1112,9 +1157,10 @@ export const useSettingsStore = defineStore('settings', () => {
   /** 创作偏好：选内置工作流（h3/h3-v5/wan-prime）作为默认视频模型；传 undefined = 跟随已配置接入 */
   function selectStorySkill(id: string) {
     const next = normalizeStorySkillId(id, Boolean(config.value.directorSkill))
-    if (config.value.activeStorySkillId === next) return
+    const group = storySkillById(next)?.group
     touch()
-    config.value = { ...config.value, activeStorySkillId: next }
+    if (group === 'genre') config.value = { ...config.value, activeStorySkillId: next, storyGenreId: next }
+    else config.value = { ...config.value, activeStorySkillId: next, storyStyleId: next }
   }
 
   function selectVideoModelDefault(model?: VideoGenModel) {

@@ -3,6 +3,7 @@ import {
   VIDEO_DEFAULT_WORKFLOW_ID,
   VIDEO_DIGITAL_HUMAN_WORKFLOW_ID,
   VIDEO_FL2VA_WORKFLOW_ID,
+  VIDEO_H3_MULTI_AUDIO_WORKFLOW_ID,
   VIDEO_H3_V5_10S_WORKFLOW_ID
 } from './env'
 
@@ -12,7 +13,7 @@ export const AUTODL_BASE_URL = VIDEO_AUTODL_ROOT
 export interface AutodlWorkflow {
   id: string
   name: string
-  mode: 'standard' | 'fl2va' | 'audio-sync'
+  mode: 'standard' | 'fl2va' | 'audio-sync' | 'multi-audio'
   maxDuration: number
   note: string
 }
@@ -49,6 +50,13 @@ export const AUTODL_WORKFLOWS: AutodlWorkflow[] = [
     mode: 'audio-sync',
     maxDuration: 15,
     note: '人物图 + 配音音频同步驱动，口播镜头用'
+  },
+  {
+    id: VIDEO_H3_MULTI_AUDIO_WORKFLOW_ID,
+    name: 'H3多图多音频生视频(升级画质)',
+    mode: 'multi-audio',
+    maxDuration: 15,
+    note: '多张参考图配合多段音频，画质升级'
   }
 ]
 

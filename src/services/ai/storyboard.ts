@@ -13,6 +13,8 @@ import { PLAY_LLM_TIMEOUT_MS, isAbortError, isTimeoutAbort, throwIfAborted } fro
 import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
 import { directorPlaybookText, importedDirectorPrefix } from '@/services/settings/directorSkill'
+import { scriptReferenceBrief } from './scriptReference'
+import { useSettingsStore } from '@/stores/settings'
 import { getLlmConfig, getVideoPromptStyle } from './runtime'
 import {
   buildStyleBriefForLLM,
@@ -33,6 +35,7 @@ import {
   extractPlayDirectives,
   extractSceneSlice,
   extractLocationsFromPlay,
+  containsSceneDramaText,
   extractPlayForSceneStage,
   extractSubjectsFromPlay,
   keepRecurringProps,
@@ -689,6 +692,8 @@ const SHOT_EXPAND_TIMEOUT_MS = 45_000
 const SHOT_EXPAND_CONCURRENCY = 5
 const SHOT_BATCH_CONCURRENCY = 3
 const SHOTS_PER_BATCH = 3
+const SHORT_PLAY_MAX_CHARS = 4000
+const SHORT_PLAY_MAX_SHOTS = 6
 const SHOT_BATCH_MAX_CHARS = 1100
 const SHOT_BATCH_MAX_PARAGRAPHS = 4
 
@@ -920,11 +925,11 @@ async function generateShotWorkBatch(
 ): Promise<{ shots: Record<string, unknown>[]; model?: string }> {
   const limit = Math.max(
     1,
-    Math.min(SHOTS_PER_BATCH, Math.round(Number(shotBudget) || SHOTS_PER_BATCH))
+    Math.min(SHORT_PLAY_MAX_SHOTS, Math.round(Number(shotBudget) || SHOTS_PER_BATCH))
   )
   const budgetLine =
     totalShotBudget && totalShotBudget > 0
-      ? `\n【镜数与时长硬上限】全片成片目标 ${targetDurationSec || '?'} 秒，允许上下浮动 ${DURATION_TOLERANCE_SEC} 秒。全片只批 ${totalShotBudget} 个小组；本工作包只出 ${limit} 镜，duration 合计必须是 ${durationCap || targetDurationSec || '?'} 秒。把本段动作与对白收进这 ${limit} 个镜头，靠运镜和画内调度表达，不要再拆小组。`
+      ? `\n【镜头与时长预算】全片目标 ${targetDurationSec || '?'} 秒，允许上下浮动 ${DURATION_TOLERANCE_SEC} 秒，建议约 ${totalShotBudget} 镜。本段最多 ${limit} 镜；按照剧情和对白自然安排，优先合并同一场景的连续动作与对话，不为凑镜数增加空镜。${durationCap ? `本段总时长约 ${durationCap} 秒。` : ''}`
       : ''
   const parseBatch = (content: string): Record<string, unknown>[] => {
     try {
@@ -935,16 +940,12 @@ async function generateShotWorkBatch(
           ? raw
           : []
       if (rows.length) {
-        return rows
-          .slice(0, limit)
-          .filter((item: unknown) => item && typeof item === 'object') as Record<string, unknown>[]
+        return rows.filter((item: unknown) => item && typeof item === 'object') as Record<string, unknown>[]
       }
     } catch {
       /* 兼容普通聊天模型返回的自然语言分镜表。 */
     }
-    return parseOutlineText(content)
-      .slice(0, limit)
-      .map((outline) => outlineToRawShot(outline))
+    return parseOutlineText(content).map((outline) => outlineToRawShot(outline))
   }
   const ask = async () =>
     callLLM({
@@ -955,6 +956,7 @@ async function generateShotWorkBatch(
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
 忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
+短剧以对白和行动共同推进：原文有对白时，优先让多数镜头承载原文台词；只有确有必要的转场、动作或沉默反应才保留少量无台词镜头，不要连续安排多个空镜。原文没有对白或用户明确要求无声时不得编造台词。同场景连续的问答和反应可在一个模型允许的镜头中完成；每镜必须推进新的动作、信息或情绪，禁止为同一动作重复生成镜头。保留全部原文台词，不得为了减少镜数删词。
 visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频时间轴，从0秒到本镜结束按实际拍点分2–5段。每段写清谁行动、谁说话、其他人如何占位和反应、表情变化以及一个有动机的运镜，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要机械等分时间。
 每镜要写清景别和人物空间关系。人物看场景内的人或物，不看镜头。
 优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字、从0秒覆盖到结束的2-5段电影化时间轴","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${limit} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
@@ -964,7 +966,7 @@ visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体�
           content: `工作包：${batch.label}
 已有人物：${subjectNames.join('、') || '（按原文识别）'}
 已有地点：${sceneNames.join('、') || '（按原文识别）'}
-当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。${durationCap ? `本工作包的成片时长就是 ${durationCap} 秒，只出 ${limit} 镜，duration 写成 ${durationCap}。` : `每镜 duration 在 ${MIN_SHOT_SEC}–${shotDurationLimit(input)} 秒。`}同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整长镜头。${budgetLine}
+当前视频模型单镜最长 ${shotDurationLimit(input)} 秒。每镜 duration 在 ${MIN_SHOT_SEC}–${shotDurationLimit(input)} 秒内，依据剧情和对白调整。${durationCap ? `本段总时长约 ${durationCap} 秒。` : ''}同一地点、同一人物、同一连续行动能在上限内拍完时，优先合成一个完整镜头。${budgetLine}
 ${directives ? `\n全片约束（只用于保真）：\n${directives}\n` : ''}
 ${batch.previousHint ? `上一工作包末尾（只用于承接，不要重复拍）：\n${batch.previousHint}\n` : ''}
 本工作包剧本原文：
@@ -977,7 +979,7 @@ ${batch.nextHint ? `\n下一工作包开头（只用于留下末态，不要提�
       // 不强制 response_format：部分兼容接口在并发 JSON 约束下会一直推理到超时。
       // 提示仍优先要 JSON，同时下方解析器接受普通分镜文本。
       jsonMode: false,
-      maxTokens: 3200,
+      maxTokens: limit > 3 ? 6000 : 3200,
       signal: input.signal,
       timeoutMs: retry ? FILM_SHOT_OUTLINE_TIMEOUT_MS : 90_000
     })
@@ -1485,9 +1487,9 @@ async function realStoryboard(
 voicePrompt 是这个角色开口说话时的音色与表达，必须自动写、不许空着：kind 为 person 的角色都要写，按「年龄性别 + 音色质地（沙哑/清亮/温吞/鼻音重等）+ 语速与力度 + 情绪基调 + 身份口音或口头习惯」写成一句中文，25–60 字，能直接当配音导演给演员的指令。同一个角色全片只写一条，不要每场换声线；动物和产品（kind 为 animal/other）写空字符串。\n只输出 JSON：{"subjects":[{"name":"短名","kind":"person|animal|other","description":"具体外貌锁定，不含场景","role":"身份、剧情作用和别称","stateVariants":"本集内状态变化，没有写单一状态","voicePrompt":"说话时的音色与表达，非人物写空","fromReference":false}]}。输出前自行检查：人物章每一个 ### 都单独建档；有台词、有动作或被镜头看见的人不能并成路人；每个 person 角色都有 voicePrompt。`
 
     const sceneSystem = `你是场景与视觉设定提炼子智能体。只提炼本集会拍到的**地点**，不写人物，不拆分镜。
-地点来源优先：剧本「## 环境与场景」下的地点；其次场记行「内景｜地点｜天气」或「外景｜地点｜」。同一地点只建一条，不要按「场景一、场景二」每场复制一条。
+地点来源优先：剧本「## 环境与场景」下的地点；其次场记行「内景｜地点｜天气」或「外景｜地点｜」。没有明确场记时从正文的空间线索判断，若剧本没有说明具体地点，只写“未明确地点的室内/室外”并注明待补充，不要虚构。场次标题如「近身缝合」「未尽之言」通常是剧情标题，不能直接当地点；同一地点只建一条。
 scene.name 用地点短名（如旧仓房、公益饭堂院子），不要用「场景一」。
-每个地点写无人时的空间：地面、建筑、天气、光、年代物件。
+每个地点只写无人时的空间、地面、建筑、天气、光和年代物件。description、mainAnchor、anchors、lighting 中严禁复制人物动作、台词、镜头说明、场次标题或故事情节。只保留原文能支持的环境信息，不得编造材质、陈设或昼夜；未明确的写待确认。主锚必须是场景内实际存在的静态物件或建筑，不是事件名称；不明确时写“待确定”。
 ${productNote}
 ${stylePriority}
 只输出 JSON：{"aesthetic":"全片中文氛围","h3Aesthetic":"English production aesthetic with concrete lighting, material, color and camera qualities","styleBrief":"本集冲突和视觉抓点","colorPalette":"可见颜色","lightingNote":"时辰与光源","scenes":[{"name":"地点短名","description":"无人时的空间、地面、建筑、天气、动态和光线，至少80字","mainAnchor":"主视觉实物","anchors":"全景；主锚；地面站位区；光源或次锚","lighting":"时辰和光源"}]}
@@ -1564,11 +1566,7 @@ ${stylePriority}
     if (stageOrder[startAt] <= stageOrder.scenes) {
       onProgress?.('第 2/3 步：只提炼场景锚点…')
       const playScenes = extractLocationsFromPlay(play)
-      if (playScenes.length) {
-        log(`✓ 从剧本文字抽出 ${playScenes.length} 个地点，不走模型`)
-        onProgress?.(`剧本里已有地点，直接落下 ${playScenes.length} 个场景`)
-        scenePart = { raw: { scenes: playScenes }, model: parallelModel }
-      } else {
+      {
         const sceneUser = `主题：${input.topic || '（未填）'}
 比例：${input.aspectRatio}
 
@@ -1580,13 +1578,21 @@ ${extractPlayForSceneStage(play)}`
             sceneSystem,
             8000,
             PLAY_LLM_TIMEOUT_MS,
-            (raw) => extractSceneRows(raw).length > 0,
-            '上一轮虽然是 JSON，但 scenes 数组缺失或放错了层级。立刻只输出一个对象，顶层必须有非空 scenes 数组。不要套 data、result，不要写思考。',
+            (raw) => {
+              const scenes = extractSceneRows(raw)
+              return scenes.length > 0 && scenes.every((scene: any) =>
+                String(scene?.name || '').trim() && String(scene?.description || '').trim() &&
+                !containsSceneDramaText([scene.name, scene.description, scene.mainAnchor, scene.anchors, scene.lighting].filter(Boolean).join('\n'))
+              )
+            },
+            '场景结果无效：请输出非空 scenes 数组，地点描述只包含无人环境，禁止分镜、人物动作和对白。若地点不明确请标为待确认，不要用剧情标题冒充地点。',
             sceneUser
           )
         } catch (error) {
           if (isAbortError(error) && !isTimeoutAbort(error)) throw error
-          throw error
+          if (!playScenes.length) throw error
+          onProgress?.('模型未完成场景提炼，先保留剧本中明确标注的地点；环境细节请人工补充。')
+          scenePart = { raw: { scenes: playScenes }, model: parallelModel }
         }
       }
       let rows = extractSceneRows(scenePart.raw)
@@ -1609,7 +1615,7 @@ ${extractPlayForSceneStage(play)}`
       onProgress?.(`✓ 已有 ${input.existingScenes?.length || 0} 个场景，从已保存结果继续`)
     }
 
-    onProgress?.('第 3/3 步：按场次拆成小组并发写分镜…')
+    onProgress?.('第 3/3 步：根据剧情和视频模型规划分镜…')
     const subjectNames = (Array.isArray(subjectPart.raw?.subjects) ? subjectPart.raw.subjects : [])
       .map((item: { name?: unknown }) => String(item?.name || '').trim())
       .filter(Boolean)
@@ -1622,10 +1628,15 @@ ${extractPlayForSceneStage(play)}`
     const maxShotSec = shotDurationLimit(input)
     const slices = durationSlices(targetDurationSec, maxShotSec)
     const totalShotBudget = slices.length
-    const workBatches = buildShotWorkBatches(play, totalShotBudget || undefined)
+    const wholePlay = play.length <= SHORT_PLAY_MAX_CHARS && (!totalShotBudget || totalShotBudget <= SHORT_PLAY_MAX_SHOTS)
+    const workBatches = wholePlay
+      ? [{ index: 0, label: '完整剧情', excerpt: play }]
+      : buildShotWorkBatches(play, totalShotBudget || undefined)
     if (!workBatches.length) throw new Error('剧本正文为空，无法拆分镜')
     onProgress?.(
-      slices.length
+      wholePlay
+        ? '剧情适合整体策划：一次完成分镜，优先保留对白并合并连续动作…'
+        : slices.length
         ? `目标成片 ${targetDurationSec} 秒，单镜最长 ${maxShotSec} 秒 → ${workBatches.length} 个小组（${slices.join(' + ')} 秒）`
         : `已拆成 ${workBatches.length} 个剧情工作包；每包最多 ${SHOTS_PER_BATCH} 镜，同时运行 ${Math.min(SHOT_BATCH_CONCURRENCY, workBatches.length)} 个小组…`
     )
@@ -1634,10 +1645,11 @@ ${extractPlayForSceneStage(play)}`
     const batchModels: Array<string | undefined> = new Array(workBatches.length)
     // 有时长切片时，一组只出一镜，时长就是这一片的秒数。
     const perBatchBudget = (index: number) => {
+      if (wholePlay) return totalShotBudget ? Math.min(SHORT_PLAY_MAX_SHOTS, Math.max(totalShotBudget, 1)) : SHORT_PLAY_MAX_SHOTS
       if (slices.length) return 1
       return undefined
     }
-    const perBatchSeconds = (index: number) => slices[index]
+    const perBatchSeconds = (index: number) => wholePlay ? targetDurationSec || undefined : slices[index]
     const failed: Array<{ index: number; label: string; error: string }> = []
     let completed = 0
     let persistedPrefix = 0
@@ -1756,12 +1768,11 @@ ${extractPlayForSceneStage(play)}`
     }
 
     let rawShots = batchShots.flatMap((rows) => rows || [])
-    // 兜底：模型超发时按预算截断，宁可少一镜也不让成片时长失控。
+    // 保留模型返回的全部镜头，避免截断时丢失后半段对白或剧情。
     if (totalShotBudget && rawShots.length > totalShotBudget) {
       onProgress?.(
-        `⚠ 模型给出 ${rawShots.length} 镜，超出 ${targetDurationSec} 秒的 ${totalShotBudget} 镜预算，按剧本顺序保留前 ${totalShotBudget} 镜`
+        `⚠ 模型给出 ${rawShots.length} 镜，超过建议预算 ${totalShotBudget} 镜，保留全部内容供检查`
       )
-      rawShots = rawShots.slice(0, totalShotBudget)
     }
     if (!rawShots.length) {
       throw new Error(`所有分镜小组均失败。人物和场景已保留；请重试拆分镜。${failed[0]?.error ? `首个错误：${failed[0].error}` : ''}`)
@@ -1831,7 +1842,7 @@ ${extractPlayForSceneStage(play)}`
     const warnings = storyboardQualityIssues(parsed, input)
     if (warnings.length) {
       log(`⚠ 并行提炼完成，保留可编辑稿并提示 ${warnings.length} 项：${warnings.join('；')}`)
-      onProgress?.(`分阶段提炼完成；有 ${warnings.length} 项可在画布继续调整`)
+      onProgress?.(`分镜已生成，有 ${warnings.length} 项建议检查：${warnings.slice(0, 3).join('；')}${warnings.length > 3 ? '；其他建议见日志' : ''}`)
     } else {
       onProgress?.('人物、场景、分镜均已完成并绑定…')
     }
@@ -2266,6 +2277,29 @@ export function storyboardQualityIssues(
   }
   const people = (result.subjects ?? []).filter((s) => s.kind !== 'other')
   const voicedShots = result.shots.filter((shot) => (shot.voiceover || '').trim())
+  const sourceHasDialogue = (input.content || '').split('\n').some((line) => {
+    const match = line.trim().match(/^(?:\*\*)?([^：:\n]{1,16})[：:](?:\*\*)?\s*(\S.+)$/)
+    const label = match?.[1]?.replace(/\*\*/g, '').trim() || ''
+    return Boolean(match && !/^(?:场景|场次|人物|地点|时间|画面|动作|音效|环境|剧情|背景|标题|风格|时长|镜头|道具|备注|旁白说明|类型|目标|关键词)$/.test(label))
+  })
+  if (sourceHasDialogue && result.shots.length >= 3 && voicedShots.length < Math.ceil(result.shots.length * 0.7)) {
+    issues.push('无台词镜头偏多：请检查原剧本对白是否遗漏，优先合并连续动作与对话，只保留少量确有叙事作用的无台词镜头。')
+  }
+  if (sourceHasDialogue && result.shots.some((shot, index) => index > 0 && !shot.voiceover?.trim() && !result.shots[index - 1].voiceover?.trim())) {
+    issues.push('出现连续无台词镜头，请检查是否能与相邻对白镜头合并；不要为减少镜头删掉原文内容。')
+  }
+  const compactShot = (text: string) => text.replace(/\s|[，。！？、,.!?；;：:]/g, '').toLowerCase()
+  for (let index = 1; index < result.shots.length; index++) {
+    const previous = result.shots[index - 1]
+    const current = result.shots[index]
+    const visual = compactShot(current.visualPrompt || '')
+    const priorVisual = compactShot(previous.visualPrompt || '')
+    const dialogue = compactShot(current.voiceover || '')
+    const priorDialogue = compactShot(previous.voiceover || '')
+    if ((visual.length >= 20 && visual === priorVisual) || (dialogue.length >= 8 && dialogue === priorDialogue)) {
+      issues.push(`第 ${index} 镜与第 ${index + 1} 镜画面或对白重复，请核对剧情并合并或改正。`)
+    }
+  }
   const looksLikeAd = /带货|产品演示|口播文案/.test(`${input.topic || ''}\n${input.content || ''}`)
   if (
     !looksLikeAd &&
@@ -3219,10 +3253,11 @@ async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayD
     messages: [
       {
         role: 'system',
-        content: `你是编剧。根据用户的要求和已有内容，直接写出剧本。
+        content: `${importedDirectorPrefix()}你是编剧。根据用户的要求和已有内容，直接写出剧本。
 只输出 Markdown 正文，不要 JSON，不要解释，不要自检。
 用简体中文。先写标题、故事背景、人物、环境与场景，再写分场。分场标题用「## 场景N｜标题」，对白用「**人物名：**」。
-用户给了时长，就按这个时长写完。有交流的地方写出能念的对白。不要新增用户没提的价格和功效。`
+用户给了时长，就按这个时长写完。有交流的地方写出能念的对白。不要新增用户没提的价格和功效。
+${scriptReferenceBrief(useSettingsStore().config.scriptReferenceType, input.topic, input.content, input.continueHint, ...(input.keywords || []))}`
       },
       {
         role: 'user',

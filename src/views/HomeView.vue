@@ -431,6 +431,9 @@ async function moveSelectedLibrary() {
         <button type="button" :class="{ on: nav === 'projects' }" @click="nav = 'projects'">
           <HomeIcon name="folder" :size="18" /> 我的项目
         </button>
+        <button type="button" @click="router.push('/scripts')">
+          <HomeIcon name="script" :size="18" /> 剧本管理
+        </button>
         <button type="button" :class="{ on: nav === 'library' }" @click="nav = 'library'">
           <HomeIcon name="library" :size="18" /> 素材库
         </button>

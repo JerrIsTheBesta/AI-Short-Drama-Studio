@@ -9,6 +9,7 @@ import { nextPipelineStep } from '@/services/canvas/pipeline'
 import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { desktop, isDesktop } from '@/services/desktop'
 import { autodlVideoProfileId } from '@/services/ai/runtime'
+import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference } from '@/services/ai/scriptReference'
 import type { VideoGenModel } from '@/types'
 import type { AgentAttachment } from '@/services/canvas/attachments'
 import type { TraceRow, TraceStatus } from '@/services/canvas/agentTrace'
@@ -117,7 +118,7 @@ const ASPECT_OPTIONS: { value: AspectRatio; label: string }[] = [
 ]
 /* 创作偏好弹窗：比例 + 图像/视频模型收进一个面板 */
 const prefOpen = ref(false)
-const prefTab = ref<'video' | 'image'>('video')
+const prefTab = ref<'video' | 'image' | 'knowledge'>('video')
 /* 父容器 overflow 会裁剪浮层，所以传送到 body 按按钮位置定位 */
 const prefBtn = ref<HTMLElement | null>(null)
 const prefPanel = ref<HTMLElement | null>(null)
@@ -157,12 +158,19 @@ const skillStyle = ref<Record<string, string>>({})
 const importingSkill = ref(false)
 const styleSkills = STORY_SKILLS.filter((skill) => skill.group === 'style')
 const genreSkills = STORY_SKILLS.filter((skill) => skill.group === 'genre')
-const activeStorySkillId = computed(() => settings.config.activeStorySkillId || GENERAL_STORY_SKILL_ID)
+const storyIconFiles = import.meta.glob<string>('@/assets/story-icons/*.png', { eager: true, query: '?url', import: 'default' })
+function storyIcon(id: string): string {
+  const name = id === GENERAL_STORY_SKILL_ID ? 'general' : id
+  return Object.entries(storyIconFiles).find(([path]) => path.endsWith(`/${name}.png`))?.[1] || ''
+}
+const activeStyleId = computed(() => settings.config.storyStyleId || GENERAL_STORY_SKILL_ID)
+const activeGenreId = computed(() => settings.config.storyGenreId || GENERAL_STORY_SKILL_ID)
+const activeStorySkillId = computed(() => skillTab.value === 'genre' ? activeGenreId.value : activeStyleId.value)
 const importedSkill = computed(() => settings.config.directorSkill)
 const activeStorySkillName = computed(() => {
-  if (activeStorySkillId.value === CUSTOM_STORY_SKILL_ID) return importedSkill.value?.name || '我的技能'
-  if (activeStorySkillId.value === GENERAL_STORY_SKILL_ID) return '通用分镜'
-  return STORY_SKILLS.find((skill) => skill.id === activeStorySkillId.value)?.name || '通用分镜'
+  const style = activeStyleId.value === CUSTOM_STORY_SKILL_ID ? importedSkill.value?.name || '我的技能' : STORY_SKILLS.find((skill) => skill.id === activeStyleId.value)?.name || '通用分镜'
+  const genre = STORY_SKILLS.find((skill) => skill.id === activeGenreId.value)?.name || '不限题材'
+  return `${style} · ${genre}`
 })
 
 function placeSkillPanel() {
@@ -202,6 +210,10 @@ function closeSkillPanel() {
 }
 
 function pickStorySkill(id: string) {
+  if (id === GENERAL_STORY_SKILL_ID && skillTab.value === 'genre') {
+    settings.update({ storyGenreId: GENERAL_STORY_SKILL_ID })
+    return
+  }
   settings.selectStorySkill(id)
 }
 
@@ -321,6 +333,24 @@ const VIDEO_RES_OPTIONS: { value: VideoResolution; label: string }[] = [
 const currentVideoResolution = computed<VideoResolution>(
   () => project.current?.settings.defaultVideoResolution || '768p'
 )
+
+const scriptReferenceType = computed({
+  get: () => normalizeScriptReference(settings.config.scriptReferenceType),
+  set: (value: string) => settings.update({ scriptReferenceType: normalizeScriptReference(value) })
+})
+const videoChoice = computed({
+  get: () => videoDefault.value ? `workflow:${videoDefault.value}` : `profile:${activeVideo.value?.id || ''}`,
+  set: (value: string) => {
+    if (value.startsWith('workflow:')) {
+      const workflow = VIDEO_WORKFLOW_OPTIONS.find((item) => item.value === value.slice(9))
+      if (workflow) pickVideoWorkflow(workflow.value)
+    } else if (value.startsWith('profile:') && value.slice(8)) pickVideo(value.slice(8))
+  }
+})
+const imageChoice = computed({
+  get: () => activeImage.value?.id || '',
+  set: (value: string) => { if (value) pickImage(value) }
+})
 
 function pickVideoResolution(value: VideoResolution) {
   project.setDefaultVideoResolution(value)
@@ -768,44 +798,21 @@ function visibleRows(rows: TraceRow[]) {
                 >
                   图片偏好
                 </button>
+                <button type="button" :class="{ on: prefTab === 'knowledge' }" @click="prefTab = 'knowledge'">写作知识库</button>
               </div>
-              <div class="pref-body">
+              <div v-if="prefTab !== 'knowledge'" class="pref-body">
                 <div class="pref-models">
                   <p class="pref-k">模型选择</p>
                   <template v-if="prefTab === 'video'">
-                    <p class="pref-g">工作流（用设置里的 AutoDL 令牌）</p>
-                    <button
-                      v-for="w in VIDEO_WORKFLOW_OPTIONS"
-                      :key="w.value"
-                      type="button"
-                      class="pref-model"
-                      :class="{ on: videoDefault === w.value }"
-                      @click="pickVideoWorkflow(w.value)"
-                    >
-                      <span class="pref-radio" />
-                      <span class="pref-model-text">
-                        <b>{{ w.name }}</b>
-                        <small>{{ w.desc }}</small>
-                      </span>
-                    </button>
-                    <p class="pref-g">已配置的视频接入</p>
-                    <p v-if="!videoProfiles.length" class="pref-empty">
-                      还没有视频模型，去「设置」里添加一个
-                    </p>
-                    <button
-                      v-for="p in videoProfiles"
-                      :key="p.id"
-                      type="button"
-                      class="pref-model"
-                      :class="{ on: !videoDefault && p.id === activeVideo?.id }"
-                      @click="pickVideo(p.id)"
-                    >
-                      <span class="pref-radio" />
-                      <span class="pref-model-text">
-                        <b>{{ videoProfileTag(p) ? `${videoProfileTag(p)} · ${p.name}` : p.name }}</b>
-                        <small>{{ videoSub(p) }}</small>
-                      </span>
-                    </button>
+                    <select v-model="videoChoice" class="pref-select" aria-label="选择视频模型">
+                      <optgroup label="内置工作流">
+                        <option v-for="w in VIDEO_WORKFLOW_OPTIONS" :key="w.value" :value="`workflow:${w.value}`">{{ w.name }}</option>
+                      </optgroup>
+                      <optgroup v-if="videoProfiles.length" label="已配置的视频接入">
+                        <option v-for="p in videoProfiles" :key="p.id" :value="`profile:${p.id}`">{{ videoProfileTag(p) ? `${videoProfileTag(p)} · ${p.name}` : p.name }}</option>
+                      </optgroup>
+                      <option v-if="!videoProfiles.length && !videoDefault" value="profile:">请选择视频模型</option>
+                    </select>
                     <p class="pref-k pref-k-gap">视频分辨率</p>
                     <div class="res-row">
                       <button
@@ -822,23 +829,10 @@ function visibleRows(rows: TraceRow[]) {
                     <p class="pref-hint">1080p 只在 H3 v5 上出到 1080p，其它模型仍按 768p。</p>
                   </template>
                   <template v-else>
-                    <p v-if="!imageProfiles.length" class="pref-empty">
-                      还没有图像模型，去「设置」里添加一个
-                    </p>
-                    <button
-                      v-for="p in imageProfiles"
-                      :key="p.id"
-                      type="button"
-                      class="pref-model"
-                      :class="{ on: p.id === activeImage?.id }"
-                      @click="pickImage(p.id)"
-                    >
-                      <span class="pref-radio" />
-                      <span class="pref-model-text">
-                        <b>{{ p.name }}</b>
-                        <small>{{ p.model }}</small>
-                      </span>
-                    </button>
+                    <select v-model="imageChoice" class="pref-select" aria-label="选择图像模型">
+                      <option v-if="!imageProfiles.length" value="">请先在设置中添加图像模型</option>
+                      <option v-for="p in imageProfiles" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+                    </select>
                   </template>
                 </div>
                 <div class="pref-ratios">
@@ -859,6 +853,11 @@ function visibleRows(rows: TraceRow[]) {
                   <p class="pref-hint">选好即生效，智能体生成图片和视频都会照此执行；单个节点仍可单独指定模型。</p>
                 </div>
               </div>
+              <div v-else class="knowledge-preference">
+                <p class="pref-k">选择写作知识库</p>
+                <p class="pref-hint">写剧本时参考内置写作方法和原创对白示例；自动匹配按题材关键词选择，与剧本管理同步。</p>
+                <div class="knowledge-grid"><button v-for="item in SCRIPT_REFERENCE_OPTIONS" :key="item.value" type="button" class="knowledge-option" :class="{ on: scriptReferenceType === item.value }" @click="scriptReferenceType = item.value">{{ item.label }}</button></div>
+              </div>
               </div>
             </Teleport>
           </div>
@@ -867,7 +866,7 @@ function visibleRows(rows: TraceRow[]) {
               ref="skillBtn"
               type="button"
               class="bar-btn pref-btn"
-              :class="{ on: activeStorySkillId !== GENERAL_STORY_SKILL_ID }"
+              :class="{ on: activeStyleId !== GENERAL_STORY_SKILL_ID || activeGenreId !== GENERAL_STORY_SKILL_ID }"
               :disabled="busy"
               :title="`技能：${activeStorySkillName}`"
               @click.stop="toggleSkillPanel"
@@ -886,8 +885,8 @@ function visibleRows(rows: TraceRow[]) {
                 @click.stop
               >
                 <div class="pref-tabs">
-                  <button type="button" :class="{ on: skillTab === 'style' }" @click="skillTab = 'style'">分镜风格</button>
-                  <button type="button" :class="{ on: skillTab === 'genre' }" @click="skillTab = 'genre'">短剧类型</button>
+                  <button type="button" :class="{ on: skillTab === 'style' }" @click="skillTab = 'style'">分镜方式</button>
+                  <button type="button" :class="{ on: skillTab === 'genre' }" @click="skillTab = 'genre'">题材与内容</button>
                   <button type="button" :class="{ on: skillTab === 'mine' }" @click="skillTab = 'mine'">我的</button>
                 </div>
                 <div class="skill-body">
@@ -898,9 +897,10 @@ function visibleRows(rows: TraceRow[]) {
                     @click="pickStorySkill(GENERAL_STORY_SKILL_ID)"
                   >
                     <span class="pref-radio" />
+                    <img v-if="storyIcon(GENERAL_STORY_SKILL_ID)" class="skill-icon" :src="storyIcon(GENERAL_STORY_SKILL_ID)" alt="" />
                     <span class="pref-model-text">
-                      <b>通用分镜</b>
-                      <small>按内置导演手册拆镜，不额外套风格或类型。</small>
+                      <b>{{ skillTab === 'genre' ? '不限题材' : '通用分镜' }}</b>
+                      <small>{{ skillTab === 'genre' ? '跟随用户要求，不指定题材。' : '按故事需要选择镜头方式。' }}</small>
                     </span>
                   </button>
                   <template v-if="skillTab === 'style'">
@@ -913,6 +913,7 @@ function visibleRows(rows: TraceRow[]) {
                       @click="pickStorySkill(skill.id)"
                     >
                       <span class="pref-radio" />
+                      <img v-if="storyIcon(skill.id)" class="skill-icon" :src="storyIcon(skill.id)" alt="" />
                       <span class="pref-model-text">
                         <b>{{ skill.name }}</b>
                         <small>{{ skill.summary }}</small>
@@ -929,6 +930,7 @@ function visibleRows(rows: TraceRow[]) {
                       @click="pickStorySkill(skill.id)"
                     >
                       <span class="pref-radio" />
+                      <img v-if="storyIcon(skill.id)" class="skill-icon" :src="storyIcon(skill.id)" alt="" />
                       <span class="pref-model-text">
                         <b>{{ skill.name }}</b>
                         <small>{{ skill.summary }}</small>
@@ -966,7 +968,7 @@ function visibleRows(rows: TraceRow[]) {
                       <button v-if="importedSkill" type="button" class="skill-act danger" @click="clearImportedSkill">清除</button>
                     </div>
                   </template>
-                  <p class="pref-hint">选好即生效。写剧本、拆分镜和写提示词都会按当前技能来。</p>
+                  <p class="pref-hint">分镜方式与题材可以同时选择。写剧本、拆分镜和优化视频提示词时作为建议参考；用户要求和剧本内容优先。</p>
                 </div>
               </div>
             </Teleport>
@@ -1409,6 +1411,10 @@ textarea {
   gap: 4px;
   padding: 10px;
 }
+.skill-body .pref-model { align-items: center; min-height: 58px; }
+.skill-body .pref-radio { margin-top: 0; }
+.skill-icon { width: 44px; height: 44px; object-fit: contain; flex: 0 0 44px; }
+.skill-body .pref-model-text small { white-space: normal; line-height: 1.45; }
 .skill-acts {
   display: flex;
   flex-wrap: wrap;
@@ -1494,6 +1500,22 @@ textarea {
   max-height: 520px;
   overflow: auto;
 }
+.pref-select {
+  display: block;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+}
+.knowledge-preference { padding: 14px; }
+.knowledge-preference .pref-hint { margin: 4px 0 14px; }
+.knowledge-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
+.knowledge-option { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-2); color: var(--color-text-2); text-align: left; cursor: pointer; }
+.knowledge-option.on { border-color: var(--color-accent); color: var(--color-text-1); background: var(--color-fill); }
 .pref-k-gap {
   margin-top: 14px;
 }
