@@ -7,6 +7,7 @@ import { isNodeRunning } from '@/services/canvas/jobs'
 import { needsPlayReview } from '@/services/canvas/playGate'
 import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
+import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import type { ShotAudioMode } from '@/types'
@@ -129,6 +130,7 @@ function openDetail() {
 
 <template>
   <div class="anode" :class="[`st-${status}`, { on: selected && panelOpen, busy: generating }]">
+    <NodeLinkPlus :node-id="id" />
     <Handle id="in" type="target" :position="Position.Left" class="hndl" />
 
     <div class="anode-top">
@@ -211,7 +213,7 @@ function openDetail() {
   padding: 10px 12px 8px;
   background: var(--color-bg-1);
   border: 1px solid var(--color-node-border);
-  border-radius: 12px;
+  border-radius: 6px;
   color: var(--color-text-1);
   box-shadow: var(--shadow-node);
   overflow: visible;

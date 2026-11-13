@@ -1,4 +1,5 @@
-import { callLLM, getAIMode } from '@/services/ai/client'
+import { getAIMode } from '@/services/ai/client'
+import { planStudioActions } from './aiSdkAgent'
 import { skillContextForAgent } from '@/skills'
 import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { useProjectStore } from '@/stores'
@@ -81,9 +82,9 @@ export interface AgentRunOptions {
 const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活一边告诉用户画布上发生了什么。
 
 硬性规则：
-1. 只输出 JSON：{ "say": "给用户看的话", "actions": [ ... ], "done": false }。actions 是“下一小批”真实画布操作，不是一次性的建议清单；工具执行后你会重新看到最新画布并继续判断。确认用户目标已经落到画布上时返回 done=true、actions=[]。
+1. 用工具调用操作画布。给用户看的话写在正文里，不要输出 JSON。工具是“下一小批”真实操作，不是建议清单；执行后你会重新看到最新画布并继续判断。目标已经落到画布上时不要再调用工具。
 1b. 你的本职是「动手帮忙」：操作画布（建/连/改/删/重跑节点、整理排布）、检查并修复错误、写专业剧本与分镜。默认直接动手把它做完，只在会烧掉大量额度或不可逆的批量生成上才先跟用户确认。没把握的地方宁可问清楚再动，但不要因为怕动画布而只给建议。
-2. 需求含糊（「帮我做」「开始」这类）时 actions 必须是空数组，say 里主动问主题、时长、只要剧本还是全流程。
+2. 需求含糊（「帮我做」「开始」这类）时不要调用工具，在正文里主动问主题、时长、只要剧本还是全流程。
 3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本。写剧本、改编、续写必须按 ai-short-film-screenwriter 的故事引擎、改编硬约束、节拍、AI 制作约束和逐场规则来；成稿前自检。必须含一句话故事、对抗引擎、完整梗概、人物小传（主角/对手/关键亲人，含欲望恐惧弧光）、环境与场景、每场场次任务、分场动作和对白；禁止口播/画面/时长四格表；禁止把传说压成高潮切片；禁止默片，相认/唤名/对峙/问答必须有出镜对白往来；不创建人物/场景/分镜节点。用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
 3c. 时长是硬预算，不是修辞：用户说了「约 40 秒」「30S」「1 分钟」这类目标成片时长，seed_script 和 generate_play 的 text 必须原样带上这句时长（系统按它反推剧本场次、正文字数和分镜数量；丢了就会拆出二十几镜、成片几分钟）。拆分镜后会检测总时长，只允许比用户要求多 10 秒或少 10 秒，超出就打回重拆。用户要短片却没说时长，在 say 里问清目标时长再动手。
@@ -136,24 +137,8 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "forget", "text": "要忘掉的记忆关键词" }
 
 问答与记忆规则：
-9. 用户在问问题、求建议、聊创作思路（不动画布）时，直接把你懂的写进 say，actions 返回空数组；答得具体，结合当前项目上下文和已记住的偏好。
+9. 用户在问问题、求建议、聊创作思路（不动画布）时，直接写在正文里，不要调用工具；答得具体，结合当前项目上下文和已记住的偏好。
 10. 用户说「记住…/以后都…」→ 用 remember；说「忘掉…」→ 用 forget。这类操作不需要其他动作。`
-
-function parseAgentJson(text: string): { say: string; actions: any[]; done: boolean } {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return { say: text.slice(0, 400), actions: [], done: true }
-  try {
-    const obj = JSON.parse(text.slice(start, end + 1))
-    return {
-      say: String(obj.say || '好的'),
-      actions: Array.isArray(obj.actions) ? obj.actions : [],
-      done: obj.done === true
-    }
-  } catch {
-    return { say: text.slice(0, 400), actions: [], done: true }
-  }
-}
 
 function skillSelectContext(userText: string) {
   const p = useProjectStore().current
@@ -385,12 +370,9 @@ export async function runAgentTurn(
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .slice(-8)
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-    const resp = await callLLM({
+    plan = await planStudioActions({
+      system: `${TOOLS_HINT}\n\n${skillPack.prompt}${directorManual ? `\n\n${directorManual}` : ''}${restrictToNodes ? `\n\n${NODE_PATH_RULE}` : ''}${memoryText ? `\n\n${memoryText}\n回答和规划时必须尊重上面的记忆。` : ''}`,
       messages: [
-        {
-          role: 'system',
-          content: `${TOOLS_HINT}\n\n${skillPack.prompt}${directorManual ? `\n\n${directorManual}` : ''}${restrictToNodes ? `\n\n${NODE_PATH_RULE}` : ''}${memoryText ? `\n\n${memoryText}\n回答和规划时必须尊重上面的记忆。` : ''}`
-        },
         {
           role: 'user',
           content: `当前项目上下文（按本轮需求摘录的摘要，明细不全；工具执行时读的是实时数据，需要更多信息就用工具查）：\n${projectContextPrompt(baseText)}\n\n上面是状态。下面对话里最后一句才是本轮任务。若用户在讲一个和当前剧本无关的新故事，不要沿用旧剧本。需求含糊就提问，不要瞎做。只修改用户点名的范围。${options.selectedNodeId ? `\n用户当前选中的节点：${options.selectedNodeId}（没点名其他节点时默认操作它）` : ''}${material ? `\n\n${material}\n\n上面这些是用户本轮附上的材料（附件 / 本地文件），优先直接使用，不要要求用户重新粘贴。` : ''}`
@@ -398,12 +380,10 @@ export async function runAgentTurn(
         ...chat
       ],
       temperature: 0.2,
-      jsonMode: true,
-      maxTokens: 2000,
+      maxOutputTokens: 2000,
       signal: options.signal,
       timeoutMs: 120_000
     })
-    plan = parseAgentJson(resp.content)
     plan.actions = gateModeActions(
       applyPlayGate(
         dedupeActions(alignNewStoryActions(sanitizeActions(plan.actions, baseText), baseText, history)),
@@ -474,24 +454,19 @@ export async function runAgentTurn(
     onEvent,
     replan: getAIMode() === 'real'
       ? async ({ error, completed, remaining, attempt }) => {
-          const response = await callLLM({
+          const repaired = await planStudioActions({
+            system: `${TOOLS_HINT}\n\n你正在做失败恢复。用工具给出修复动作，说明写在正文里。先根据错误、已完成步骤和最新项目状态判断根因属于：缺少上游产物、输入不合法、产物验收失败、临时服务错误，还是鉴权/额度/用户权限问题。\n- 缺上游：先补最小依赖，再让原目标继续。\n- 输入或产物质量问题：只修改有问题的局部节点，再重试目标。\n- 临时服务错误：允许一次同目标重试。\n- 鉴权、额度、内容安全或必须由用户决定的问题：不要调用工具，不得绕过。\n不要重复已经成功的工具，不要扩大用户授权范围，不要重做无关产物。最多给 4 个修复工具；AgentLoop 会在修复动作后自动重新验收原目标。`,
             messages: [
-              {
-                role: 'system',
-                content: `${TOOLS_HINT}\n\n你正在做失败恢复。只输出 JSON。先根据错误、已完成步骤和最新项目状态判断根因属于：缺少上游产物、输入不合法、产物验收失败、临时服务错误，还是鉴权/额度/用户权限问题。\n- 缺上游：先补最小依赖，再让原目标继续。\n- 输入或产物质量问题：只修改有问题的局部节点，再重试目标。\n- 临时服务错误：允许一次同目标重试。\n- 鉴权、额度、内容安全或必须由用户决定的问题：actions 返回空，不得绕过。\n不要重复已经成功的工具，不要扩大用户授权范围，不要重做无关产物。最多给 4 个修复 actions；AgentLoop 会在修复动作后自动重新验收原目标。`
-              },
               {
                 role: 'user',
                 content: `原任务：${userText}\n第 ${attempt} 次恢复。\n失败工具：${error.tool}\n错误：${error.message}\n已完成：${JSON.stringify(completed)}\n剩余：${JSON.stringify(remaining)}\n最新项目：${projectContextPrompt(userText)}`
               }
             ],
             temperature: 0.1,
-            jsonMode: true,
-            maxTokens: 1200,
+            maxOutputTokens: 1200,
             signal: options.signal,
             timeoutMs: 90_000
           })
-          const repaired = parseAgentJson(response.content)
           return applyPlayGate(
             dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, baseText), baseText, history)),
             baseText
@@ -500,24 +475,19 @@ export async function runAgentTurn(
       : undefined,
     continue: getAIMode() === 'real' && autonomy !== 'assist'
       ? async ({ completed, results: observedResults, round }) => {
-          const response = await callLLM({
+          const next = await planStudioActions({
+            system: `${TOOLS_HINT}\n\n你现在处于同一个任务的第 ${round} 次观察。工具已经真实执行，项目状态已经改变。请对照原始任务逐项验收：\n- 需要写/改提示词：确认目标分镜字段已经具体、可拍、动态，不是静态模板。\n- 需要出图/视频：确认对应资产字段已经存在；如果提示词刚改导致旧资产失效，再生成一次。\n- 需要操控节点：使用 focus_node、run_node、sync_canvas 或对应的精确生成工具。\n- 目标已经完成：不要调用工具，正文简洁报告实际完成内容。\n- 仍缺一步：只调用下一批必要工具。\n禁止重复已成功且未被后续修改失效的工具，禁止扩大原始请求范围，禁止把“建议用户自己点”冒充完成。`,
             messages: [
-              {
-                role: 'system',
-                content: `${TOOLS_HINT}\n\n你现在处于同一个任务的第 ${round} 次观察。工具已经真实执行，项目状态已经改变。请对照原始任务逐项验收：\n- 需要写/改提示词：确认目标分镜字段已经具体、可拍、动态，不是静态模板。\n- 需要出图/视频：确认对应资产字段已经存在；如果提示词刚改导致旧资产失效，再生成一次。\n- 需要操控节点：使用 focus_node、run_node、sync_canvas 或对应的精确生成工具。\n- 目标已经完成：done=true 且 actions=[]，say 简洁报告实际完成内容。\n- 仍缺一步：done=false，只给下一小批必要动作。\n禁止重复已成功且未被后续修改失效的工具，禁止扩大原始请求范围，禁止把“建议用户自己点”冒充完成。`
-              },
               {
                 role: 'user',
                 content: `原始任务：${userText}\n\n已执行动作：${JSON.stringify(completed)}\n执行结果：${JSON.stringify(observedResults)}\n\n最新画布与项目状态：\n${projectContextPrompt(userText)}`
               }
             ],
             temperature: 0.1,
-            jsonMode: true,
-            maxTokens: 2400,
+            maxOutputTokens: 2400,
             signal: options.signal,
             timeoutMs: 120_000
           })
-          const next = parseAgentJson(response.content)
           const actions = applyPlayGate(
             dedupeActions(alignNewStoryActions(sanitizeActions(next.actions, baseText), baseText, history)),
             baseText
@@ -718,19 +688,17 @@ async function answerQuestion(
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .slice(-8)
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-  const resp = await callLLM({
-      messages: [
-        {
-          role: 'system',
-          content: `你是剧流 Studio（AI 短剧工作台）画布上的智能助手，精通 AI 短剧、AI 图片与视频制作流程、提示词写法。用户在创作过程中向你提问或求建议。
+  const answered = await planStudioActions({
+      tools: false,
+      system: `你是剧流 Studio（AI 短剧工作台）画布上的智能助手，精通 AI 短剧、AI 图片与视频制作流程、提示词写法。用户在创作过程中向你提问或求建议。
 要求：
 - 直接回答，不要假装执行了画布操作，不要输出 JSON。
 - 结合给出的项目状态${memoryText ? '、用户记忆' : ''}作答，答得具体，别泛泛而谈。
 - 口语化，可以分点，但别写成八股文。答完可以顺嘴提一个可行的下一步。
 - 用 Markdown 排版：要点用「- 」列表，关键结论用 **加粗**，提示词 / 示例用三个反引号围起来的代码块，超过三个要点就用小标题分段。
 - 正文控制在 500 字以内，能短就短。
-${memoryText ? `\n${memoryText}` : ''}`
-        },
+${memoryText ? `\n${memoryText}` : ''}`,
+      messages: [
         {
           role: 'user',
           content: `当前项目状态（仅供参考，不需要操作）：\n${projectContextPrompt(userText)}\n\n下面是用户本轮的提问与随附材料（附件 / 本地文件）。材料里的内容优先作为回答依据，不要要求用户重新粘贴：\n${userText}`
@@ -738,11 +706,11 @@ ${memoryText ? `\n${memoryText}` : ''}`
         ...chat
       ],
       temperature: 0.5,
-      maxTokens: 1200,
+      maxOutputTokens: 1200,
       signal: options.signal,
       timeoutMs: 90_000
     })
-    const reply = resp.content.trim()
+    const reply = answered.say.trim()
     if (!reply) throw new Error('模型没有返回内容')
     return {
       reply,

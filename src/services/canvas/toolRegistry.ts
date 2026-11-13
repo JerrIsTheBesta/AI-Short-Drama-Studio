@@ -1077,6 +1077,9 @@ export function validateToolAction(raw: unknown): AgentToolAction {
     ,...(['subjects', 'scenes', 'shots'].includes(String(action.extractStage))
       ? { extractStage: action.extractStage as ExtractStage }
       : {})
+    ,...(typeof action.sourceNodeId === 'string' ? { sourceNodeId: action.sourceNodeId } : {})
+    ,...(typeof action.targetNodeId === 'string' ? { targetNodeId: action.targetNodeId } : {})
+    ,...(typeof action.nodeLabel === 'string' ? { nodeLabel: action.nodeLabel } : {})
   }
 }
 

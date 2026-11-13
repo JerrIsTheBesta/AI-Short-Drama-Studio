@@ -1,13 +1,19 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import TopBar from './TopBar.vue'
 import StepNav from './StepNav.vue'
+
+const route = useRoute()
+/** 剧本管理是独立页，不走经典步骤侧栏 */
+const showSteps = computed(() => route.name !== 'scripts')
 </script>
 
 <template>
   <div class="layout">
     <TopBar />
     <div class="main">
-      <StepNav />
+      <StepNav v-if="showSteps" />
       <main class="content">
         <slot />
       </main>

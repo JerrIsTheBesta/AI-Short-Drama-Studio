@@ -155,7 +155,6 @@ function newProject() {
   display: block;
   width: 28px;
   height: 28px;
-  border-radius: var(--radius-sm);
   object-fit: contain;
 }
 .logo-text {

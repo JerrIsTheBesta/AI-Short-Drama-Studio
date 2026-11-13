@@ -15,6 +15,7 @@ import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
+import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
 import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
@@ -535,6 +536,7 @@ function removeSelf() {
 
 <template>
   <div class="fnode" :class="[`kind-${type}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating }]">
+    <NodeLinkPlus :node-id="props.id" />
     <Handle id="in" type="target" :position="Position.Left" class="hndl" />
 
     <transition name="float-up">
@@ -762,7 +764,7 @@ function removeSelf() {
   width: 240px;
   background: var(--color-bg-1);
   border: 1px solid var(--color-node-border);
-  border-radius: 12px;
+  border-radius: 6px;
   overflow: visible;
   color: var(--color-text-1);
   box-shadow: var(--shadow-node);
@@ -859,7 +861,7 @@ function removeSelf() {
   width: 100%;
   background: var(--color-node-well);
   overflow: hidden;
-  border-radius: 12px 12px 0 0;
+  border-radius: 6px 6px 0 0;
 }
 .media img,
 .media video,
@@ -961,12 +963,12 @@ function removeSelf() {
 }
 .prompt {
   position: absolute;
-  left: 0;
+  left: 50%;
   top: calc(100% + 8px);
   z-index: 5;
-  width: 840px;
-  min-width: 560px;
-  transform-origin: 0 0;
+  width: 520px;
+  transform: translateX(-50%);
+  transform-origin: 50% 0;
   overflow: visible;
   background: var(--color-bg-1);
   border: 1px solid var(--color-border);
@@ -1048,7 +1050,7 @@ function removeSelf() {
 }
 .prompt textarea {
   width: 100%;
-  min-height: 120px;
+  min-height: 240px;
   resize: vertical;
   border: none;
   outline: none;
@@ -1189,6 +1191,6 @@ function removeSelf() {
 .float-down-enter-from,
 .float-down-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: translateX(-50%) translateY(-6px);
 }
 </style>

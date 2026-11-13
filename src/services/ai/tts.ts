@@ -17,6 +17,8 @@ export interface TTSInput {
   language?: 'Chinese' | 'English' | 'Auto'
   /** 自然语言语气指令；不应包含要朗读的正文 */
   instruction?: string
+  /** 节点自选模型。缺省时用当前配音配置。 */
+  model?: string
   signal?: AbortSignal
 }
 
@@ -346,7 +348,8 @@ export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
   if (!text) throw new Error('没有口播文案，无法配音')
 
   const cfg = ttsConfig()
-  const voice = compatibleVoice(cfg.model, input.voice || cfg.voice)
+  const model = input.model?.trim() || cfg.model
+  const voice = compatibleVoice(model, input.voice || cfg.voice)
   const language = input.language || detectSpeechLanguage(text)
   log(`口播文本：${text.slice(0, 80)}${text.length > 80 ? '…' : ''}  lang=${language}`)
 
@@ -360,11 +363,11 @@ export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
   const errors: string[] = []
 
   try {
-    log(`→ SpeechSynthesizer (${cfg.model}, ${voice})`)
+    log(`→ SpeechSynthesizer (${model}, ${voice})`)
     const blob = await speechSynthesizer(
       apiRoot,
       cfg.apiKey,
-      cfg.model,
+      model,
       text,
       voice,
       language,
@@ -372,28 +375,28 @@ export async function generateSpeech(input: TTSInput): Promise<TTSOutput> {
       input.signal
     )
     log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
-    return { blob, mimeType: blob.type, model: cfg.model }
+    return { blob, mimeType: blob.type, model }
   } catch (e: any) {
     errors.push(e?.message ?? String(e))
     log(`SpeechSynthesizer 失败：${e?.message ?? e}`)
   }
 
   // 若仍配置了旧版 qwen3-tts-*，再试 multimodal 兜底
-  if (/^qwen3-tts/i.test(cfg.model) || /^qwen-tts/i.test(cfg.model)) {
+  if (/^qwen3-tts/i.test(model) || /^qwen-tts/i.test(model)) {
     try {
       const origin = apiRoot.replace(/\/api\/v1$/i, '')
-      log(`→ multimodal 兜底 (${cfg.model}, ${voice})`)
+      log(`→ multimodal 兜底 (${model}, ${voice})`)
       const blob = await nativeQwen3Speech(
         origin,
         cfg.apiKey,
-        cfg.model,
+        model,
         text,
         voice,
         language,
         input.signal
       )
       log(`✓ ${(blob.size / 1024).toFixed(1)} KB`)
-      return { blob, mimeType: blob.type, model: cfg.model }
+      return { blob, mimeType: blob.type, model }
     } catch (e: any) {
       errors.push(e?.message ?? String(e))
     }

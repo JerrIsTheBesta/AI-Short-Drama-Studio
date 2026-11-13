@@ -167,7 +167,7 @@ async function generateAll(ev: Event) {
 .gframe {
   width: 100%;
   height: 100%;
-  border-radius: 18px;
+  border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--color-canvas-group);
   pointer-events: none;

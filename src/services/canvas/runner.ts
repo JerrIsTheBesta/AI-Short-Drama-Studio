@@ -35,7 +35,8 @@ import {
   DIGITAL_HUMAN_SCENE_ANCHOR,
   DIGITAL_HUMAN_IMAGE_ASSIGNMENT,
   cloneVoiceFromSample,
-  synthesizeClonedSpeech
+  synthesizeClonedSpeech,
+  modelAcceptsReferenceAudio
 } from '@/services/ai'
 import { blobToChatImageUrl, callLLM } from '@/services/ai/client'
 import { imageModelForProject, getVideoPromptStyle } from '@/services/ai/runtime'
@@ -232,6 +233,8 @@ function nodeActivityLabel(node: CanvasNode, p: NonNullable<ReturnType<typeof us
       return `分镜视频 ${shotNo(node.data.shotId)}`
     case 'audio':
       return `口播 ${shotNo(node.data.shotId)}`
+    case 'audioGen':
+      return '合成音频'
     case 'export':
     case 'final':
       return '合成成片'
@@ -1748,6 +1751,64 @@ export async function generateShotAudio(shot: Shot, onProgress?: (msg: string) =
   return asset
 }
 
+export async function generateFreeformAudio(
+  nodeId: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
+  ensureNotCancelled(signal)
+  const project = useProjectStore()
+  const assets = useAssetsStore()
+  const p = project.current
+  const node = p?.canvas?.nodes.find((n) => n.id === nodeId)
+  if (!p || !node || node.type !== 'audioGen') throw new Error('找不到音频节点')
+  const text = spokenTextOnly(node.data.prompt || '').trim() || (node.data.prompt || '').trim()
+  if (!text) throw new Error('先写下要说的内容')
+  const model = node.data.ttsModel?.trim() || useSettingsStore().config.tts.model
+  const wantsClone = modelAcceptsReferenceAudio(model)
+  let blob: Blob
+  if (wantsClone) {
+    if (!node.data.referenceAudioAssetId && !node.data.clonedVoiceId) {
+      throw new Error('这个模型需要参考音频，请先上传一段声音样本')
+    }
+    let voiceId = node.data.clonedVoiceId
+    let voiceModel = node.data.clonedVoiceModel || 'qwen3-tts-vc-2026-01-22'
+    if (!voiceId) {
+      onProgress?.('复刻参考音色…')
+      const sample = await assets.getBlob(node.data.referenceAudioAssetId!)
+      if (!sample) throw new Error('参考音频读取失败，请重新上传')
+      const cloned = await cloneVoiceFromSample(
+        sample,
+        `node${nodeId.replace(/[^a-z0-9]/gi, '').slice(-10) || 'voice'}`,
+        signal
+      )
+      voiceId = cloned.voiceId
+      voiceModel = cloned.model
+      project.patchCanvasNode(nodeId, { clonedVoiceId: voiceId, clonedVoiceModel: voiceModel })
+      await project.save()
+    }
+    onProgress?.('按参考音色合成…')
+    blob = await synthesizeClonedSpeech(text, voiceId, voiceModel, signal)
+  } else {
+    onProgress?.('合成音频…')
+    const result = await generateSpeech({
+      text,
+      model,
+      language: 'Chinese',
+      signal
+    })
+    blob = result.blob
+  }
+  const asset = await assets.add(blob, 'audio', 'ai-generated', {
+    filename: `audio_${Date.now().toString(36)}`,
+    prompt: text,
+    projectId: p.id
+  })
+  project.assignCanvasNodeAsset(nodeId, asset.id)
+  await project.save()
+  return asset
+}
+
 /**
  * 把刚写好的剧本存成一份本地 Markdown，并登记进资源库的「剧本」。
  * 归档失败不能影响生成流程，所以这里只提示不抛错。
@@ -2682,6 +2743,7 @@ export async function runCanvasNode(
       node.type !== 'final' &&
       node.type !== 'imageGen' &&
       node.type !== 'videoGen' &&
+      node.type !== 'audioGen' &&
       node.type !== 'subject' &&
       node.type !== 'prop' &&
       node.type !== 'scene' &&
@@ -2739,6 +2801,8 @@ export async function runCanvasNode(
         await generateFreeformImage(node.id, report, signal)
       } else if (node.type === 'videoGen') {
         await generateFreeformVideo(node.id, report, signal)
+      } else if (node.type === 'audioGen') {
+        await generateFreeformAudio(node.id, report, signal)
       } else {
         throw new Error(`未知节点类型：${node.type}`)
       }

@@ -17,6 +17,7 @@ import { type ExtractStage } from '@/services/canvas/pipeline'
 import { isPlayReady } from '@/services/ai'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
+import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 
 const props = defineProps<{
   id: string
@@ -350,6 +351,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
 
 <template>
   <div class="sdoc" :class="[`st-${status}`, { editing, on: selected && panelOpen, busy: generating }]">
+    <NodeLinkPlus :node-id="id" />
     <div
       class="sdoc-card"
       @dragover="onPlayDragOver"
@@ -613,7 +615,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   flex-direction: column;
   background: var(--color-bg-1);
   border: 1px solid var(--color-node-border);
-  border-radius: 14px;
+  border-radius: 8px;
   overflow: hidden;
   box-shadow: var(--shadow-node);
   position: relative;

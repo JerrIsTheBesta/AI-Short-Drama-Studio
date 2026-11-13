@@ -12,10 +12,19 @@ import { autodlVideoProfileId } from '@/services/ai/runtime'
 import type { VideoGenModel } from '@/types'
 import type { AgentAttachment } from '@/services/canvas/attachments'
 import type { TraceRow, TraceStatus } from '@/services/canvas/agentTrace'
-import type { AgentAutonomy, AspectRatio, CanvasNode } from '@/types'
-import AgentMemoryPanel from './AgentMemoryPanel.vue'
+import type { AgentAutonomy, AspectRatio, CanvasNode, VideoResolution } from '@/types'
 import AgentRichText from './AgentRichText.vue'
 import AgentTraceList from './AgentTraceList.vue'
+import {
+  CUSTOM_STORY_SKILL_ID,
+  GENERAL_STORY_SKILL_ID,
+  STORY_SKILLS
+} from '@/skills/storyStyles'
+import {
+  parseDirectorSkill,
+  pickDirectorSkillFile,
+  pickDirectorSkillFolder
+} from '@/services/settings/directorSkill'
 
 const props = withDefaults(
   defineProps<{
@@ -31,7 +40,7 @@ type FeedItem =
   | { id: string; type: 'run'; rows: TraceRow[] }
 
 const WELCOME =
-  '我是这张画布的创作搭档，两种用法都行：\n\n- **一句话开工**：说「写一个修仙短剧，8 个分镜」或「画一张黄昏的海边」，我直接建节点、写提示词、跑生成\n- **自己拼**：在画布空白处右键添加图片 / 视频 / 剧本 / 角色 / 道具 / 场景 / 分镜，点选节点后让我改提示词、重跑\n\n我也带本地记忆——说「记住…」以后一直生效。想一次做到底就说「全流程」，否则我做一步停一步等你确认。'
+  '我是这张画布的创作搭档，两种用法都行：\n\n- **一句话开工**：说「写一个修仙短剧，8 个分镜」或「画一张黄昏的海边」，我直接建节点、写提示词、跑生成\n- **自己拼**：在画布空白处右键添加图片 / 视频 / 音频 / 剧本 / 角色 / 道具 / 场景 / 分镜，点选节点后让我改提示词、重跑\n\n我也带本地记忆——说「记住…」以后一直生效。想一次做到底就说「全流程」，否则我做一步停一步等你确认。'
 
 const feed = ref<FeedItem[]>([
   { id: 'welcome', type: 'msg', role: 'assistant', content: WELCOME }
@@ -53,13 +62,10 @@ const chips = ref<{ label: string; text: string }[]>([
 ])
 const box = ref<HTMLElement | null>(null)
 const autonomy = ref<AgentAutonomy>('gated')
-const modeOpen = ref(false)
-const memoryOpen = ref(false)
 const canvasLive = ref(false)
 const canvasTrace = ref<TraceRow[]>([])
 const project = useProjectStore()
 let offActivity: (() => void) | undefined
-const hoverMode = ref<AgentAutonomy | null>(null)
 const settings = useSettingsStore()
 const toast = useToastStore()
 /** 本轮要带上的本地文件附件（文本内容已在选择时读入） */
@@ -99,33 +105,9 @@ function removeAttachment(index: number) {
   attachments.value.splice(index, 1)
 }
 
-/** 出片生成模式：自动（默认）/ 首尾帧链（第 2 镜起取上一镜视频末帧作首帧） */
-const shotChainMode = computed<'auto' | 'fl2va'>(
-  () => project.current?.settings.h3ShotChainMode || 'auto'
-)
-const genModeOpen = ref(false)
-
-function chooseShotChainMode(v: 'auto' | 'fl2va') {
-  genModeOpen.value = false
-  const p = project.current
-  if (!p) return
-  p.settings = { ...p.settings, h3ShotChainMode: v }
-  void project.save()
-  toast.success(
-    v === 'fl2va'
-      ? '已切换到首尾帧链：第 2 镜起会自动取上一镜视频末帧往下生成，镜头间保持连续。'
-      : '已切换到自动模式：按每镜自己的参考图出片。'
-  )
-}
-
 let controller: AbortController | null = null
 
-/* ── 生成配置：比例 / 图像模型 / 视频模型，选好即生效，智能体照此执行 ── */
-const currentMode = computed(() => MODES.find((m) => m.id === autonomy.value) || MODES[1])
-const modeTip = computed(() => {
-  const id = hoverMode.value || autonomy.value
-  return MODES.find((m) => m.id === id)?.desc || ''
-})
+/* ── 生成配置：比例 / 图像模型 / 视频模型 / 分辨率，选好即生效 ── */
 const ASPECT_OPTIONS: { value: AspectRatio; label: string }[] = [
   { value: '16:9', label: '横版 16:9' },
   { value: '9:16', label: '竖版 9:16' },
@@ -139,41 +121,126 @@ const prefTab = ref<'video' | 'image'>('video')
 /* 父容器 overflow 会裁剪浮层，所以传送到 body 按按钮位置定位 */
 const prefBtn = ref<HTMLElement | null>(null)
 const prefPanel = ref<HTMLElement | null>(null)
-const PANEL_WIDTH = 480
+const PANEL_WIDTH = 720
 const prefStyle = ref<Record<string, string>>({})
 
-function placePrefPanel() {
-  const rect = prefBtn.value?.getBoundingClientRect()
-  if (!rect) return
+function placeAnchoredPanel(btn: HTMLElement | null, widthCap: number) {
+  const rect = btn?.getBoundingClientRect()
+  if (!rect) return null
   const vw = window.innerWidth
   const vh = window.innerHeight
-  const width = Math.min(PANEL_WIDTH, vw - 24)
+  const width = Math.min(widthCap, vw - 24)
   const left = Math.max(12, Math.min(rect.left, vw - width - 12))
   const spaceAbove = rect.top - 12
   const spaceBelow = vh - rect.bottom - 12
   const style: Record<string, string> = { left: `${Math.round(left)}px`, width: `${Math.round(width)}px` }
-  // 上下哪边空间大就往哪边展开，不够时压缩高度并内部滚动
   if (spaceAbove >= 260 || spaceAbove >= spaceBelow) {
     style.bottom = `${Math.round(vh - rect.top + 6)}px`
-    style.maxHeight = `${Math.round(Math.max(180, Math.min(spaceAbove, 460)))}px`
+    style.maxHeight = `${Math.round(Math.max(240, Math.min(spaceAbove, 680)))}px`
   } else {
     style.top = `${Math.round(rect.bottom + 6)}px`
-    style.maxHeight = `${Math.round(Math.max(180, Math.min(spaceBelow, 460)))}px`
+    style.maxHeight = `${Math.round(Math.max(240, Math.min(spaceBelow, 680)))}px`
   }
-  prefStyle.value = style
+  return style
+}
+
+function placePrefPanel() {
+  const style = placeAnchoredPanel(prefBtn.value, PANEL_WIDTH)
+  if (style) prefStyle.value = style
+}
+
+const skillOpen = ref(false)
+const skillTab = ref<'style' | 'genre' | 'mine'>('style')
+const skillBtn = ref<HTMLElement | null>(null)
+const skillPanel = ref<HTMLElement | null>(null)
+const skillStyle = ref<Record<string, string>>({})
+const importingSkill = ref(false)
+const styleSkills = STORY_SKILLS.filter((skill) => skill.group === 'style')
+const genreSkills = STORY_SKILLS.filter((skill) => skill.group === 'genre')
+const activeStorySkillId = computed(() => settings.config.activeStorySkillId || GENERAL_STORY_SKILL_ID)
+const importedSkill = computed(() => settings.config.directorSkill)
+const activeStorySkillName = computed(() => {
+  if (activeStorySkillId.value === CUSTOM_STORY_SKILL_ID) return importedSkill.value?.name || '我的技能'
+  if (activeStorySkillId.value === GENERAL_STORY_SKILL_ID) return '通用分镜'
+  return STORY_SKILLS.find((skill) => skill.id === activeStorySkillId.value)?.name || '通用分镜'
+})
+
+function placeSkillPanel() {
+  const style = placeAnchoredPanel(skillBtn.value, 560)
+  if (style) skillStyle.value = style
+}
+
+function placeComposerPanels() {
+  placePrefPanel()
+  placeSkillPanel()
 }
 
 function togglePrefPanel() {
   prefOpen.value = !prefOpen.value
   if (prefOpen.value) {
+    skillOpen.value = false
     prefStyle.value = {}
     nextTick(placePrefPanel)
   }
-  modeOpen.value = false
 }
 
 function closePrefPanel() {
   prefOpen.value = false
+}
+
+function toggleSkillPanel() {
+  skillOpen.value = !skillOpen.value
+  if (skillOpen.value) {
+    prefOpen.value = false
+    skillStyle.value = {}
+    nextTick(placeSkillPanel)
+  }
+}
+
+function closeSkillPanel() {
+  skillOpen.value = false
+}
+
+function pickStorySkill(id: string) {
+  settings.selectStorySkill(id)
+}
+
+async function saveImportedSkill(picked: { text: string; filename: string } | null) {
+  if (!picked) return
+  const doc = parseDirectorSkill(picked.text, picked.filename)
+  settings.update({ directorSkill: doc })
+  settings.selectStorySkill(CUSTOM_STORY_SKILL_ID)
+  await settings.flush()
+  toast.success(`已导入技能「${doc.name}」。写剧本和拆分镜会按它来。`)
+}
+
+async function importStorySkill() {
+  importingSkill.value = true
+  try {
+    await saveImportedSkill(await pickDirectorSkillFile())
+  } catch (err: any) {
+    toast.error(err?.message || '导入技能失败')
+  } finally {
+    importingSkill.value = false
+  }
+}
+
+async function importStorySkillFolder() {
+  importingSkill.value = true
+  try {
+    await saveImportedSkill(await pickDirectorSkillFolder())
+  } catch (err: any) {
+    toast.error(err?.message || '导入技能失败')
+  } finally {
+    importingSkill.value = false
+  }
+}
+
+async function clearImportedSkill() {
+  settings.update({ directorSkill: null })
+  settings.selectStorySkill(GENERAL_STORY_SKILL_ID)
+  await settings.flush()
+  toast.success('已清除导入的技能，回到通用分镜')
 }
 
 const currentAspectRatio = computed<AspectRatio>(
@@ -247,6 +314,17 @@ const VIDEO_WORKFLOW_OPTIONS: { value: VideoGenModel; name: string; desc: string
   { value: 'wan-prime', name: '万相 3.0 Prime', desc: '需四宫格关键帧' }
 ]
 const videoDefault = computed(() => settings.config.defaultVideoModel)
+const VIDEO_RES_OPTIONS: { value: VideoResolution; label: string }[] = [
+  { value: '768p', label: '768p' },
+  { value: '1080p', label: '1080p' }
+]
+const currentVideoResolution = computed<VideoResolution>(
+  () => project.current?.settings.defaultVideoResolution || '768p'
+)
+
+function pickVideoResolution(value: VideoResolution) {
+  project.setDefaultVideoResolution(value)
+}
 
 function pickVideoWorkflow(model: VideoGenModel) {
   settings.selectVideoModelDefault(model)
@@ -264,34 +342,7 @@ function videoProfileTag(p: { provider?: string; baseUrl?: string; adapter?: { t
   return zealman ? 'Zealman' : autodl ? 'AutoDL' : ''
 }
 
-const MODES: { id: AgentAutonomy; label: string; desc: string }[] = [
-  {
-    id: 'assist',
-    label: '陪我做',
-    desc: '每一步都先问你再动手，适合一起磨剧本、分镜和提示词。'
-  },
-  {
-    id: 'gated',
-    label: '关键确认',
-    desc: '能连续做几步，但写完剧本、拆人物/场景/分镜、验收这些关键点会停下来问你。'
-  },
-  {
-    id: 'autopilot',
-    label: '全自动',
-    desc: '按你这句话尽量一路做完，中途失败才停。要出片仍需说「全流程」。'
-  }
-]
-
 const estimate = computed(() => estimateRequestText(input.value))
-const statusText = computed(() => {
-  if (busy.value) {
-    if (thinking.value) return '思考中'
-    return log.value || '执行中'
-  }
-  if (canvasLive.value) return log.value || '画布生成中'
-  return currentMode.value.label
-})
-const statusLive = computed(() => busy.value || canvasLive.value)
 
 /** 自由画布：当前选中节点卡片 */
 const selectedGenNode = computed(() => {
@@ -310,7 +361,8 @@ const polishChips = [
 
 onMounted(() => {
   const saved = getAgentState()
-  autonomy.value = saved.autonomy
+  autonomy.value = 'gated'
+  void setAgentAutonomy('gated')
   if (saved.messages.length) {
     feed.value = saved.messages
       .filter((message) => message.role === 'user' || message.role === 'assistant')
@@ -322,39 +374,32 @@ onMounted(() => {
       }))
   }
   window.addEventListener('pointerdown', onDocPointer, true)
-  window.addEventListener('resize', placePrefPanel)
-  window.addEventListener('scroll', placePrefPanel, true)
+  window.addEventListener('resize', placeComposerPanels)
+  window.addEventListener('scroll', placeComposerPanels, true)
   window.addEventListener('keydown', onGlobalKey, true)
   offActivity = onCanvasActivity(applyCanvasActivity)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onDocPointer, true)
-  window.removeEventListener('resize', placePrefPanel)
-  window.removeEventListener('scroll', placePrefPanel, true)
+  window.removeEventListener('resize', placeComposerPanels)
+  window.removeEventListener('scroll', placeComposerPanels, true)
   window.removeEventListener('keydown', onGlobalKey, true)
   offActivity?.()
 })
 
 function onGlobalKey(ev: KeyboardEvent) {
-  if (ev.key === 'Escape' && prefOpen.value) closePrefPanel()
+  if (ev.key !== 'Escape') return
+  if (prefOpen.value) closePrefPanel()
+  if (skillOpen.value) closeSkillPanel()
 }
 
 function onDocPointer(ev: PointerEvent) {
   const el = ev.target as HTMLElement | null
   const inPref = !!el && (!!el.closest('.pref-pop') || !!prefPanel.value?.contains(el))
-  if (!el?.closest('.bar-pop') && !inPref) {
-    modeOpen.value = false
-    closePrefPanel()
-  }
-  if (!el?.closest('.mem-pop')) memoryOpen.value = false
-}
-
-async function chooseAutonomy(mode: AgentAutonomy) {
-  autonomy.value = mode
-  modeOpen.value = false
-  hoverMode.value = null
-  await setAgentAutonomy(mode)
+  const inSkill = !!el && (!!el.closest('.skill-pop') || !!skillPanel.value?.contains(el))
+  if (!el?.closest('.bar-pop') && !inPref) closePrefPanel()
+  if (!el?.closest('.bar-pop') && !inSkill) closeSkillPanel()
 }
 
 async function scrollToEnd() {
@@ -590,31 +635,6 @@ function visibleRows(rows: TraceRow[]) {
 
 <template>
   <aside class="agent">
-    <header class="head">
-      <div class="head-id">
-        <span class="avatar" :class="{ live: statusLive }"><i /></span>
-        <div class="head-txt">
-          <strong>智能体</strong>
-          <span class="sub" :class="{ live: statusLive }">{{ statusText }}</span>
-        </div>
-      </div>
-      <div class="mem-pop">
-        <button
-          type="button"
-          class="head-btn"
-          :class="{ on: memoryOpen }"
-          title="本地记忆"
-          @click.stop="memoryOpen = !memoryOpen"
-        >
-          <svg viewBox="0 0 24 24">
-            <path d="M12 4a4 4 0 0 1 4 4c1.8.6 3 2.2 3 4.2A4.3 4.3 0 0 1 14.7 16H9.3A4.3 4.3 0 0 1 5 12.2c0-2 1.2-3.6 3-4.2a4 4 0 0 1 4-4z" />
-            <path d="M9 16v2.5M15 16v2.5M12 16V20" />
-          </svg>
-        </button>
-        <AgentMemoryPanel v-if="memoryOpen" @close="memoryOpen = false" />
-      </div>
-    </header>
-
     <section class="target" :class="{ empty: !selectedGenNode }">
       <p class="k">当前选中</p>
       <p v-if="selectedGenNode" class="name">
@@ -708,67 +728,6 @@ function visibleRows(rows: TraceRow[]) {
               <span>附件</span>
             </button>
           </div>
-          <div class="bar-pop">
-            <button
-              type="button"
-              class="bar-btn"
-              :disabled="busy"
-              title="出片生成模式：自动按参考图；首尾帧链取上一镜末帧保证镜头连续"
-              @click.stop="genModeOpen = !genModeOpen; modeOpen = false"
-            >
-              生成模式 · {{ shotChainMode === 'fl2va' ? '首尾帧' : '自动' }}
-              <i />
-            </button>
-            <div v-if="genModeOpen" class="menu" @click.stop>
-              <button
-                type="button"
-                :class="{ on: shotChainMode === 'auto' }"
-                @click="chooseShotChainMode('auto')"
-              >
-                自动模式
-              </button>
-              <button
-                type="button"
-                :class="{ on: shotChainMode === 'fl2va' }"
-                @click="chooseShotChainMode('fl2va')"
-              >
-                首尾帧模式
-              </button>
-              <p class="tip">
-                {{
-                  shotChainMode === 'fl2va'
-                    ? '首尾帧链：第 1 镜用本镜配图起手；第 2 镜起自动截取上一镜视频的最后一帧作首帧，下一镜的配图作尾帧，镜头间画面连续。因为下一镜要等上一镜出片，批量出片会自动改成按镜号串行（一次一镜）。凑不齐首尾帧的镜头会自动退回常规出片，不会卡住生成。'
-                    : '每镜按自己的参考图 / 关键帧出片（默认）。想要镜头之间画面连续就选首尾帧模式。'
-                }}
-              </p>
-            </div>
-          </div>
-          <div class="bar-pop">
-            <button
-              type="button"
-              class="bar-btn"
-              :disabled="busy"
-              :title="currentMode.desc"
-              @click.stop="modeOpen = !modeOpen; prefOpen = false"
-            >
-              {{ currentMode.label }}
-              <i />
-            </button>
-            <div v-if="modeOpen" class="menu" @click.stop>
-              <button
-                v-for="m in MODES"
-                :key="m.id"
-                type="button"
-                :class="{ on: autonomy === m.id }"
-                @mouseenter="hoverMode = m.id"
-                @mouseleave="hoverMode = null"
-                @click="chooseAutonomy(m.id)"
-              >
-                {{ m.label }}
-              </button>
-              <p class="tip">{{ modeTip }}</p>
-            </div>
-          </div>
           <div class="bar-pop pref-pop">
             <button
               ref="prefBtn"
@@ -847,6 +806,20 @@ function visibleRows(rows: TraceRow[]) {
                         <small>{{ videoSub(p) }}</small>
                       </span>
                     </button>
+                    <p class="pref-k pref-k-gap">视频分辨率</p>
+                    <div class="res-row">
+                      <button
+                        v-for="r in VIDEO_RES_OPTIONS"
+                        :key="r.value"
+                        type="button"
+                        class="res-btn"
+                        :class="{ on: currentVideoResolution === r.value }"
+                        @click="pickVideoResolution(r.value)"
+                      >
+                        {{ r.label }}
+                      </button>
+                    </div>
+                    <p class="pref-hint">1080p 只在 H3 v5 上出到 1080p，其它模型仍按 768p。</p>
                   </template>
                   <template v-else>
                     <p v-if="!imageProfiles.length" class="pref-empty">
@@ -886,6 +859,115 @@ function visibleRows(rows: TraceRow[]) {
                   <p class="pref-hint">选好即生效，智能体生成图片和视频都会照此执行；单个节点仍可单独指定模型。</p>
                 </div>
               </div>
+              </div>
+            </Teleport>
+          </div>
+          <div class="bar-pop skill-pop">
+            <button
+              ref="skillBtn"
+              type="button"
+              class="bar-btn pref-btn"
+              :class="{ on: activeStorySkillId !== GENERAL_STORY_SKILL_ID }"
+              :disabled="busy"
+              :title="`技能：${activeStorySkillName}`"
+              @click.stop="toggleSkillPanel"
+            >
+              <svg viewBox="0 0 24 24" class="pref-icon" aria-hidden="true">
+                <path d="M7 4.5h10a1.5 1.5 0 0 1 1.5 1.5V20l-6.5-3.2L5.5 20V6A1.5 1.5 0 0 1 7 4.5Z" />
+              </svg>
+              <span>技能</span>
+            </button>
+            <Teleport to="body">
+              <div
+                v-if="skillOpen"
+                ref="skillPanel"
+                class="pref-panel skill-panel"
+                :style="skillStyle"
+                @click.stop
+              >
+                <div class="pref-tabs">
+                  <button type="button" :class="{ on: skillTab === 'style' }" @click="skillTab = 'style'">分镜风格</button>
+                  <button type="button" :class="{ on: skillTab === 'genre' }" @click="skillTab = 'genre'">短剧类型</button>
+                  <button type="button" :class="{ on: skillTab === 'mine' }" @click="skillTab = 'mine'">我的</button>
+                </div>
+                <div class="skill-body">
+                  <button
+                    type="button"
+                    class="pref-model"
+                    :class="{ on: activeStorySkillId === GENERAL_STORY_SKILL_ID }"
+                    @click="pickStorySkill(GENERAL_STORY_SKILL_ID)"
+                  >
+                    <span class="pref-radio" />
+                    <span class="pref-model-text">
+                      <b>通用分镜</b>
+                      <small>按内置导演手册拆镜，不额外套风格或类型。</small>
+                    </span>
+                  </button>
+                  <template v-if="skillTab === 'style'">
+                    <button
+                      v-for="skill in styleSkills"
+                      :key="skill.id"
+                      type="button"
+                      class="pref-model"
+                      :class="{ on: activeStorySkillId === skill.id }"
+                      @click="pickStorySkill(skill.id)"
+                    >
+                      <span class="pref-radio" />
+                      <span class="pref-model-text">
+                        <b>{{ skill.name }}</b>
+                        <small>{{ skill.summary }}</small>
+                      </span>
+                    </button>
+                  </template>
+                  <template v-else-if="skillTab === 'genre'">
+                    <button
+                      v-for="skill in genreSkills"
+                      :key="skill.id"
+                      type="button"
+                      class="pref-model"
+                      :class="{ on: activeStorySkillId === skill.id }"
+                      @click="pickStorySkill(skill.id)"
+                    >
+                      <span class="pref-radio" />
+                      <span class="pref-model-text">
+                        <b>{{ skill.name }}</b>
+                        <small>{{ skill.summary }}</small>
+                      </span>
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button
+                      v-if="importedSkill"
+                      type="button"
+                      class="pref-model"
+                      :class="{ on: activeStorySkillId === CUSTOM_STORY_SKILL_ID }"
+                      @click="pickStorySkill(CUSTOM_STORY_SKILL_ID)"
+                    >
+                      <span class="pref-radio" />
+                      <span class="pref-model-text">
+                        <b>{{ importedSkill.name }}</b>
+                        <small>{{ importedSkill.filename || '导入的 SKILL.md' }}</small>
+                      </span>
+                    </button>
+                    <p v-else class="pref-empty">还没有导入。可以放一份 SKILL.md 或 README.md。</p>
+                    <div class="skill-acts">
+                      <button type="button" class="skill-act" :disabled="importingSkill" @click="importStorySkill">
+                        {{ importingSkill ? '正在读取…' : importedSkill ? '更换技能' : '导入技能' }}
+                      </button>
+                      <button
+                        v-if="isDesktop()"
+                        type="button"
+                        class="skill-act"
+                        :disabled="importingSkill"
+                        @click="importStorySkillFolder"
+                      >
+                        导入文件夹
+                      </button>
+                      <button v-if="importedSkill" type="button" class="skill-act danger" @click="clearImportedSkill">清除</button>
+                    </div>
+                  </template>
+                  <p class="pref-hint">选好即生效。写剧本、拆分镜和写提示词都会按当前技能来。</p>
+                </div>
               </div>
             </Teleport>
           </div>
@@ -932,108 +1014,9 @@ function visibleRows(rows: TraceRow[]) {
   overflow-x: hidden;
 }
 
-/* ── 头部 ── */
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px 12px 10px 16px;
-}
-.head-id {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-.avatar {
-  position: relative;
-  width: 26px;
-  height: 26px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #7eb4ff 0%, #a78bfa 60%, #f0abfc 100%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.avatar i {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: rgba(16, 19, 26, 0.85);
-  transition: background 0.25s;
-}
-.avatar.live i {
-  background: #4ade80;
-  box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.25);
-  animation: breathe 1.6s ease-in-out infinite;
-}
-@keyframes breathe {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.18); }
-  50% { box-shadow: 0 0 0 5px rgba(74, 222, 128, 0.1); }
-}
-.head-txt {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.head-txt strong {
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-}
-.head-txt .sub {
-  font-size: 10px;
-  color: var(--color-text-4);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 220px;
-}
-.head-txt .sub.live {
-  color: var(--color-accent);
-}
-.head-btn {
-  width: 28px;
-  height: 28px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--color-text-3);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
-}
-.head-btn:hover {
-  background: var(--color-fill);
-  color: var(--color-text-1);
-}
-.head-btn.on {
-  background: rgba(126, 180, 255, 0.14);
-  border-color: rgba(126, 180, 255, 0.4);
-  color: var(--color-accent);
-}
-.head-btn svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.mem-pop {
-  position: relative;
-  flex-shrink: 0;
-}
-
 /* ── 选中节点卡片（自由画布） ── */
 .target {
-  margin: 0 14px 8px;
+  margin: 12px 14px 8px;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -1413,6 +1396,43 @@ textarea {
   gap: 5px;
   padding: 0 10px;
 }
+.pref-btn.on {
+  color: var(--color-text-1);
+  background: var(--color-fill);
+}
+.skill-panel {
+  width: 560px;
+}
+.skill-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+}
+.skill-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.skill-act {
+  height: 30px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.skill-act.danger {
+  color: var(--color-error, #f87171);
+}
+.skill-act:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .pref-icon {
   width: 14px;
   height: 14px;
@@ -1471,15 +1491,32 @@ textarea {
   min-width: 0;
   padding-right: 10px;
   border-right: 1px solid var(--color-border);
-  max-height: 260px;
+  max-height: 520px;
   overflow: auto;
 }
-.pref-k {
-  margin: 2px 4px 8px;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  color: var(--color-text-4);
+.pref-k-gap {
+  margin-top: 14px;
+}
+.res-row {
+  display: flex;
+  gap: 8px;
+  padding: 0 4px 6px;
+}
+.res-btn {
+  height: 32px;
+  min-width: 72px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.res-btn.on {
+  border-color: var(--color-accent);
+  color: var(--color-text-1);
+  background: var(--grad-primary-soft, rgba(126, 180, 255, 0.16));
 }
 
 /* 偏好面板里的分组小标题（视频工作流 / 已配置接入） */

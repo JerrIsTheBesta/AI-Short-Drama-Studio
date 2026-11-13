@@ -418,7 +418,7 @@ export function inferMarkdownTitle(markdown: string, filename = ''): string {
   const normalized = normalizeImportedMarkdown(markdown)
   const heading = normalized.match(/^\s*#\s+(.+?)\s*$/m)?.[1]
   if (heading) return cleanMarkdownTitle(heading).slice(0, 80)
-  const baseName = filename.replace(/\.(?:md|markdown|txt)$/i, '')
+  const baseName = filename.replace(/\.(?:md|markdown|txt|text|docx|doc|rtf)$/i, '')
   return cleanMarkdownTitle(baseName).slice(0, 80) || '未命名剧本'
 }
 

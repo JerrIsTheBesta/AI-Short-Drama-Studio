@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useLibraryStore, LIBRARY_PUBLIC_ID } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
-import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import HomeIcon from '@/components/common/HomeIcon.vue'
@@ -17,13 +16,18 @@ const project = useProjectStore()
 const toast = useToastStore()
 
 const search = ref('')
+const searchEl = ref<HTMLInputElement | null>(null)
 const creating = ref(false)
+type HomeNav = 'home' | 'projects' | 'library' | 'tools'
+type ProjectFilter = 'all' | 'active' | 'done'
+const nav = ref<HomeNav>('home')
+const projectFilter = ref<ProjectFilter>('all')
+const viewMode = ref<'grid' | 'list'>('grid')
 
 const covers = ref<Record<string, string>>({})
 const library = useLibraryStore()
 const libUrls = ref<Record<string, string>>({})
 const libUploading = ref(false)
-const homeTab = ref<'projects' | 'library'>('projects')
 const libFolderId = ref(LIBRARY_PUBLIC_ID)
 const libSelected = ref<Set<string>>(new Set())
 const libMoveTarget = ref(LIBRARY_PUBLIC_ID)
@@ -95,6 +99,33 @@ const filteredProjects = computed(() => {
   )
 })
 
+function projectDone(p: { shots: { videoAssetId?: string }[] }) {
+  return p.shots.length > 0 && p.shots.every((shot) => Boolean(shot.videoAssetId))
+}
+
+const activeCount = computed(() => project.allProjects.filter((p) => !projectDone(p)).length)
+const doneCount = computed(() => project.allProjects.filter((p) => projectDone(p)).length)
+
+const listedProjects = computed(() => {
+  if (projectFilter.value === 'active') return filteredProjects.value.filter((p) => !projectDone(p))
+  if (projectFilter.value === 'done') return filteredProjects.value.filter((p) => projectDone(p))
+  return filteredProjects.value
+})
+
+function focusProjectSearch() {
+  if (nav.value === 'library' || nav.value === 'tools') nav.value = 'projects'
+  nextTick(() => searchEl.value?.focus())
+}
+
+function openLatestProject() {
+  const latest = [...project.allProjects].sort((a, b) => b.updatedAt - a.updatedAt)[0]
+  if (!latest) {
+    toast.warn('还没有项目，先创建一个')
+    return
+  }
+  openProject(latest.id)
+}
+
 const totalShots = computed(() =>
   project.allProjects.reduce((sum, p) => sum + p.shots.length, 0)
 )
@@ -156,6 +187,24 @@ async function quickCreate() {
     }
     project.setScript(p.script)
     project.setAspectRatio('16:9')
+    await project.save()
+    router.push('/studio')
+  } catch (e: any) {
+    toast.error(e?.message || '创建失败，请重试')
+  } finally {
+    creating.value = false
+  }
+}
+
+async function startRemake() {
+  if (creating.value) return
+  creating.value = true
+  try {
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const label = `视频复刻 ${now.getMonth() + 1}-${now.getDate()} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+    const p = await project.createNamed(label)
+    p.pipelineMode = 'remake'
     await project.save()
     router.push('/studio')
   } catch (e: any) {
@@ -367,126 +416,149 @@ async function moveSelectedLibrary() {
 
 <template>
   <div class="home">
-    <div class="hero">
-      <div class="hero-grid" />
-      <div class="hero-glow" />
-      <div class="hero-content">
-        <span class="hero-badge"><i class="dot" />剧流 Studio · AI 短剧工作台</span>
-        <h1 class="title">
-          一句话，<span class="gradient-text">一条 AI 流水线</span>，<br />
-          输出一条视频
-        </h1>
-        <p class="subtitle">
-          桌面端无限画布 + 智能体：人设、分镜、配图、视频都在一张图上连起来。资源存在本地文件夹。
-        </p>
-        <div class="hero-actions">
-          <GradientButton size="lg" type="secondary" @click="openQuickEditor">
-            <template #icon><HomeIcon name="scissors" :size="18" /></template>
-            视频剪辑
-          </GradientButton>
-          <GradientButton size="lg" type="secondary" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
-            <template #icon><HomeIcon name="mic" :size="18" /></template>
-            智能口播
-          </GradientButton>
-          <GradientButton size="lg" :loading="creating" :disabled="creating" @click="quickCreate">
-            <template #icon><HomeIcon name="plus" :size="18" /></template>
-            新建
-          </GradientButton>
-          <GradientButton
-            size="lg"
-            type="ghost"
-            title="本地 Markdown 剧本库：编辑正文、增删集数、导入导出"
-            @click="router.push('/scripts')"
-          >
-            <template #icon><HomeIcon name="script" :size="18" /></template>
-            剧本库
-          </GradientButton>
-          <GradientButton
-            size="lg"
-            type="ghost"
-            title="按 剧本 → 分镜 → 图片 → 视频 → 剪辑 的分步流程制作"
-            @click="goClassicFlow"
-          >
-            <template #icon><HomeIcon name="wand" :size="18" /></template>
-            经典步骤
-          </GradientButton>
-          <GradientButton
-            v-if="isDesktop()"
-            size="lg"
-            type="ghost"
-            :disabled="!project.current?.folderPath"
-            :title="project.current?.folderPath || '请先创建或打开一个项目'"
-            @click="openProjectFolder()"
-          >
-            <template #icon><HomeIcon name="folder" :size="18" /></template>
-            打开当前项目目录
-          </GradientButton>
-          <GradientButton size="lg" type="ghost" @click="router.push('/settings')">
-            <template #icon><HomeIcon name="settings" :size="18" /></template>
-            接入 AI 能力
-          </GradientButton>
-        </div>
-        <div class="stats">
-          <div v-for="s in statItems" :key="s.label" class="stat">
-            <div class="stat-value" :class="{ accent: s.accent }">{{ s.value }}</div>
-            <div class="stat-label">{{ s.label }}</div>
-          </div>
-        </div>
+    <aside class="sidenav">
+      <button type="button" class="brand" @click="nav = 'home'">
+        <img class="brand-mark" src="/logo.png" alt="" />
+        <span>
+          <strong>剧流 Studio</strong>
+          <em>AI 短剧工作台</em>
+        </span>
+      </button>
+      <nav class="side-links" aria-label="首页导航">
+        <button type="button" :class="{ on: nav === 'home' }" @click="nav = 'home'">
+          <HomeIcon name="home" :size="18" /> 首页
+        </button>
+        <button type="button" :class="{ on: nav === 'projects' }" @click="nav = 'projects'">
+          <HomeIcon name="folder" :size="18" /> 我的项目
+        </button>
+        <button type="button" :class="{ on: nav === 'library' }" @click="nav = 'library'">
+          <HomeIcon name="library" :size="18" /> 素材库
+        </button>
+        <button type="button" :class="{ on: nav === 'tools' }" @click="nav = 'tools'">
+          <HomeIcon name="wand" :size="18" /> 工具集
+        </button>
+        <button type="button" @click="router.push('/settings')">
+          <HomeIcon name="settings" :size="18" /> 设置
+        </button>
+      </nav>
+      <div class="side-foot">
+        <div class="side-kicker">开源，免费</div>
+        <a href="https://github.com/JerrIsTheBesta/AI-Short-Drama-Studio" target="_blank" rel="noreferrer">
+          <HomeIcon name="github" :size="15" />
+          去 GitHub →
+        </a>
       </div>
-    </div>
+    </aside>
 
-    <div class="container">
-      <div class="section-header">
-        <div class="home-tabs" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            :class="{ on: homeTab === 'projects' }"
-            :aria-selected="homeTab === 'projects'"
-            @click="homeTab = 'projects'"
-          >
-            我的项目
-            <em>{{ project.allProjects.length }}</em>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            :class="{ on: homeTab === 'library' }"
-            :aria-selected="homeTab === 'library'"
-            @click="homeTab = 'library'"
-          >
-            资产库
-            <em>{{ library.all.length }}</em>
-          </button>
-        </div>
-        <div v-if="homeTab === 'projects'" class="filter">
-          <HomeIcon class="search-icon" name="search" :size="17" />
-          <input v-model="search" class="search" placeholder="搜索项目" />
-        </div>
-        <button v-else type="button" class="lib-upload" :disabled="libUploading" @click="uploadLibraryImages">
-          <HomeIcon name="upload" :size="16" />
-          {{ libUploading ? '上传中…' : `上传到${currentFolderLabel}` }}
+    <div class="stage">
+      <div v-if="nav !== 'home'" class="stage-bar">
+        <button type="button" class="icon-round" title="搜索项目" @click="focusProjectSearch">
+          <HomeIcon name="search" :size="16" />
+        </button>
+        <button type="button" class="icon-round avatar" title="设置" @click="router.push('/settings')">
+          <HomeIcon name="settings" :size="16" />
         </button>
       </div>
 
-      <div v-if="homeTab === 'projects'">
-      <EmptyState
-        v-if="filteredProjects.length === 0"
-        title="还没有项目"
-        description="点击「新建」直接开一张画布，告诉左侧智能体想做什么就行"
-      >
-        <template #icon><HomeIcon name="film" :size="44" /></template>
-        <template #action>
-          <GradientButton :loading="creating" :disabled="creating" @click="quickCreate">
-            <template #icon><HomeIcon name="plus" :size="16" /></template>
-            新建
-          </GradientButton>
-        </template>
-      </EmptyState>
+      <template v-if="nav === 'home'">
+        <section class="banner">
+          <div class="banner-stars" aria-hidden="true"></div>
+          <div class="banner-copy">
+            <h1>用 AI，轻松创作<br /><span>属于你的短剧世界</span></h1>
+            <p>一站式 AI 短剧创作平台，支持图文、视频、数字人、智能剪辑与多种生成能力</p>
+            <div class="banner-actions">
+              <button type="button" class="go" :disabled="creating" @click="quickCreate">开始创作 →</button>
+              <button type="button" class="open" @click="openLatestProject">打开项目</button>
+            </div>
+          </div>
+          <img class="banner-art" src="/home-banner.png" alt="" />
+        </section>
 
-      <div v-else class="grid">
+        <section class="quick">
+          <h2><i /> 快速入口</h2>
+          <div class="quick-row">
+            <button type="button" @click="quickCreate">
+              <span class="q-icon violet"><HomeIcon name="image" :size="18" /></span>
+              <span><strong>AI 生成视频</strong><em>文生视频 / 图生视频</em></span>
+              <b>→</b>
+            </button>
+            <button type="button" @click="openQuickEditor">
+              <span class="q-icon blue"><HomeIcon name="scissors" :size="18" /></span>
+              <span><strong>视频剪辑</strong><em>智能剪辑与合成</em></span>
+              <b>→</b>
+            </button>
+            <button type="button" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
+              <span class="q-icon green"><HomeIcon name="video" :size="18" /></span>
+              <span><strong>数字人</strong><em>一键复刻与驱动</em></span>
+              <b>→</b>
+            </button>
+            <button type="button" @click="startRemake">
+              <span class="q-icon indigo"><HomeIcon name="remake" :size="18" /></span>
+              <span><strong>视频复刻</strong><em>克隆你的风格</em></span>
+              <b>→</b>
+            </button>
+            <button type="button" @click="quickCreate">
+              <span class="q-icon amber"><HomeIcon name="wand" :size="18" /></span>
+              <span><strong>AI 特效</strong><em>创造更多可能</em></span>
+              <b>→</b>
+            </button>
+          </div>
+        </section>
+      </template>
+
+      <section v-if="nav === 'tools'" class="tools">
+        <h2>工具集</h2>
+        <div class="quick-row">
+          <button type="button" @click="router.push('/scripts')">
+            <span class="q-icon indigo"><HomeIcon name="script" :size="18" /></span>
+            <span><strong>剧本管理</strong><em>编写、导入、按集修改</em></span>
+          </button>
+          <button type="button" @click="goClassicFlow">
+            <span class="q-icon amber"><HomeIcon name="wand" :size="18" /></span>
+            <span><strong>经典步骤</strong><em>文案、分镜、配图、导出</em></span>
+          </button>
+          <button type="button" @click="openQuickEditor">
+            <span class="q-icon blue"><HomeIcon name="scissors" :size="18" /></span>
+            <span><strong>视频剪辑</strong><em>时间线编排</em></span>
+          </button>
+          <button type="button" @click="router.push({ name: 'smart-speech', query: { new: '1' } })">
+            <span class="q-icon green"><HomeIcon name="mic" :size="18" /></span>
+            <span><strong>智能口播</strong><em>数字人与配音</em></span>
+          </button>
+        </div>
+      </section>
+
+      <section v-if="nav === 'home' || nav === 'projects'" class="projects">
+        <div class="proj-head">
+          <h2><HomeIcon name="folder" :size="16" /> 我的项目</h2>
+          <div class="filters" role="tablist">
+            <button type="button" :class="{ on: projectFilter === 'all' }" @click="projectFilter = 'all'">全部 ({{ project.allProjects.length }})</button>
+            <button type="button" :class="{ on: projectFilter === 'active' }" @click="projectFilter = 'active'">进行中 ({{ activeCount }})</button>
+            <button type="button" :class="{ on: projectFilter === 'done' }" @click="projectFilter = 'done'">已完成 ({{ doneCount }})</button>
+          </div>
+          <label class="filter">
+            <HomeIcon class="search-icon" name="search" :size="16" />
+            <input id="home-search" ref="searchEl" v-model="search" class="search" placeholder="搜索项目" />
+          </label>
+          <div class="view-toggle">
+            <button type="button" :class="{ on: viewMode === 'grid' }" title="网格" @click="viewMode = 'grid'">
+              <HomeIcon name="image" :size="15" />
+            </button>
+            <button type="button" :class="{ on: viewMode === 'list' }" title="列表" @click="viewMode = 'list'">
+              <HomeIcon name="library" :size="15" />
+            </button>
+          </div>
+        </div>
+      <div class="grid" :class="viewMode">
+        <button type="button" class="create-card" :disabled="creating" @click="quickCreate">
+          <span class="create-mark"><HomeIcon name="film" :size="28" /></span>
+          <strong>新建项目</strong>
+          <em>从空白开始创作</em>
+          <span class="create-go">创建项目 →</span>
+        </button>
+        <p v-if="listedProjects.length === 0" class="filter-empty">这个分类里还没有项目</p>
         <GlassCard
-          v-for="p in filteredProjects"
+          v-for="p in listedProjects"
           :key="p.id"
           hoverable
           padding="none"
@@ -518,6 +590,8 @@ async function moveSelectedLibrary() {
               </button>
             </div>
             <div class="proj-meta-top">
+              <span v-if="p.shots.length" class="shot-pill">{{ p.shots.length }} 个分镜</span>
+              <span class="phase" :class="projectDone(p) ? 'done' : 'active'">{{ projectDone(p) ? '已完成' : '进行中' }}</span>
               <Tag v-if="p.pipelineMode === 'remake'" type="warning" size="sm">复刻</Tag>
               <Tag v-else-if="p.pipelineMode === 'img2video'" type="info" size="sm">自由模式</Tag>
               <Tag v-else-if="p.pipelineMode === 'smart-speech'" type="success" size="sm">智能口播</Tag>
@@ -570,9 +644,16 @@ async function moveSelectedLibrary() {
           </div>
         </GlassCard>
       </div>
-      </div>
+      </section>
 
-      <div v-else class="lib-layout">
+      <div v-if="nav === 'library'" class="lib-layout">
+        <div class="lib-top">
+          <h2>素材库</h2>
+          <button type="button" class="lib-upload" :disabled="libUploading" @click="uploadLibraryImages">
+            <HomeIcon name="upload" :size="16" />
+            {{ libUploading ? '上传中…' : `上传到${currentFolderLabel}` }}
+          </button>
+        </div>
         <aside class="lib-side">
           <div class="lib-side-title">分类</div>
           <button
@@ -692,8 +773,443 @@ async function moveSelectedLibrary() {
 <style scoped>
 .home {
   height: 100%;
-  overflow-y: auto;
-  background: #0d0e12;
+  display: flex;
+  min-height: 0;
+  background:
+    radial-gradient(900px 480px at 78% 8%, rgba(98, 54, 196, 0.28), transparent 60%),
+    #0c0b14;
+  color: #f4f1ff;
+}
+.sidenav {
+  width: 228px;
+  flex: 0 0 228px;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 16px 18px;
+  background: linear-gradient(180deg, #141226 0%, #100e1c 100%);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 22px;
+  background: none;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+}
+.brand strong {
+  display: block;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+}
+.brand em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  font-size: 11px;
+  color: #8d88a8;
+}
+.side-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.side-links button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #c8c3dc;
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+.side-links button.on {
+  color: white;
+  background: linear-gradient(90deg, #6d4dff 0%, #7a5cff 100%);
+  box-shadow: 0 8px 20px rgba(109, 77, 255, 0.35);
+}
+.side-links button:hover:not(.on) {
+  background: rgba(255, 255, 255, 0.04);
+}
+.side-foot {
+  margin-top: auto;
+  padding: 14px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.side-kicker {
+  font-size: 13px;
+  font-weight: 650;
+}
+.side-foot a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: #b9a6ff;
+  font-size: 13px;
+  text-decoration: none;
+}
+.stage {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 18px 28px 40px;
+}
+.stage-bar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.icon-round {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(20, 16, 40, 0.7);
+  color: #d9d4ea;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.icon-round:hover { border-color: rgba(167, 139, 250, 0.6); }
+.banner {
+  position: relative;
+  min-height: 280px;
+  margin: -18px -28px 4px;
+  padding: 36px 56px 20px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.banner::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 -8px;
+  pointer-events: none;
+  background:
+    radial-gradient(480px 260px at 84% 42%, rgba(255, 166, 77, 0.34), transparent 68%),
+    radial-gradient(680px 360px at 72% 18%, rgba(132, 96, 255, 0.46), transparent 70%),
+    radial-gradient(520px 280px at 8% 80%, rgba(64, 28, 140, 0.28), transparent 72%),
+    linear-gradient(102deg, rgba(18, 12, 36, 0.2) 0%, rgba(36, 18, 78, 0.72) 36%, rgba(62, 26, 120, 0.94) 68%, rgba(78, 34, 132, 0.96) 100%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 46%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 46%, transparent 100%);
+}
+.banner-stars {
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 -8px;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 50%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 50%, transparent 100%);
+}
+.banner-stars::before,
+.banner-stars::after {
+  content: "";
+  position: absolute;
+  top: -8%;
+  left: 0;
+  width: calc(100% + 720px);
+  height: 116%;
+  background-repeat: repeat;
+  background-size: 720px 240px;
+  background-image:
+    radial-gradient(1.2px 1.2px at 40px 48px, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+    radial-gradient(1px 1px at 140px 160px, rgba(214, 204, 255, 0.75) 50%, transparent 51%),
+    radial-gradient(1.4px 1.4px at 230px 72px, rgba(255, 255, 255, 0.8) 50%, transparent 51%),
+    radial-gradient(1px 1px at 330px 190px, rgba(255, 214, 170, 0.65) 50%, transparent 51%),
+    radial-gradient(1.1px 1.1px at 430px 36px, rgba(255, 255, 255, 0.85) 50%, transparent 51%),
+    radial-gradient(1px 1px at 520px 120px, rgba(198, 186, 255, 0.7) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 610px 64px, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+    radial-gradient(1px 1px at 680px 176px, rgba(255, 226, 190, 0.6) 50%, transparent 51%);
+  animation: star-drift 38s linear infinite, star-twinkle 5.5s ease-in-out infinite;
+}
+.banner-stars::after {
+  width: calc(100% + 860px);
+  background-size: 860px 280px;
+  background-image:
+    radial-gradient(1px 1px at 90px 90px, rgba(255, 255, 255, 0.55) 50%, transparent 51%),
+    radial-gradient(1.3px 1.3px at 240px 40px, rgba(210, 198, 255, 0.65) 50%, transparent 51%),
+    radial-gradient(1px 1px at 400px 170px, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+    radial-gradient(1.2px 1.2px at 560px 100px, rgba(255, 220, 180, 0.55) 50%, transparent 51%),
+    radial-gradient(1px 1px at 700px 210px, rgba(255, 255, 255, 0.6) 50%, transparent 51%),
+    radial-gradient(1.4px 1.4px at 790px 30px, rgba(214, 204, 255, 0.65) 50%, transparent 51%);
+  animation-name: star-drift-slow, star-twinkle;
+  animation-duration: 58s, 7.5s;
+  animation-direction: reverse, alternate;
+}
+@keyframes star-drift-slow {
+  from { transform: translateX(0); }
+  to { transform: translateX(-860px); }
+}
+@keyframes star-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-720px); }
+}
+@keyframes star-twinkle {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.9; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .banner-stars::before,
+  .banner-stars::after { animation: none; opacity: 0.45; }
+}
+.banner-copy { position: relative; z-index: 2; max-width: min(540px, 54%); }
+.banner h1 {
+  margin: 0;
+  font-size: 40px;
+  line-height: 1.25;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+.banner h1 span {
+  background: linear-gradient(90deg, #d7cbff 0%, #8b78ff 55%, #6d5efc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.banner p {
+  margin: 14px 0 22px;
+  max-width: 560px;
+  color: #c9c3de;
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.banner-actions { display: flex; gap: 12px; }
+.banner-actions button {
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.banner-actions .go {
+  border: 0;
+  color: white;
+  background: linear-gradient(90deg, #6a4dff, #7d5cff);
+  box-shadow: 0 10px 24px rgba(106, 77, 255, 0.4);
+}
+.banner-actions .go:disabled { opacity: 0.6; cursor: default; }
+.banner-actions .open {
+  color: #efeaff;
+  background: rgba(12, 10, 24, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+.banner-art {
+  position: absolute;
+  z-index: 1;
+  top: 14px;
+  right: 24px;
+  width: auto;
+  height: calc(100% - 18px);
+  max-width: none;
+  object-fit: contain;
+  object-position: right center;
+  pointer-events: none;
+  filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.28));
+}
+.quick, .tools, .projects { margin-top: 8px; }
+.quick h2, .tools h2, .proj-head h2, .lib-top h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 650;
+}
+.quick h2 i {
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #8d74ff, #5b46e6);
+}
+.quick-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.quick-row button, .tools .quick-row button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 74px;
+  padding: 12px 14px;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, rgba(36, 32, 58, 0.96), rgba(24, 21, 42, 0.96));
+}
+.quick-row button:hover { border-color: rgba(154, 132, 255, 0.45); }
+.quick-row strong, .tools strong { display: block; font-size: 14px; }
+.quick-row em, .tools em {
+  display: block;
+  margin-top: 3px;
+  font-style: normal;
+  font-size: 12px;
+  color: #958eae;
+}
+.quick-row b { margin-left: auto; color: #7d7696; font-weight: 500; }
+.q-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.q-icon.violet { background: rgba(124, 92, 255, 0.18); color: #b7a6ff; }
+.q-icon.blue { background: rgba(72, 149, 239, 0.16); color: #8ec2ff; }
+.q-icon.green { background: rgba(52, 199, 123, 0.16); color: #7de7b2; }
+.q-icon.indigo { background: rgba(99, 102, 241, 0.16); color: #a5b4fc; }
+.q-icon.amber { background: rgba(245, 166, 35, 0.16); color: #f6c56b; }
+.projects { margin-top: 26px; }
+.proj-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.proj-head h2 { margin: 0; white-space: nowrap; }
+.filters { display: flex; gap: 8px; }
+.filters button, .view-toggle button {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #b7b1cb;
+  cursor: pointer;
+  font-size: 13px;
+}
+.filters button.on {
+  color: white;
+  background: rgba(109, 77, 255, 0.22);
+  border-color: rgba(141, 116, 255, 0.45);
+}
+.view-toggle {
+  display: flex;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.view-toggle button {
+  width: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+}
+.view-toggle button.on { background: rgba(255, 255, 255, 0.08); color: white; }
+.filter {
+  margin-left: auto;
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 36px;
+}
+.filter .search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+  color: #8d88a8;
+  pointer-events: none;
+}
+.filter .search {
+  box-sizing: border-box;
+  width: 220px;
+  height: 36px;
+  padding: 0 14px 0 34px;
+  line-height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: white;
+  outline: none;
+}
+.create-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 228px;
+  border-radius: 16px;
+  border: 1px dashed rgba(154, 140, 255, 0.28);
+  background: rgba(22, 18, 40, 0.72);
+  color: #efeaff;
+  cursor: pointer;
+}
+.create-card em { font-style: normal; color: #8d88a8; font-size: 12px; }
+.create-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: rgba(109, 77, 255, 0.16);
+  color: #c4b6ff;
+}
+.create-go {
+  margin-top: 6px;
+  color: #b7a6ff;
+  font-size: 13px;
+}
+.filter-empty { grid-column: 1 / -1; color: #8d88a8; font-size: 13px; }
+.shot-pill, .phase {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(8, 6, 18, 0.62);
+  color: white;
+}
+.phase.active { background: rgba(59, 130, 246, 0.9); }
+.phase.done { background: rgba(34, 160, 98, 0.92); }
+.proj-open { display: none; }
+.grid.list { grid-template-columns: 1fr; }
+.grid.list .create-card { min-height: 84px; flex-direction: row; }
+.lib-top { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; }
+@media (max-width: 1100px) {
+  .quick-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .banner { min-height: 420px; margin-top: -18px; padding-bottom: 200px; }
+  .banner p { white-space: normal; }
+  .banner-art { height: 58%; right: 8px; bottom: 0; }
+}
+@media (max-width: 860px) {
+  .home { flex-direction: column; }
+  .sidenav { width: auto; flex-basis: auto; border-right: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+  .side-links { flex-direction: row; overflow: auto; }
+  .side-foot { display: none; }
+  .proj-head { flex-wrap: wrap; }
+  .filter { margin-left: 0; }
 }
 
 /* ───────── Hero ───────── */
@@ -936,9 +1452,10 @@ async function moveSelectedLibrary() {
 .proj {
   cursor: pointer;
   overflow: hidden;
-  border-radius: 14px !important;
+  border-radius: 16px !important;
   box-shadow: none !important;
-  background: #14161c !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  background: #17142a !important;
   transition:
     border-color 0.18s,
     transform 0.18s,
@@ -987,10 +1504,10 @@ async function moveSelectedLibrary() {
   opacity: 0.5;
 }
 .proj-open {
+  display: none;
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: flex;
   align-items: flex-end;
   justify-content: flex-start;
   gap: 8px;
@@ -1711,7 +2228,10 @@ async function moveSelectedLibrary() {
 .lib-meta button:hover {
   color: var(--color-error);
 }
-.proj-meta-top :deep(.tag) { gap: 4px; }
+.proj-meta-top :deep(.tag) { display: none; }
+.grid.list .proj { display: flex !important; align-items: stretch; }
+.grid.list .proj-thumb { width: 240px; flex: none; }
+.search { border-radius: 999px; }
 .modal-actions :deep(.grad-btn) { border-radius: 10px; box-shadow: none; }
 @media (max-width: 720px) {
   .hero-content {

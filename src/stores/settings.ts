@@ -13,6 +13,7 @@ import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { isAutodlHost, normalizeStoredVideoEndpoint, type AdapterConfig } from '@/services/ai/adapters'
 import { normalizeModelNodeOptions, type ModelNodeOptions } from '@/services/ai/modelOptions'
 import { LLM_PROVIDERS } from '@/services/ai/providers'
+import { GENERAL_STORY_SKILL_ID, normalizeStorySkillId } from '@/skills/storyStyles'
 
 export type { AdapterConfig }
 
@@ -116,8 +117,13 @@ export interface AppSettings {
   music: ServiceEndpoint
   musics: NamedEndpoint[]
   activeMusicId: string
-  /** 用户导入的导演手册。拆分镜头和写提示词时优先用它。 */
+  /** 用户导入的导演手册。在技能窗口里选中「我的技能」时使用。 */
   directorSkill: DirectorSkillDoc | null
+  /**
+   * 画布智能体当前分镜技能。
+   * storyboard-director = 通用；custom = 使用 directorSkill；其余为内置风格或短剧类型。
+   */
+  activeStorySkillId: string
 }
 
 export interface DirectorSkillDoc {
@@ -466,7 +472,8 @@ function buildDefaults(): AppSettings {
     music: asEndpoint(musicFirst),
     musics: [musicFirst],
     activeMusicId: musicFirst.id,
-    directorSkill: null
+    directorSkill: null,
+    activeStorySkillId: GENERAL_STORY_SKILL_ID
   }
 }
 
@@ -596,7 +603,11 @@ function parseSettings(raw: string | null): AppSettings {
       music: music.active,
       musics: music.list,
       activeMusicId: music.activeId,
-      directorSkill: normalizeDirectorSkill(parsed.directorSkill)
+      directorSkill: normalizeDirectorSkill(parsed.directorSkill),
+      activeStorySkillId: normalizeStorySkillId(
+        parsed.activeStorySkillId,
+        Boolean(normalizeDirectorSkill(parsed.directorSkill))
+      )
     }
   } catch {
     return defaults
@@ -1099,6 +1110,13 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /** 创作偏好：选内置工作流（h3/h3-v5/wan-prime）作为默认视频模型；传 undefined = 跟随已配置接入 */
+  function selectStorySkill(id: string) {
+    const next = normalizeStorySkillId(id, Boolean(config.value.directorSkill))
+    if (config.value.activeStorySkillId === next) return
+    touch()
+    config.value = { ...config.value, activeStorySkillId: next }
+  }
+
   function selectVideoModelDefault(model?: VideoGenModel) {
     if (config.value.defaultVideoModel === model) return
     config.value = { ...config.value, defaultVideoModel: model }
@@ -1267,6 +1285,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setAutodlToken,
     addVideo,
     selectVideo,
+    selectStorySkill,
     selectVideoModelDefault,
     removeVideo,
     renameVideo,

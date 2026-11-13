@@ -9,11 +9,15 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { rebuildCanvasGraph, NODE_W, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
-import { setCanvasReveal, setCanvasInspect, setCanvasSelect } from '@/services/canvas/canvasBridge'
+import { setCanvasReveal, setCanvasInspect, setCanvasSelect, setCanvasLinkMenu } from '@/services/canvas/canvasBridge'
 import { rebindShotScenes, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import {
   appendCanvasReferenceSource,
-  canvasNodeProducesImage
+  canvasNodeProducesImage,
+  carryTextFromNode,
+  nextCanvasLinks,
+  prevCanvasLinks,
+  type LinkCanvasKind
 } from '@/services/canvas/references'
 import { isDesktop, desktop } from '@/services/desktop'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
@@ -21,6 +25,9 @@ import AudioNode from '@/components/canvas/AudioNode.vue'
 import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
 import FreeformGenNode from '@/components/canvas/FreeformGenNode.vue'
+import AudioGenNode from '@/components/canvas/AudioGenNode.vue'
+import ComposeNode from '@/components/canvas/ComposeNode.vue'
+import CtxMenuIcon from '@/components/canvas/CtxMenuIcon.vue'
 import AgentChat from '@/components/canvas/AgentChat.vue'
 import CanvasGuide from '@/components/canvas/CanvasGuide.vue'
 import NodeInspector from '@/components/canvas/NodeInspector.vue'
@@ -146,7 +153,9 @@ const nodeTypes = {
   final: PipelineNode,
   groupFrame: GroupFrame,
   imageGen: FreeformGenNode,
-  videoGen: FreeformGenNode
+  videoGen: FreeformGenNode,
+  audioGen: AudioGenNode,
+  compose: ComposeNode
 }
 
 const { onConnect, onNodeDragStop, onMoveEnd, fitView, screenToFlowCoordinate } = useVueFlow()
@@ -157,6 +166,9 @@ const ctxMenu = ref<{
   flow: { x: number; y: number }
   nodeId?: string
   onNode?: boolean
+  linkOnly?: boolean
+  linkSide?: 'prev' | 'next'
+  links?: LinkCanvasKind[]
 } | null>(null)
 
 const flowNodes = computed<Node[]>(() => {
@@ -198,7 +210,7 @@ const flowNodes = computed<Node[]>(() => {
       position: n.position,
       data: { ...n.data, nodeType: n.type },
       draggable: true,
-      zIndex: n.type === 'imageGen' || n.type === 'videoGen' ? 12 : 1
+      zIndex: n.type === 'imageGen' || n.type === 'videoGen' || n.type === 'audioGen' || n.type === 'compose' ? 12 : 1
     }
     if (n.parentGroupId) {
       mapped.parentNode = n.parentGroupId
@@ -266,6 +278,7 @@ onMounted(async () => {
   setCanvasSelect((nodeId) => {
     selectedId.value = nodeId
   })
+  setCanvasLinkMenu((nodeId, x, y, side) => openNodeLinkMenu(nodeId, x, y, side))
   setTimeout(() => fitView({ padding: 0.2 }), 80)
   window.addEventListener('keydown', onDupKey)
   window.addEventListener('resize', clampAgentToViewport)
@@ -278,6 +291,7 @@ onUnmounted(() => {
   setCanvasReveal(null)
   setCanvasInspect(null)
   setCanvasSelect(null)
+  setCanvasLinkMenu(null)
 })
 
 onConnect((c: Connection) => {
@@ -459,7 +473,7 @@ function pointerClient(ev: MouseEvent | TouchEvent): { x: number; y: number } | 
 function canDuplicate(id: string | null | undefined): boolean {
   if (!id) return false
   const n = project.current?.canvas?.nodes.find((x) => x.id === id)
-  return n?.type === 'imageGen' || n?.type === 'videoGen'
+  return n?.type === 'imageGen' || n?.type === 'videoGen' || n?.type === 'audioGen'
 }
 
 function canDeleteNode(id: string | null | undefined): boolean {
@@ -471,13 +485,13 @@ function canDeleteNode(id: string | null | undefined): boolean {
 
 function duplicateNode(id: string | null | undefined) {
   if (!id) {
-    toast.warn('请先选中要复制的图片或视频节点')
+    toast.warn('请先选中要复制的图片、视频或音频节点')
     return
   }
   const nid = project.duplicateCanvasNode(id)
   closeCtxMenu()
   if (!nid) {
-    toast.warn('只能复制图片或视频节点')
+    toast.warn('只能复制图片、视频或音频节点')
     return
   }
   selectedId.value = nid
@@ -559,6 +573,27 @@ function onDupKey(e: KeyboardEvent) {
   }
 }
 
+function openNodeLinkMenu(nodeId: string, x: number, y: number, side: 'prev' | 'next') {
+  const node = project.current?.canvas?.nodes.find((item) => item.id === nodeId)
+  const links = side === 'prev' ? prevCanvasLinks(node) : nextCanvasLinks(node)
+  if (!links.length) {
+    toast.warn(side === 'prev' ? '这个节点前面没有能接上的节点' : '这个节点后面没有能接上的节点')
+    return
+  }
+  selectedId.value = nodeId
+  const h = links.length * 36 + 16
+  ctxMenu.value = {
+    x: Math.max(8, Math.min(x, window.innerWidth - 216)),
+    y: Math.max(8, Math.min(y, window.innerHeight - h - 8)),
+    flow: screenToFlowCoordinate({ x, y }),
+    nodeId,
+    onNode: true,
+    linkOnly: true,
+    linkSide: side,
+    links
+  }
+}
+
 function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
   const event = eventFromCtx(ev)
   if (!event) return
@@ -572,9 +607,8 @@ function openCtxMenu(ev: MouseEvent | NodeMouseEvent) {
   if (clickedId) selectedId.value = clickedId
   const nodeId = clickedId || selectedId.value || undefined
   const extra = (canDuplicate(clickedId) ? 36 : 0) + (clickedId && canDeleteNode(clickedId) ? 36 : 0)
-  const extraFree = 4 * 36 + 10
   const w = 216
-  const h = 92 + extra + extraFree
+  const h = 8 * 36 + 16 + extra
   ctxMenu.value = {
     x: Math.max(8, Math.min(pt.x, window.innerWidth - w - 8)),
     y: Math.max(8, Math.min(pt.y, window.innerHeight - h - 8)),
@@ -596,39 +630,51 @@ function pullStrandedFreeformIntoView() {
   project.setCanvas({ ...canvas, nodes: rescued })
 }
 
-function addFreeform(type: 'imageGen' | 'videoGen') {
+function addFreeform(type: 'imageGen' | 'videoGen' | 'audioGen') {
   if (!project.current) return
   pullStrandedFreeformIntoView()
   const all = project.current.canvas?.nodes ?? []
   const count = all.filter((n) => n.type === type).length + 1
   const id = `${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
-  const sourceId = ctxMenu.value?.onNode ? ctxMenu.value.nodeId : undefined
-  const source = sourceId ? all.find((node) => node.id === sourceId) : undefined
-  const inheritsSource = canvasNodeProducesImage(source)
+  const upstream = ctxMenu.value?.linkSide === 'prev'
+  const anchorId = ctxMenu.value?.onNode ? ctxMenu.value.nodeId : undefined
+  const anchor = anchorId ? all.find((node) => node.id === anchorId) : undefined
+  const inheritsSource = !upstream && type !== 'audioGen' && canvasNodeProducesImage(anchor)
   const pos = nextFreeformPosition(all, {
-    source,
-    click: ctxMenu.value?.flow
+    source: anchor,
+    click: ctxMenu.value?.flow,
+    place: upstream ? 'before' : 'after'
   })
   project.addCanvasNode({
     id,
     type,
     position: { x: pos.x, y: pos.y },
     data: {
-      label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
-      prompt: '',
+      label: type === 'imageGen' ? `图片 ${count}` : type === 'audioGen' ? `音频 ${count}` : `视频 ${count}`,
+      prompt: anchor && project.current ? carryTextFromNode(project.current, anchor) : '',
       referenceAssetIds: [],
-      referenceSourceNodeIds: inheritsSource && sourceId ? [sourceId] : [],
+      referenceSourceNodeIds: inheritsSource && anchorId ? [anchorId] : [],
       duration: 8,
       aspectRatio: project.current.settings.aspectRatio,
-      ...(type === 'videoGen' ? { videoModel: 'h3' as const } : {})
+      ...(type === 'videoGen'
+        ? {
+            videoModel: 'h3' as const,
+            videoResolution: project.current.settings.defaultVideoResolution || '768p'
+          }
+        : {})
     },
     status: 'idle'
   })
-  if (inheritsSource && sourceId && project.current.canvas) {
+  if (upstream && anchorId && type === 'imageGen') {
+    appendCanvasReferenceSource(project.current, anchorId, id)
+  }
+  if (anchorId && project.current.canvas) {
+    const source = upstream ? id : anchorId
+    const target = upstream ? anchorId : id
     const edge = {
-      id: `e-${sourceId}-${id}-in`,
-      source: sourceId,
-      target: id,
+      id: `e-${source}-${target}-in`,
+      source,
+      target,
       sourceHandle: 'out',
       targetHandle: 'in'
     }
@@ -639,10 +685,113 @@ function addFreeform(type: 'imageGen' | 'videoGen') {
   }
   selectedId.value = id
   closeCtxMenu()
-  toast.success(type === 'videoGen' ? '已添加视频节点' : '已添加图片节点')
+  toast.success(type === 'videoGen' ? '已添加视频节点' : type === 'audioGen' ? '已添加音频节点' : '已添加图片节点')
   nextTick(() => {
     fitView({ nodes: [id], padding: 0.35, duration: 280 })
   })
+}
+
+function addLinkedText() {
+  if (!project.current) return
+  const anchorId = ctxMenu.value?.onNode ? ctxMenu.value.nodeId : undefined
+  const anchor = anchorId ? project.current.canvas?.nodes.find((node) => node.id === anchorId) : undefined
+  const nodes = project.current.canvas?.nodes ?? []
+  const pos = anchor
+    ? nextFreeformPosition(nodes, { source: anchor, place: 'before', span: 460 })
+    : (ctxMenu.value?.flow ?? { x: 120, y: 120 })
+  const carried = anchor ? carryTextFromNode(project.current, anchor) : ''
+  const script = project.current.script
+  if (script && !script.content.trim() && carried) {
+    project.setScript({ ...script, content: carried })
+  } else if (
+    anchor &&
+    script?.content.trim() &&
+    !carried &&
+    (anchor.type === 'imageGen' || anchor.type === 'videoGen' || anchor.type === 'audioGen')
+  ) {
+    project.setCanvasNodePrompt(anchor.id, script.content.trim().slice(0, 8000))
+  }
+  const existing = nodes.find((node) => node.type === 'script')
+  const scriptId = existing?.id || 'script'
+  if (!existing) {
+    project.addCanvasNode({
+      id: scriptId,
+      type: 'script',
+      position: pos,
+      data: {
+        label: project.current.script?.topic || project.current.name || '剧本',
+        width: 460,
+        height: 720,
+        kind: 'scriptDoc'
+      },
+      status: 'idle'
+    })
+  } else {
+    existing.position = { x: pos.x, y: pos.y }
+  }
+  if (anchorId && project.current.canvas) {
+    const edge = {
+      id: `e-${scriptId}-${anchorId}-in`,
+      source: scriptId,
+      target: anchorId,
+      sourceHandle: 'out',
+      targetHandle: 'in'
+    }
+    const linked = project.current.canvas.edges.some((item) => item.source === scriptId && item.target === anchorId)
+    project.setCanvas({
+      ...project.current.canvas,
+      edges: linked ? project.current.canvas.edges : [...project.current.canvas.edges, edge]
+    })
+  }
+  selectedId.value = scriptId
+  closeCtxMenu()
+  toast.success(existing ? '文本节点已接到前面' : '已在前面添加文本节点')
+  nextTick(() => fitView({ nodes: [scriptId], padding: 0.35, duration: 280 }))
+}
+
+function addCompose() {
+  if (!project.current) return
+  const anchorId = ctxMenu.value?.onNode ? ctxMenu.value.nodeId : undefined
+  const anchor = anchorId ? project.current.canvas?.nodes.find((node) => node.id === anchorId) : undefined
+  const nodes = project.current.canvas?.nodes ?? []
+  let compose = [...nodes].reverse().find((node) => node.type === 'compose')
+  const created = !compose
+  if (!compose) {
+    const pos = anchor
+      ? nextFreeformPosition(nodes, { source: anchor, place: 'after' })
+      : (ctxMenu.value?.flow ?? { x: 120, y: 120 })
+    const id = `compose_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+    project.addCanvasNode({
+      id,
+      type: 'compose',
+      position: pos,
+      data: { label: '合成' },
+      status: 'idle'
+    })
+    compose = project.current.canvas?.nodes.find((node) => node.id === id)
+  }
+  if (!compose) return
+  if (anchorId && project.current.canvas) {
+    const edge = {
+      id: `e-${anchorId}-${compose.id}-in`,
+      source: anchorId,
+      target: compose.id,
+      sourceHandle: 'out',
+      targetHandle: 'in'
+    }
+    const linked = project.current.canvas.edges.some((item) => item.source === anchorId && item.target === compose?.id)
+    if (!linked) {
+      project.setCanvas({
+        ...project.current.canvas,
+        edges: [...project.current.canvas.edges, edge]
+      })
+    }
+    toast.success(linked ? '这个视频已经在合成节点里' : created ? '已添加合成节点' : '已添加到合成节点')
+  }
+  selectedId.value = compose.id
+  closeCtxMenu()
+  const focusId = compose.id
+  nextTick(() => fitView({ nodes: [focusId], padding: 0.35, duration: 280 }))
 }
 
 function addScriptNode() {
@@ -734,6 +883,39 @@ function addPipelineEntity(kind: 'subject' | 'scene' | 'shot' | 'prop') {
   closeCtxMenu()
 }
 
+const creatingCanvas = ref(false)
+
+async function newCanvas() {
+  if (creatingCanvas.value) return
+  creatingCanvas.value = true
+  try {
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const label = `新项目 ${now.getMonth() + 1}-${now.getDate()} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+    const p = await project.createNamed(label)
+    p.pipelineMode = 'standard'
+    p.script = {
+      id: 's_' + Date.now().toString(36),
+      topic: label,
+      content: '',
+      keywords: [],
+      style: 'cinematic',
+      aspectRatio: '16:9',
+      shotDuration: 5,
+      createdAt: Date.now()
+    }
+    project.setScript(p.script)
+    project.setAspectRatio('16:9')
+    await project.save()
+    selectedId.value = null
+    toast.success('已新建画布')
+  } catch (e: any) {
+    toast.error(e?.message || '新建画布失败')
+  } finally {
+    creatingCanvas.value = false
+  }
+}
+
 async function openFolder() {
   const dir = project.current?.folderPath
   if (dir && isDesktop()) await desktop().openPath(dir)
@@ -762,26 +944,6 @@ function goClassic() {
         <span class="guide-mark">?</span>
       </button>
       <button
-        class="mode-switch-btn script-lib-btn"
-        type="button"
-        title="打开剧本库：所有剧本都存在本地 Markdown，可以编辑、增删集数"
-        @click="router.push('/scripts')"
-      >
-        <CanvasToolbarIcon name="script" :size="15" />
-        剧本
-        <em>→</em>
-      </button>
-      <button
-        class="mode-switch-btn"
-        type="button"
-        title="切到经典分步流程：剧本 → 分镜 → 图片 → 视频 → 剪辑 → 字幕 → 导出"
-        @click="goClassic"
-      >
-        <CanvasToolbarIcon name="steps" :size="15" />
-        经典步骤
-        <em>→</em>
-      </button>
-      <button
         class="bulk-optimize-btn"
         type="button"
         :disabled="optimizingAllVideos"
@@ -802,12 +964,6 @@ function goClassic() {
       <button class="icon-btn" title="重整布局" @click="relayout">
         <CanvasToolbarIcon name="layout" />
       </button>
-      <button v-if="isDesktop()" class="icon-btn" title="打开文件夹" @click="openFolder">
-        <CanvasToolbarIcon name="folder" />
-      </button>
-      <button class="icon-btn" title="设置" @click="openSettings">
-        <CanvasToolbarIcon name="settings" />
-      </button>
       <button
         class="icon-btn"
         :class="{ on: rightOpen }"
@@ -818,6 +974,31 @@ function goClassic() {
       </button>
     </header>
     <div class="body">
+      <nav class="side-rail" aria-label="工作室导航">
+        <button type="button" title="新建画布" :disabled="creatingCanvas" @click="newCanvas">
+          <CanvasToolbarIcon name="newCanvas" :size="18" />
+        </button>
+        <button type="button" title="剧本" @click="router.push('/scripts')">
+          <CanvasToolbarIcon name="script" :size="18" />
+        </button>
+        <button type="button" title="经典步骤" @click="goClassic">
+          <CanvasToolbarIcon name="steps" :size="18" />
+        </button>
+        <div class="rail-bottom">
+          <button
+            v-if="isDesktop()"
+            type="button"
+            title="打开文件夹"
+            :disabled="!project.current?.folderPath"
+            @click="openFolder"
+          >
+            <CanvasToolbarIcon name="folder" :size="18" />
+          </button>
+          <button type="button" title="设置" @click="openSettings">
+            <CanvasToolbarIcon name="settings" :size="18" />
+          </button>
+        </div>
+      </nav>
       <CanvasGuide
         v-if="guideOpen"
         :agent-open="agentOpen"
@@ -865,7 +1046,7 @@ function goClassic() {
           <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
         <div v-if="!project.current?.canvas?.nodes.length" class="empty-hint">
-          在左边说一句话让我开工，或在空白处右键添加图片 / 视频 / 剧本 / 角色 / 道具 / 场景 / 分镜
+          在左边说一句话让我开工，或在空白处右键添加图片 / 视频 / 音频 / 剧本 / 角色 / 道具 / 场景 / 分镜
         </div>
       </div>
       <Teleport to="body">
@@ -881,57 +1062,80 @@ function goClassic() {
           :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }"
           @mousedown.stop
         >
+          <template v-if="ctxMenu.linkOnly">
+            <button
+              v-if="ctxMenu.links?.includes('script')"
+              type="button"
+              @mousedown.prevent.stop="addLinkedText"
+            >
+              <CtxMenuIcon name="script" />
+              文本节点
+            </button>
+            <button
+              v-if="ctxMenu.links?.includes('imageGen')"
+              type="button"
+              @mousedown.prevent.stop="addFreeform('imageGen')"
+            >
+              <CtxMenuIcon name="image" />
+              图片节点
+            </button>
+            <button
+              v-if="ctxMenu.links?.includes('videoGen')"
+              type="button"
+              @mousedown.prevent.stop="addFreeform('videoGen')"
+            >
+              <CtxMenuIcon name="video" />
+              视频节点
+            </button>
+            <button
+              v-if="ctxMenu.links?.includes('audioGen')"
+              type="button"
+              @mousedown.prevent.stop="addFreeform('audioGen')"
+            >
+              <CtxMenuIcon name="audio" />
+              音频节点
+            </button>
+            <button
+              v-if="ctxMenu.links?.includes('compose')"
+              type="button"
+              @mousedown.prevent.stop="addCompose"
+            >
+              <CtxMenuIcon name="compose" />
+              合成节点
+            </button>
+          </template>
+          <template v-else>
           <button type="button" @mousedown.prevent.stop="addFreeform('imageGen')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3.5" y="5.5" width="17" height="13" rx="2" />
-              <path d="M8 13.5 10.2 11l3.3 3.2 2-1.8L20 16" />
-              <circle cx="9" cy="9" r="1.1" />
-            </svg>
+            <CtxMenuIcon name="image" />
             {{ ctxMenu.nodeId ? '追加图片节点' : '添加图片节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addFreeform('videoGen')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3.5" y="5.5" width="17" height="13" rx="2" />
-              <path d="M10 9.5v5l5-2.5-5-2.5Z" />
-            </svg>
+            <CtxMenuIcon name="video" />
             {{ ctxMenu.nodeId ? '追加视频节点' : '添加视频节点' }}
+          </button>
+          <button type="button" @mousedown.prevent.stop="addFreeform('audioGen')">
+            <CtxMenuIcon name="audio" />
+            {{ ctxMenu.nodeId ? '追加音频节点' : '添加音频节点' }}
           </button>
           <div class="ctx-sep" />
           <button type="button" @mousedown.prevent.stop="addScriptNode">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 4.5h7l4 4V19.5H7V4.5Z" />
-              <path d="M14 4.5V9h4.5" />
-              <path d="M9.5 12.5h5M9.5 15.5h5" />
-            </svg>
+            <CtxMenuIcon name="script" />
             {{ ctxMenu.nodeId ? '追加剧本节点' : '添加剧本节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addPipelineEntity('subject')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="8" r="2.6" />
-              <path d="M6.5 18.5c.8-3.2 2.8-4.8 5.5-4.8s4.7 1.6 5.5 4.8" />
-            </svg>
+            <CtxMenuIcon name="character" />
             {{ ctxMenu.nodeId ? '追加角色节点' : '添加角色节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addPipelineEntity('prop')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 8.5h8l1.2 2.2H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4.3a2 2 0 0 1 2-2h.8L8 8.5Z" />
-              <path d="M9 8.5V7.2A1.2 1.2 0 0 1 10.2 6h3.6A1.2 1.2 0 0 1 15 7.2v1.3" />
-            </svg>
+            <CtxMenuIcon name="prop" />
             {{ ctxMenu.nodeId ? '追加道具节点' : '添加道具节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addPipelineEntity('scene')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 16.5 9 11l3.2 3.2 2.3-2.2L20 16.8" />
-              <path d="M4.5 6.5h15v12h-15z" />
-              <path d="M4.5 18.5h15" />
-            </svg>
+            <CtxMenuIcon name="scene" />
             {{ ctxMenu.nodeId ? '追加场景节点' : '添加场景节点' }}
           </button>
           <button type="button" @mousedown.prevent.stop="addPipelineEntity('shot')">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="4" y="6.5" width="16" height="11" rx="1.5" />
-              <path d="M8 6.5v11M16 6.5v11M4 10.5h16M4 13.5h16" />
-            </svg>
+            <CtxMenuIcon name="shot" />
             {{ ctxMenu.nodeId ? '追加分镜节点' : '添加分镜节点' }}
           </button>
           <template v-if="ctxMenu.onNode && (canDuplicate(ctxMenu.nodeId) || canDeleteNode(ctxMenu.nodeId))">
@@ -941,10 +1145,7 @@ function goClassic() {
               type="button"
               @mousedown.prevent.stop="duplicateNode(ctxMenu.nodeId)"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="8" y="8" width="11" height="11" rx="1.5" />
-                <path d="M6 16V5.5A1.5 1.5 0 0 1 7.5 4H16" />
-              </svg>
+              <CtxMenuIcon name="duplicate" />
               复制此节点
             </button>
             <button
@@ -953,14 +1154,10 @@ function goClassic() {
               class="danger"
               @mousedown.prevent.stop="deleteCtxNode(ctxMenu.nodeId)"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 7.5h14" />
-                <path d="M10 7.5V5.5h4v2" />
-                <path d="M8 7.5V18a1.5 1.5 0 0 0 1.5 1.5h5A1.5 1.5 0 0 0 16 18V7.5" />
-                <path d="M10.5 11v5M13.5 11v5" />
-              </svg>
+              <CtxMenuIcon name="delete" />
               删除此节点
             </button>
+          </template>
           </template>
         </div>
       </Teleport>
@@ -1209,6 +1406,46 @@ function goClassic() {
   min-height: 0;
   position: relative;
 }
+.side-rail {
+  width: 46px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-1);
+  z-index: 5;
+}
+.side-rail button {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.side-rail button:hover:not(:disabled) {
+  background: var(--color-bg-3);
+  color: var(--color-text-1);
+}
+.side-rail button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.rail-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
 .guide-mark {
   display: grid;
   place-items: center;
@@ -1303,6 +1540,19 @@ function goClassic() {
 .flow-wrap :deep(.vue-flow__controls-button:disabled) {
   opacity: 0.35;
 }
+.flow-wrap :deep(.vue-flow__handle) {
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.flow-wrap :deep(.vue-flow__node:hover) {
+  z-index: 12 !important;
+}
 .flow-wrap :deep(.vue-flow__node) {
   overflow: visible !important;
   padding: 0;
@@ -1330,7 +1580,9 @@ function goClassic() {
 .flow-wrap :deep(.vue-flow__node-export),
 .flow-wrap :deep(.vue-flow__node-final),
 .flow-wrap :deep(.vue-flow__node-imageGen),
-.flow-wrap :deep(.vue-flow__node-videoGen) {
+.flow-wrap :deep(.vue-flow__node-videoGen),
+.flow-wrap :deep(.vue-flow__node-audioGen),
+.flow-wrap :deep(.vue-flow__node-compose) {
   width: auto;
   height: auto;
 }

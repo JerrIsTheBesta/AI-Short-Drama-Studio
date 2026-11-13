@@ -15,12 +15,11 @@ import { llmModelGroups } from '@/stores/settings'
 import GlassCard from '@/components/common/GlassCard.vue'
 import GradientButton from '@/components/common/GradientButton.vue'
 import Tag from '@/components/common/Tag.vue'
-import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
+import { pickScriptFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
 import { parseScriptDoc, toEpisodes, updateEpisode } from '@/utils/scriptEpisodes'
-import { VISUAL_STYLE_LABEL } from '@/utils/visualStyle'
-import { generatePlay } from '@/services/ai'
-import type { ScriptEpisode, VisualStyle } from '@/types'
+import { callLLM } from '@/services/ai/client'
+import type { ScriptEpisode } from '@/types'
 
 type EditorTab = 'episodes' | 'markdown' | 'preview'
 
@@ -32,6 +31,7 @@ const toast = useToastStore()
 
 const keyword = ref('')
 const activeId = ref('')
+const detailOpen = ref(false)
 const activeTab = ref<EditorTab>('episodes')
 const markdown = ref('')
 const dirty = ref(false)
@@ -87,12 +87,20 @@ function openEpisode(index: number) {
   syncDraft(index)
 }
 
-async function select(id: string) {
-  if (id === activeId.value) return
-  if (dirty.value && !(await confirmDiscard())) return
+async function openScript(id: string) {
+  if (id !== activeId.value) {
+    if (dirty.value && !confirmDiscard()) return
+    flushDraft()
+    activeId.value = id
+    await loadContent(id)
+  }
+  titleEditing.value = scripts.docs.find((d) => d.id === id)?.title || ''
+  detailOpen.value = true
+}
+
+function backToLibrary() {
   flushDraft()
-  activeId.value = id
-  await loadContent(id)
+  detailOpen.value = false
 }
 
 function confirmDiscard(): boolean {
@@ -227,33 +235,15 @@ async function createScript() {
     source: 'manual'
   })
   activeId.value = doc.id
+  titleEditing.value = doc.title
+  detailOpen.value = true
   await loadContent(doc.id, true)
   activeTab.value = 'episodes'
   toast.success('已新建剧本')
 }
 
-/* ── AI 写剧本：直接在这里提要求，写完自动入库 ── */
 const llmGroups = computed(() => llmModelGroups(settings.config.llms ?? []))
 const llmModel = computed(() => settings.config.llm.model)
-const genOpen = ref(false)
-const genTopic = ref('')
-const genBrief = ref('')
-const genStyle = ref<VisualStyle>('cinematic')
-const genDuration = ref(0)
-const generating = ref(false)
-const genProgress = ref('')
-let genAbort: AbortController | null = null
-
-const styleOptions = (Object.keys(VISUAL_STYLE_LABEL) as VisualStyle[]).map((key) => ({
-  value: key,
-  label: VISUAL_STYLE_LABEL[key]
-}))
-
-/* 目标成片时长：直接决定剧本规模和后面拆多少镜 */
-const durationOptions = [30, 40, 60, 90, 120, 180]
-const durationScenes = (sec: number) => Math.max(2, Math.min(6, Math.round(sec / 15)))
-const durationChars = (sec: number) => Math.max(400, Math.round(sec * 18))
-const durationShots = (sec: number) => Math.max(1, Math.ceil(sec / 8))
 
 const genChoice = computed({
   get() {
@@ -268,84 +258,75 @@ const genChoice = computed({
   }
 })
 
-function openGenerate() {
-  genOpen.value = true
-  genProgress.value = ''
-}
+const episodeHint = ref('')
+const episodeWriting = ref(false)
+let episodeAbort: AbortController | null = null
 
-function closeGenerate() {
-  if (generating.value) return
-  genOpen.value = false
-}
-
-async function submitGenerate() {
-  if (generating.value) return
-  const topic = genTopic.value.trim()
-  const brief = genBrief.value.trim()
-  if (!topic && !brief) {
-    toast.warn('先写点要求或基本内容')
-    return
-  }
+async function writeCurrentEpisode() {
+  if (!draft.value || episodeWriting.value) return
   if (!llmModel.value) {
     toast.warn('请先在设置里添加并选择模型')
     return
   }
-  generating.value = true
-  genProgress.value = '正在写剧本…'
-  genAbort = new AbortController()
+  const hint = episodeHint.value.trim()
+  const existing = draft.value.content.trim()
+  if (!hint && !existing) {
+    toast.warn('先写一句要求，或留一点已有正文')
+    return
+  }
+  episodeWriting.value = true
+  episodeAbort = new AbortController()
   try {
-    const run = await generatePlay(
-      {
-        topic: topic || '未命名剧本',
-        content: brief,
-        style: genStyle.value,
-        shotDuration: 5,
-        aspectRatio: '16:9',
-        targetDurationSec: genDuration.value || undefined,
-        playMode: 'write',
-        model: llmModel.value
-      },
-      (msg) => {
-        genProgress.value = msg
-      },
-      genAbort.signal
-    )
-    if (!run.result.playMarkdown?.trim()) throw new Error('模型没有返回剧本内容，换个说法再试')
-    genProgress.value = '正在保存到本地…'
-    const title = (run.result.topic || topic || 'AI 剧本').trim()
-    const doc = await scripts.create({
-      title,
-      markdown: run.result.playMarkdown,
-      source: 'ai-generated'
+    const resp = await callLLM({
+      model: llmModel.value,
+      disableThinking: true,
+      temperature: 0.7,
+      signal: episodeAbort.signal,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。'
+        },
+        {
+          role: 'user',
+          content: `剧本：${activeDoc.value?.title || '未命名剧本'}\n这一集：${draft.value.title}\n已有正文：\n${existing || '（空）'}\n\n要求：${hint || '把这一集写完整，保留已有情节。'}`
+        }
+      ]
     })
-    activeId.value = doc.id
-    titleEditing.value = doc.title
-    await loadContent(doc.id, true)
-    activeTab.value = 'episodes'
-    genOpen.value = false
-    genTopic.value = ''
-    genBrief.value = ''
-    toast.success(`剧本写好了：${doc.title}`)
+    const text = String(resp.content || '').trim()
+    if (!text) throw new Error('模型没有返回内容')
+    draft.value.content = text
+    scheduleFlush()
+    toast.success('这一集写好了')
   } catch (e: any) {
     const msg = e?.message ?? String(e)
-    if (genAbort?.signal.aborted) toast.warn('已取消，本次没有保存')
-    else toast.error(msg.startsWith('写剧本') ? msg : `写剧本失败：${msg}`)
+    if (episodeAbort?.signal.aborted) toast.warn('已取消')
+    else toast.error(msg || '写这一集失败')
   } finally {
-    generating.value = false
-    genAbort = null
+    episodeWriting.value = false
+    episodeAbort = null
   }
 }
 
-function cancelGenerate() {
-  genAbort?.abort()
+function cancelEpisodeWrite() {
+  episodeAbort?.abort()
 }
 
 async function importScript() {
-  const picked = await pickPlayMarkdownFile()
+  let picked: { text: string; filename: string } | null = null
+  try {
+    picked = await pickScriptFile()
+  } catch (e: any) {
+    toast.error(e?.message ?? '导入失败')
+    return
+  }
   if (!picked) return
   try {
     const doc = await scripts.importMarkdown(picked.text, picked.filename)
     activeId.value = doc.id
+    titleEditing.value = doc.title
+    detailOpen.value = true
     await loadContent(doc.id, true)
     toast.success(`已导入：${doc.title}`)
   } catch (e: any) {
@@ -412,7 +393,9 @@ async function removeActive() {
   await scripts.remove(doc.id)
   activeId.value = ''
   markdown.value = ''
+  draft.value = null
   dirty.value = false
+  detailOpen.value = false
   toast.success('已删除')
 }
 
@@ -453,57 +436,69 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page" :class="{ detail: detailOpen }">
     <header class="page-head">
       <div>
-        <div class="kicker">剧本管理</div>
-        <h1>本地剧本库</h1>
-        <p>
-          每次生成的剧本都会自动存成 Markdown 并收进这里，可以直接改内容、加集数，也能导出或送进项目。
+        <div class="kicker">剧本创作</div>
+        <h1>{{ detailOpen ? activeDoc?.title || '剧本' : '剧本项目' }}</h1>
+        <p v-if="!detailOpen">
+          每个剧本是一个项目。点进去后，左侧是集数，右侧改当前这一集，也可以选模型让 AI 写。
         </p>
       </div>
       <div class="head-actions">
-        <GradientButton icon="✨" @click="openGenerate">AI 写剧本</GradientButton>
+        <GradientButton v-if="detailOpen" type="ghost" @click="backToLibrary">返回剧本列表</GradientButton>
         <GradientButton type="ghost" @click="router.push('/drafts')">资源库</GradientButton>
-        <GradientButton type="secondary" icon="📥" @click="importScript">导入 Markdown</GradientButton>
-        <GradientButton type="secondary" icon="＋" @click="createScript">新建剧本</GradientButton>
+        <GradientButton type="secondary" icon="📥" title="支持 Markdown、TXT、README 和 Word" @click="importScript">导入剧本</GradientButton>
+        <GradientButton icon="＋" @click="createScript">新建剧本</GradientButton>
       </div>
     </header>
 
-    <div class="body">
-      <!-- 列表 -->
-      <aside class="side">
+    <div v-if="!detailOpen" class="library-tools">
+      <input v-model="keyword" class="search" placeholder="搜索剧本名…" />
+    </div>
+    <div v-if="!detailOpen" class="library">
+      <div v-if="!filteredDocs.length" class="empty-mini">
+        还没有剧本。新建之后可以在里面让 AI 写，也可以导入已有剧本。
+      </div>
+      <button
+        v-for="d in filteredDocs"
+        :key="d.id"
+        class="script-card"
+        @click="openScript(d.id)"
+      >
+        <div class="si-title">{{ d.title }}</div>
+        <div class="si-meta">
+          <Tag size="sm">{{ sourceLabel(d.source) }}</Tag>
+          {{ d.episodeCount }} 集 · {{ d.totalWords }} 字
+        </div>
+        <div class="si-time">{{ fmtTime(d.updatedAt) }}</div>
+      </button>
+    </div>
+
+    <div v-else class="workspace">
+      <aside class="ep-side">
         <div class="side-head">
-          <input v-model="keyword" class="search" placeholder="搜索剧本名…" />
-          <span class="count">{{ filteredDocs.length }} 份</span>
+          <strong>集数</strong>
+          <span class="count">{{ episodes.length }}</span>
         </div>
         <div class="list">
-          <div v-if="!filteredDocs.length" class="empty-mini">
-            还没有剧本。生成一次剧本，或点右上角导入。
-          </div>
           <button
-            v-for="d in filteredDocs"
-            :key="d.id"
-            class="script-item"
-            :class="{ active: d.id === activeId }"
-            @click="select(d.id)"
+            v-for="(ep, i) in episodes"
+            :key="ep.id"
+            class="ep-item"
+            :class="{ active: activeEpisodeIndex === i }"
+            @click="openEpisode(i)"
           >
-            <div class="si-title">{{ d.title }}</div>
-            <div class="si-meta">
-              <Tag size="sm">{{ sourceLabel(d.source) }}</Tag>
-              {{ d.episodeCount }} 集 · {{ d.totalWords }} 字
-            </div>
-            <div class="si-time">{{ fmtTime(d.updatedAt) }}</div>
+            <span class="ep-no">{{ i + 1 }}</span>
+            <span class="ep-item-title">{{ ep.title }}</span>
+            <span class="ep-words">{{ ep.wordCount }} 字</span>
           </button>
         </div>
-        <button v-if="scripts.docs.length" class="side-foot" @click="scripts.openFolder()">
-          在文件夹里打开
-        </button>
+        <button class="side-foot" @click="addEpisode">＋ 新增一集</button>
       </aside>
 
-      <!-- 编辑区 -->
-      <section class="editor">
-        <GlassCard v-if="activeDoc" padding="none" class="editor-card">
+      <section class="ep-main">
+        <GlassCard v-if="activeDoc && draft" padding="none" class="editor-card">
           <div class="ed-head">
             <input
               v-model="titleEditing"
@@ -518,90 +513,60 @@ onMounted(async () => {
               <span>·</span>
               <span v-if="saving">保存中…</span>
               <span v-else-if="dirty" class="unsaved">未保存</span>
-              <span v-else>已保存 · {{ fmtTime(activeDoc.updatedAt) }}</span>
+              <span v-else>已保存</span>
             </div>
             <div class="ed-actions">
-              <button class="mini-btn" @click="downloadActive">⬇ 导出 MD</button>
-              <button class="mini-btn" @click="revealActive">📂 打开文件</button>
+              <button class="mini-btn" @click="downloadActive">⬇ 导出</button>
               <button v-if="dirty" class="mini-btn primary" @click="saveNow">保存</button>
-              <button class="mini-btn danger" @click="removeActive">删除</button>
+              <button class="mini-btn danger" @click="removeActive">删除剧本</button>
             </div>
           </div>
-
-          <div class="tabs">
-            <button :class="{ on: activeTab === 'episodes' }" @click="activeTab = 'episodes'">
-              按集编辑
-            </button>
-            <button :class="{ on: activeTab === 'markdown' }" @click="activeTab = 'markdown'">
-              Markdown 全文
-            </button>
-            <button :class="{ on: activeTab === 'preview' }" @click="activeTab = 'preview'">
-              预览
-            </button>
-          </div>
-
-          <div class="ed-body">
-            <!-- 按集编辑 -->
-            <div v-if="activeTab === 'episodes'" class="ep-list">
-              <div
-                v-for="(ep, i) in episodes"
-                :id="`ep-${i}`"
-                :key="ep.id"
-                class="ep-card"
-                :class="{ open: activeEpisodeIndex === i }"
-              >
-                <div class="ep-head" @click="openEpisode(i)">
-                  <span class="ep-no">{{ i + 1 }}</span>
-                  <input
-                    class="ep-title"
-                    :value="draft && draft.index === i ? draft.title : ep.title"
-                    @input="onTitleInput(i, $event)"
-                    @click.stop
-                  />
-                  <span class="ep-words">{{ ep.wordCount }} 字</span>
-                  <div class="ep-tools" @click.stop>
-                    <button title="上移" :disabled="i === 0" @click="moveEpisode(i, -1)">↑</button>
-                    <button
-                      title="下移"
-                      :disabled="i === episodes.length - 1"
-                      @click="moveEpisode(i, 1)"
-                    >
-                      ↓
-                    </button>
-                    <button title="在后面插入一集" @click="insertEpisodeAfter(i)">＋</button>
-                    <button title="删除这一集" class="danger" @click="removeEpisode(i)">✕</button>
-                  </div>
-                </div>
-                <textarea
-                  v-if="draft && draft.index === i"
-                  v-model="draft.content"
-                  class="ep-body"
-                  placeholder="写这一集的正文，支持 Markdown"
-                  @input="scheduleFlush"
-                />
-              </div>
-              <button class="add-ep" @click="addEpisode">＋ 新增一集</button>
-            </div>
-
-            <!-- 全文 -->
-            <div v-else-if="activeTab === 'markdown'" class="md-wrap">
-              <textarea
-                v-model="markdown"
-                class="md-editor"
-                spellcheck="false"
-                @input="markDirty"
+          <div class="episode-editor">
+            <div class="episode-tools">
+              <input
+                class="ep-title-input"
+                :value="draft.title"
+                @input="onTitleInput(draft.index, $event)"
               />
-              <div class="md-foot">
-                <button class="mini-btn" @click="saveNow">保存修改</button>
-                <button class="mini-btn" @click="reloadFromDisk">↻ 读取磁盘版本</button>
-                <button class="mini-btn" @click="copyMarkdown">📋 复制全文</button>
+              <div class="episode-move">
+                <button type="button" title="上移" :disabled="draft.index === 0" @click="moveEpisode(draft.index, -1)">↑</button>
+                <button
+                  type="button"
+                  title="下移"
+                  :disabled="draft.index === episodes.length - 1"
+                  @click="moveEpisode(draft.index, 1)"
+                >
+                  ↓
+                </button>
+                <button type="button" title="删除这一集" class="danger" @click="removeEpisode(draft.index)">删除</button>
               </div>
             </div>
-
-            <!-- 预览 -->
-            <div v-else class="preview" v-html="previewHtml" />
+            <textarea
+              v-model="draft.content"
+              class="episode-body"
+              placeholder="写这一集的正文，支持 Markdown"
+              @input="scheduleFlush"
+            />
+            <div class="ai-bar">
+              <select v-model="genChoice" class="llm-select" :disabled="episodeWriting">
+                <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
+                <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
+                  <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">
+                    {{ m }}
+                  </option>
+                </optgroup>
+              </select>
+              <input
+                v-model="episodeHint"
+                class="ai-hint"
+                placeholder="告诉 AI 这一集怎么写，例如：加一场雨夜对峙"
+                :disabled="episodeWriting"
+                @keydown.enter.prevent="writeCurrentEpisode"
+              />
+              <button v-if="episodeWriting" class="mini-btn danger" type="button" @click="cancelEpisodeWrite">取消</button>
+              <button v-else class="mini-btn primary" type="button" @click="writeCurrentEpisode">AI 写这一集</button>
+            </div>
           </div>
-
           <div class="ed-foot">
             <span class="foot-tip">文件：_scripts/{{ activeDoc.filename }}</span>
             <GradientButton size="sm" type="primary" icon="→" @click="applyToProject">
@@ -609,105 +574,9 @@ onMounted(async () => {
             </GradientButton>
           </div>
         </GlassCard>
-
-        <GlassCard v-else padding="lg" class="editor-card center">
-          <div class="blank">
-            <div class="blank-icon">📜</div>
-            <div class="blank-title">还没有剧本</div>
-            <div class="blank-desc">
-              直接在这里让 AI 按你的要求写一篇，写完自动存成 Markdown；也可以导入已有文件，或去画布写。
-            </div>
-            <div class="blank-actions">
-              <GradientButton icon="✨" @click="openGenerate">让 AI 写一篇</GradientButton>
-              <GradientButton type="secondary" @click="createScript">新建空白剧本</GradientButton>
-              <GradientButton type="ghost" @click="router.push('/studio')">去画布写</GradientButton>
-            </div>
-          </div>
-        </GlassCard>
       </section>
     </div>
 
-    <!-- AI 写剧本弹窗 -->
-    <teleport to="body">
-      <div v-if="genOpen" class="gen-mask" @click.self="closeGenerate">
-        <div class="gen-modal">
-          <div class="gen-head">
-            <strong>✨ AI 写剧本</strong>
-            <button class="gen-close" :disabled="generating" title="关闭" @click="closeGenerate">
-              ✕
-            </button>
-          </div>
-          <div class="gen-form">
-            <label class="gen-label">想写什么</label>
-            <input
-              v-model="genTopic"
-              class="gen-input"
-              placeholder="一句话说清题材和看点，例如：都市玄幻，外卖小哥觉醒雷电异能，三十集短剧"
-              :disabled="generating"
-            />
-            <label class="gen-label">基本内容 / 已有想法 <em>（可选）</em></label>
-            <textarea
-              v-model="genBrief"
-              class="gen-textarea"
-              rows="5"
-              placeholder="已有的梗概、大纲、人物设定或桥段……没有就空着，AI 按上面那句话发挥"
-              :disabled="generating"
-            />
-            <div class="gen-row">
-              <div class="gen-field">
-                <label class="gen-label">目标成片时长</label>
-                <select v-model.number="genDuration" class="gen-input" :disabled="generating">
-                  <option :value="0">不限（按内容自然长度）</option>
-                  <option v-for="s in durationOptions" :key="s" :value="s">{{ s }} 秒</option>
-                </select>
-                <p class="gen-hint">
-                  {{
-                    genDuration
-                      ? `剧本按 ${genDuration} 秒定规模：约 ${durationScenes(genDuration)} 场、${durationChars(genDuration)} 字正文，后面约拆 ${durationShots(genDuration)} 镜`
-                      : '不限时长时剧本会写满完整结构，分镜也会更多'
-                  }}
-                </p>
-              </div>
-              <div class="gen-field">
-                <label class="gen-label">画风</label>
-                <select v-model="genStyle" class="gen-input" :disabled="generating">
-                  <option v-for="s in styleOptions" :key="s.value" :value="s.value">
-                    {{ s.label }}
-                  </option>
-                </select>
-              </div>
-              <div class="gen-field">
-                <label class="gen-label">模型</label>
-                <select v-model="genChoice" class="gen-input" :disabled="generating">
-                  <option v-if="!llmGroups.some((g) => g.models.length)" value="">
-                    请先在设置里添加模型
-                  </option>
-                  <optgroup v-for="g in llmGroups" :key="g.id" :label="g.name">
-                    <option v-for="m in g.models" :key="`${g.id}::${m}`" :value="`${g.id}::${m}`">
-                      {{ m }}
-                    </option>
-                  </optgroup>
-                </select>
-              </div>
-            </div>
-            <p v-if="generating" class="gen-progress">{{ genProgress }}</p>
-          </div>
-          <div class="gen-foot">
-            <button v-if="generating" class="mini-btn danger" @click="cancelGenerate">
-              取消生成
-            </button>
-            <button v-else class="mini-btn" @click="closeGenerate">先不写了</button>
-            <button
-              class="mini-btn primary"
-              :disabled="generating || !llmModel || (!genTopic.trim() && !genBrief.trim())"
-              @click="submitGenerate"
-            >
-              {{ generating ? '写作中…' : '开始写' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </teleport>
   </div>
 </template>
 
@@ -753,12 +622,160 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
-.body {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: var(--space-4);
-  align-items: start;
+.page.detail {
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
+}
+.library-tools {
+  display: flex;
+}
+.library-tools .search {
+  width: min(360px, 100%);
+}
+.library {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+.script-card {
+  text-align: left;
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 112px;
+  cursor: pointer;
+}
+.script-card:hover {
+  border-color: rgba(126, 180, 255, 0.55);
+}
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 12px;
+}
+.ep-side {
+  min-height: 0;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ep-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  cursor: pointer;
+}
+.ep-item.active {
+  border-color: rgba(126, 180, 255, 0.5);
+  background: var(--grad-primary-soft);
+}
+.ep-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ep-main {
+  min-height: 0;
+  min-width: 0;
+}
+.ep-main .editor-card {
+  height: 100%;
+  min-height: 0;
+}
+.episode-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+}
+.episode-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ep-title-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--color-text-1);
+  font-size: 14px;
+}
+.episode-move {
+  display: flex;
+  gap: 4px;
+}
+.episode-move button {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.episode-move button.danger {
+  color: #f87171;
+}
+.episode-body {
+  flex: 1;
+  min-height: 240px;
+  resize: none;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 12px;
+  color: var(--color-text-1);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.ai-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.llm-select,
+.ai-hint {
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-1);
+  height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.llm-select {
+  max-width: 220px;
+}
+.ai-hint {
+  flex: 1;
+  min-width: 0;
 }
 
 .side {
@@ -1215,123 +1232,4 @@ onMounted(async () => {
   }
 }
 
-/* ── AI 写剧本弹窗 ── */
-.gen-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  background: rgba(8, 10, 18, 0.55);
-  backdrop-filter: blur(3px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-4);
-}
-.gen-modal {
-  width: min(600px, 94vw);
-  max-height: 88vh;
-  overflow-y: auto;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
-  display: flex;
-  flex-direction: column;
-}
-.gen-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--color-border);
-}
-.gen-head strong {
-  font-size: 15px;
-  color: var(--color-text-1);
-}
-.gen-close {
-  width: 26px;
-  height: 26px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-3);
-  cursor: pointer;
-  font-size: 13px;
-}
-.gen-close:hover:not(:disabled) {
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
-}
-.gen-close:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.gen-form {
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.gen-label {
-  font-size: 12px;
-  color: var(--color-text-2);
-  display: block;
-}
-.gen-label em {
-  font-style: normal;
-  color: var(--color-text-4);
-}
-.gen-input,
-.gen-textarea {
-  width: 100%;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--color-text-1);
-  outline: none;
-  font-family: inherit;
-  resize: vertical;
-}
-.gen-input:focus,
-.gen-textarea:focus {
-  border-color: var(--color-accent);
-}
-.gen-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-  margin-top: 4px;
-}
-.gen-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.gen-hint {
-  margin: 0;
-  font-size: 11px;
-  color: var(--color-text-3, #8a93a6);
-  line-height: 1.45;
-}
-.gen-progress {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--color-accent, #7eb4ff);
-  line-height: 1.5;
-}
-.gen-foot {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
-  padding: 12px 18px;
-  border-top: 1px solid var(--color-border);
-}
-@media (max-width: 640px) {
-  .gen-row {
-    grid-template-columns: 1fr;
-  }
-}
 </style>

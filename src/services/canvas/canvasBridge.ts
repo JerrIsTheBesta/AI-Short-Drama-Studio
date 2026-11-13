@@ -32,6 +32,17 @@ export function selectCanvasNode(nodeId: string) {
   selectFn?.(nodeId)
 }
 
+type LinkMenuFn = (nodeId: string, x: number, y: number, side: 'prev' | 'next') => void
+let linkMenuFn: LinkMenuFn | null = null
+
+export function setCanvasLinkMenu(fn: LinkMenuFn | null) {
+  linkMenuFn = fn
+}
+
+export function requestNodeLinkMenu(nodeId: string, x: number, y: number, side: 'prev' | 'next') {
+  linkMenuFn?.(nodeId, x, y, side)
+}
+
 export type CanvasActivity = {
   kind: 'start' | 'progress' | 'done' | 'error'
   nodeId: string

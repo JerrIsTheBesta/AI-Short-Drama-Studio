@@ -4,6 +4,16 @@ import { normalizeForSpeech } from './tts'
 
 const CLONE_MODEL = 'qwen3-tts-vc-2026-01-22'
 
+/** 音频节点可选的声音复刻模型。选中后才允许上传参考音频。 */
+export const VOICE_CLONE_MODEL = CLONE_MODEL
+
+export function modelAcceptsReferenceAudio(model?: string): boolean {
+  const name = (model || '').trim().toLowerCase()
+  if (!name) return false
+  if (name === CLONE_MODEL) return true
+  return /tts-vc|voice-?clone|voice-enrollment|声音复刻|cosyvoice/.test(name)
+}
+
 function apiRoot(baseUrl: string): string {
   let value = baseUrl.trim().replace(/\/+$/, '')
   value = value.replace(/\/compatible-mode\/v1$/i, '/api/v1')

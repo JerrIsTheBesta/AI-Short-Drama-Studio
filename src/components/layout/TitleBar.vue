@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { desktop, isDesktop } from '@/services/desktop'
+
+const route = useRoute()
 
 /** 无边框窗口里必须画出顶栏；不依赖 preload 是否已经挂上 */
 const show = /electron/i.test(navigator.userAgent) || isDesktop()
@@ -32,7 +35,7 @@ function run(fn: () => void) {
 
 <template>
   <header v-if="show" class="titlebar win-titlebar">
-    <div class="brand">
+    <div v-if="route.name !== 'home'" class="brand">
       <img class="mark" src="/logo.png" alt="" />
       <span class="name">剧流 Studio</span>
     </div>
@@ -89,7 +92,6 @@ function run(fn: () => void) {
 .mark {
   width: 18px;
   height: 18px;
-  border-radius: 5px;
   object-fit: contain;
   display: block;
 }

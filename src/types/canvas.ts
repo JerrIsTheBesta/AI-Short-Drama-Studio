@@ -18,6 +18,8 @@ export type CanvasNodeType =
   | 'groupFrame'
   | 'imageGen'
   | 'videoGen'
+  | 'audioGen'
+  | 'compose'
 
 /** 图生视频节点模型。默认 H3 15s；h3-v5 为 10 秒且可选 1080p；万相走百炼同一套 Key。 */
 export type VideoGenModel = 'h3' | 'h3-v5' | 'wan-prime'
@@ -145,6 +147,11 @@ export interface CanvasNode {
     lastFrameAssetId?: string
     /** AutoDL / 万相进行中任务，重试时先查结果 */
     videoTaskId?: string
+    /** 音频节点选用的 TTS 模型。只有声音复刻类模型才使用参考音频。 */
+    ttsModel?: string
+    referenceAudioAssetId?: string
+    clonedVoiceId?: string
+    clonedVoiceModel?: string
   }
   status?: TaskStatus
   error?: string

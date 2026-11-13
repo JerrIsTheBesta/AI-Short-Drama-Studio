@@ -761,7 +761,7 @@ app.whenReady().then(async () => {
     if (!isAllowedProviderFetch(parsed)) throw new Error('ComfyUI 地址只支持 http:// 或 https://')
     const method = String(opts?.method || 'GET').toUpperCase()
     if (method !== 'GET' && method !== 'POST') throw new Error('ComfyUI 请求只支持 GET 或 POST')
-    const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const timeoutMs = Math.min(600000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {

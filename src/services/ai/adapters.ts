@@ -902,7 +902,7 @@ export async function comfyPromptGenerate(opts: {
     headers,
     body: JSON.stringify(payload),
     signal: opts.signal,
-    timeoutMs: 120_000
+    timeoutMs: opts.kind === 'video' ? 10 * 60_000 : 120_000
   })
   if (!submit.ok) {
     throw new Error(
@@ -917,7 +917,7 @@ export async function comfyPromptGenerate(opts: {
   }
 
   const started = Date.now()
-  const timeoutMs = opts.kind === 'video' ? 15 * 60_000 : 6 * 60_000
+  const timeoutMs = opts.kind === 'video' ? 10 * 60_000 : 6 * 60_000
   while (Date.now() - started < timeoutMs) {
     if (opts.signal?.aborted) throw new Error('已取消')
     await new Promise((r) => setTimeout(r, 1500))

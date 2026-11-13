@@ -123,12 +123,17 @@ export function nextFreeformPosition(
   opts: {
     source?: CanvasNode
     click?: { x: number; y: number }
+    place?: 'before' | 'after'
+    span?: number
   }
 ): { x: number; y: number } {
   let pos: { x: number; y: number }
   if (opts.source) {
     const abs = absoluteCanvasPosition(nodes, opts.source)
-    pos = { x: abs.x + NODE_W + 48, y: abs.y }
+    pos =
+      opts.place === 'before'
+        ? { x: abs.x - (opts.span ?? NODE_W) - 48, y: abs.y }
+        : { x: abs.x + NODE_W + 48, y: abs.y }
   } else if (opts.click && Number.isFinite(opts.click.x) && Number.isFinite(opts.click.y)) {
     pos = { x: opts.click.x, y: opts.click.y }
   } else {
@@ -150,7 +155,7 @@ export function nextFreeformPosition(
       (n) => Math.abs(n.position.x - pos.x) < 36 && Math.abs(n.position.y - pos.y) < 36
     )
   ) {
-    pos = { x: pos.x + 36, y: pos.y + 36 }
+    pos = opts.place === 'before' ? { x: pos.x - 36, y: pos.y } : { x: pos.x + 36, y: pos.y + 36 }
     guard += 1
   }
   return pos
@@ -470,7 +475,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
         shotId: shot.id,
         label: `${i + 1}. ${shot.title}`,
         videoModel: prevVid?.data.videoModel ?? defaultVideoModelPref(),
-        videoResolution: prevVid?.data.videoResolution,
+        videoResolution: prevVid?.data.videoResolution ?? project.settings.defaultVideoResolution,
         videoStillMode: resolvedStill,
         aspectRatio: prevVid?.data.aspectRatio ?? project.settings.aspectRatio
       },
@@ -601,7 +606,9 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   }
 
   // 固定流程是模板层；用户追加的自由生图/视频节点属于创作层，重整布局时不能覆盖。
-  const freeNodes = prevList.filter((node) => node.type === 'imageGen' || node.type === 'videoGen')
+  const freeNodes = prevList.filter(
+    (node) => node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen' || node.type === 'compose'
+  )
   const freeIds = new Set(freeNodes.map((node) => node.id))
   for (const node of freeNodes) {
     if (!nodes.some((item) => item.id === node.id)) nodes.push({ ...node, parentGroupId: undefined })

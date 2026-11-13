@@ -26,6 +26,7 @@ import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
 import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
 import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
+import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 import { canBuildExport } from '@/utils/timeline'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { defaultPropSheetPrompt, fillEmptyGeneratePrompt, shotFrameSendPrompt } from '@/utils/nodePrompt'
@@ -1018,6 +1019,7 @@ const cropStyle = computed(() => ({
 
 <template>
   <div class="pnode" :class="[`kind-${type}`, `st-${status}`, { on: selected && panelOpen, empty: !hasAsset, busy: generating || !!toolBusy }]">
+    <NodeLinkPlus :node-id="id" />
     <Handle v-if="type !== 'script'" id="in" type="target" :position="Position.Left" class="hndl" />
     <Handle v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'" id="char1" type="target" :position="Position.Left" :style="{ top: '28%' }" class="hndl" />
     <Handle v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'" id="char2" type="target" :position="Position.Left" :style="{ top: '50%' }" class="hndl" />
@@ -1411,7 +1413,7 @@ const cropStyle = computed(() => ({
   width: 240px;
   background: var(--color-bg-1);
   border: 1px solid var(--color-node-border);
-  border-radius: 12px;
+  border-radius: 6px;
   overflow: visible;
   color: var(--color-text-1);
   box-shadow: var(--shadow-node);
@@ -1523,7 +1525,7 @@ const cropStyle = computed(() => ({
   width: 100%;
   background: var(--color-node-well);
   overflow: hidden;
-  border-radius: 12px 12px 0 0;
+  border-radius: 6px 6px 0 0;
 }
 .pnode-media img,
 .pnode-media video {
@@ -1734,7 +1736,7 @@ const cropStyle = computed(() => ({
   min-height: 32px;
   padding: 0 10px;
   background: var(--color-bg-1);
-  border-radius: 0 0 11px 11px;
+  border-radius: 0 0 5px 5px;
 }
 
 /* ── 角色卡 ── */
@@ -1756,7 +1758,7 @@ const cropStyle = computed(() => ({
   background:
     linear-gradient(180deg, rgba(167, 139, 250, 0.07), transparent 42%),
     var(--color-bg-1);
-  border-radius: 0 0 11px 11px;
+  border-radius: 0 0 5px 5px;
 }
 .sc-head {
   display: flex;

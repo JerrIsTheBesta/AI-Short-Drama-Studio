@@ -354,6 +354,8 @@ export interface ProjectSettings {
    * fl2va：首尾帧链——第 2 镜起自动取上一镜视频末帧作首帧、下一镜配图作尾帧，保证镜头间连续。
    */
   h3ShotChainMode?: 'auto' | 'fl2va'
+  /** 创作偏好里的默认视频分辨率。1080p 仅 H3 v5 会真正出到 1080p。 */
+  defaultVideoResolution?: '768p' | '1080p'
 }
 
 /** 转场类型 */

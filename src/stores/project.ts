@@ -31,6 +31,7 @@ import type {
   ProjectSettings,
   AgentWorkspaceState,
   AspectRatio,
+  VideoResolution,
   ID,
   Subject,
   StoryProp,
@@ -66,6 +67,7 @@ function defaultSettings(): ProjectSettings {
     keepAmbientAudio: true,
     captionBg: false,
     burnCaptions: true,
+    defaultVideoResolution: '768p',
     captionHighlight: false,
     captionHighlightColor: '#ffd84d',
     captionHighlightScale: 1.2,
@@ -609,7 +611,7 @@ export const useProjectStore = defineStore('project', () => {
       ? (p.subjects ?? []).find((s) => s.id === node.data.subjectId)
       : undefined
     const scene = node.data.sceneId ? (p.scenes ?? []).find((s) => s.id === node.data.sceneId) : undefined
-    if (node.type === 'imageGen' || node.type === 'videoGen') {
+    if (node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen' || node.type === 'compose') {
       node.data = { ...node.data, outputAssetId: assetId }
     } else if (node.type === 'shotImage' && shot) {
       assignShotImage(shot.id, assetId)
@@ -662,7 +664,7 @@ export const useProjectStore = defineStore('project', () => {
     const idx = canvas.nodes.findIndex((n) => n.id === id)
     if (idx < 0) return null
     const src = canvas.nodes[idx]
-    if (src.type !== 'imageGen' && src.type !== 'videoGen') return null
+    if (src.type !== 'imageGen' && src.type !== 'videoGen' && src.type !== 'audioGen') return null
     const type = src.type
     const count = canvas.nodes.filter((n) => n.type === type).length + 1
     const copy: CanvasNode = {
@@ -673,7 +675,7 @@ export const useProjectStore = defineStore('project', () => {
         y: src.position.y
       },
       data: {
-        label: type === 'imageGen' ? `图片 ${count}` : `视频 ${count}`,
+        label: type === 'imageGen' ? `图片 ${count}` : type === 'audioGen' ? `音频 ${count}` : `视频 ${count}`,
         prompt: src.data.prompt || '',
         referenceAssetIds: [...(src.data.referenceAssetIds ?? [])],
         referenceSourceNodeIds: [...(src.data.referenceSourceNodeIds ?? [])],
@@ -686,6 +688,14 @@ export const useProjectStore = defineStore('project', () => {
               firstFrameAssetId: src.data.firstFrameAssetId,
               lastFrameAssetId: src.data.lastFrameAssetId,
               videoResolution: src.data.videoResolution
+            }
+          : {}),
+        ...(type === 'audioGen'
+          ? {
+              ttsModel: src.data.ttsModel,
+              referenceAudioAssetId: src.data.referenceAudioAssetId,
+              clonedVoiceId: src.data.clonedVoiceId,
+              clonedVoiceModel: src.data.clonedVoiceModel
             }
           : {})
       },
@@ -728,6 +738,22 @@ export const useProjectStore = defineStore('project', () => {
     current.value.settings.height = height
     if (current.value.script) current.value.script.aspectRatio = ar
     current.value.canvas = rebuildCanvasGraph(current.value, true)
+    touch()
+  }
+
+  function setDefaultVideoResolution(resolution: VideoResolution) {
+    if (!current.value) return
+    current.value.settings.defaultVideoResolution = resolution
+    if (current.value.canvas) {
+      current.value.canvas = {
+        ...current.value.canvas,
+        nodes: current.value.canvas.nodes.map((node) =>
+          node.type === 'shotVideo' || node.type === 'videoGen'
+            ? { ...node, data: { ...node.data, videoResolution: resolution } }
+            : node
+        )
+      }
+    }
     touch()
   }
 
@@ -854,6 +880,7 @@ export const useProjectStore = defineStore('project', () => {
     removeCanvasNode,
     syncCanvasFromProject,
     setAspectRatio,
+    setDefaultVideoResolution,
     setPlayApproved,
     save,
     remove,

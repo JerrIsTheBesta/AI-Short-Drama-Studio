@@ -1,4 +1,9 @@
 import { getSkillBody } from '@/skills'
+import {
+  CUSTOM_STORY_SKILL_ID,
+  GENERAL_STORY_SKILL_ID,
+  storySkillById
+} from '@/skills/storyStyles'
 import { useSettingsStore, type DirectorSkillDoc } from '@/stores/settings'
 import { desktop, isDesktop } from '@/services/desktop'
 
@@ -46,24 +51,46 @@ function manualText(skill: DirectorSkillDoc): string {
 ${skill.body}`
 }
 
-/** 有导入手册时用手册，否则用内置分镜导演手册。 */
+/** 当前选中的分镜技能。通用手册不额外加一层。 */
+export function activeStorySkillOverlay(): string {
+  let id = GENERAL_STORY_SKILL_ID
+  try {
+    id = useSettingsStore().config.activeStorySkillId || GENERAL_STORY_SKILL_ID
+  } catch {
+    id = GENERAL_STORY_SKILL_ID
+  }
+  if (id === CUSTOM_STORY_SKILL_ID) {
+    const imported = currentDirectorSkill()
+    return imported ? manualText(imported) : ''
+  }
+  const skill = storySkillById(id)
+  if (!skill) return ''
+  return `【当前分镜技能：${skill.name}】
+拆分镜头、写画面提示词和视频提示词时，在系统硬约束之上按这个技能来。硬约束仍然优先。
+
+${skill.body}`
+}
+
+/** 通用分镜导演手册，再加上当前选中的风格或类型。导入的手册选中时整份替换这一层。 */
 export function directorPlaybookText(): string {
-  const imported = currentDirectorSkill()
-  if (imported) return manualText(imported)
-  return getSkillBody('storyboard-director')
+  const base = getSkillBody('storyboard-director')
+  const extra = activeStorySkillOverlay()
+  if (!extra) return base
+  if (extra.startsWith('【用户导入的导演手册')) return extra
+  return `${base}\n\n${extra}`
 }
 
-/** 只在用户导入后插入。没有导入时保持原来的提示词。 */
+/** 写剧本、拆镜和出提示词时插入当前技能。通用分镜不加这一层。 */
 export function importedDirectorPrefix(): string {
-  const imported = currentDirectorSkill()
-  return imported ? `${manualText(imported)}\n\n` : ''
+  const extra = activeStorySkillOverlay()
+  return extra ? `${extra}\n\n` : ''
 }
 
-/** 给 H3 英文成片稿用：吸收手册里的调度写法，输出格式仍是 (S#) 与 <d>。 */
+/** 给 H3 英文成片稿用：吸收当前技能的调度写法，输出格式仍是 (S#) 与 <d>。 */
 export function importedDirectorForH3(): string {
-  const imported = currentDirectorSkill()
-  if (!imported) return ''
-  return `User director manual "${imported.name}" (follow its blocking, performance and how a shot is staged). Keep this task's output format: speaker lock, English action, dialogue only inside d tags.\n${imported.body.slice(0, 8_000)}\n\n`
+  const extra = activeStorySkillOverlay()
+  if (!extra) return ''
+  return `Active story skill (follow its blocking, performance and how a shot is staged). Keep this task's output format: speaker lock, English action, dialogue only inside d tags.\n${extra.slice(0, 8_000)}\n\n`
 }
 
 const SKILL_NAMES = ['SKILL.md', 'skill.md', 'README.md', 'readme.md', 'Readme.md']

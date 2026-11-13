@@ -4,7 +4,7 @@ import { normalizeVideoGenModel, videoMaxRefImages } from '@/types'
 /** 返回节点当前产物；绑定节点而不是绑定旧 asset，所以上游重绘后会自动跟随。 */
 export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID | undefined {
   if (!node) return undefined
-  if (node.type === 'imageGen' || node.type === 'videoGen') return node.data.outputAssetId
+  if (node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'compose') return node.data.outputAssetId
   if (node.type === 'final' || node.type === 'export') return project.finalVideoAssetId
   if (node.type === 'subject' || node.type === 'subjectProps') {
     const subject = (project.subjects ?? []).find((item) => item.id === node.data.subjectId)
@@ -28,6 +28,63 @@ export function canvasNodeOutputAssetId(project: Project, node?: CanvasNode): ID
   if (node.type === 'shotVideo') return shot.videoAssetId
   if (node.type === 'audio') return shot.audioAssetId
   return undefined
+}
+
+export type NextCanvasLink = 'imageGen' | 'videoGen' | 'audioGen' | 'compose'
+export type PrevCanvasLink = 'script' | 'imageGen' | 'videoGen'
+export type LinkCanvasKind = PrevCanvasLink | NextCanvasLink
+
+/** 这个节点后面能接上的自由节点。图片不能接音频，文本可以带去图片、视频、音频。视频后面可以收进合成节点。 */
+export function nextCanvasLinks(node?: CanvasNode): NextCanvasLink[] {
+  if (!node) return []
+  if (node.type === 'script') return ['imageGen', 'videoGen', 'audioGen']
+  if (node.type === 'videoGen' || node.type === 'shotVideo') return ['compose']
+  if (canvasNodeProducesImage(node)) return ['imageGen', 'videoGen']
+  return []
+}
+
+/** 这个节点前面能接上的节点。视频前面可以是文本或图片，音频前面只有文本。 */
+export function prevCanvasLinks(node?: CanvasNode): PrevCanvasLink[] {
+  if (!node || node.type === 'script') return []
+  if (node.type === 'compose') return ['videoGen']
+  if (node.type === 'audioGen' || node.type === 'audio') return ['script']
+  if (
+    node.type === 'videoGen' ||
+    node.type === 'shotVideo' ||
+    node.type === 'imageGen' ||
+    canvasNodeProducesImage(node)
+  ) {
+    return ['script', 'imageGen']
+  }
+  return []
+}
+
+/** 新建下游节点时带过去的文字：剧本正文、节点提示词，或角色 / 场景 / 分镜描述。 */
+export function carryTextFromNode(project: Project, node: CanvasNode): string {
+  const clip = (value: string) => value.trim().slice(0, 8000)
+  if (node.type === 'script') {
+    return clip(project.script?.content || project.script?.topic || '')
+  }
+  if (node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen') {
+    return clip(node.data.prompt || '')
+  }
+  if (node.type === 'subject' || node.type === 'subjectProps') {
+    const subject = (project.subjects ?? []).find((item) => item.id === node.data.subjectId)
+    return clip([subject?.name, subject?.description].filter(Boolean).join('\n'))
+  }
+  if (node.type === 'prop') {
+    const prop = (project.props ?? []).find((item) => item.id === node.data.propId)
+    return clip([prop?.name, prop?.description].filter(Boolean).join('\n'))
+  }
+  if (node.type === 'scene' || node.type === 'sceneProps') {
+    const scene = (project.scenes ?? []).find((item) => item.id === node.data.sceneId)
+    return clip([scene?.name, scene?.description].filter(Boolean).join('\n'))
+  }
+  if (node.type === 'shotBoard' || node.type === 'shotImage' || node.type === 'shotFrames') {
+    const shot = project.shots.find((item) => item.id === node.data.shotId)
+    return clip(shot?.visualPrompt || shot?.title || '')
+  }
+  return ''
 }
 
 export function canvasNodeProducesImage(node?: CanvasNode): boolean {

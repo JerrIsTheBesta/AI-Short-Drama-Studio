@@ -43,7 +43,7 @@ const steps = [
     sub: '怎么用都行，不用二选一',
     items: [
       '左右两边可以随时混用：先让 AI 打底，再手动改细节，反过来也成立。',
-      '顶栏可以切到「经典步骤」，按 文案 → 剧本 → 素材 → 视频 的顺序分步做。'
+      '左侧最上面可以新建画布，接着是剧本和经典步骤，文件夹和设置在最下方。'
     ]
   }
 ]
@@ -54,13 +54,13 @@ const step = computed(() => steps[index.value])
 const highlight = computed(() => {
   const area = step.value.area
   if (!area) return null
-  const left = area === 'agent' ? 0 : props.agentOpen ? props.agentWidth : 0
-  const right = area === 'agent' ? 'auto' : props.rightWidth
+  const rail = 46
+  const agentWidth = props.agentOpen ? props.agentWidth : 0
   if (area === 'agent') {
     if (!props.agentOpen) return null
-    return { left: '0px', right: 'auto', width: `${props.agentWidth}px` }
+    return { left: `${rail}px`, right: 'auto', width: `${props.agentWidth}px` }
   }
-  return { left: `${left}px`, right: `${right}px`, width: 'auto' }
+  return { left: `${rail + agentWidth}px`, right: `${props.rightWidth}px`, width: 'auto' }
 })
 
 function next() {
