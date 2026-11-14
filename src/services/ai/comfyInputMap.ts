@@ -417,10 +417,10 @@ export interface ComfyInjectValues {
   uploadedImages?: Record<string, string>
 }
 
-/** Ref2VA 的多参考槽是可选输入，只裁剪已确认属于动态参考槽的映射。 */
+/** Ref2VA 的多参考槽是可选输入，仅在本次请求中按实际图数调整。 */
 export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count: number): ComfyInputMap {
   const imageBindings = map.bindings.filter(b => b.role === 'image')
-  if (!count || count >= imageBindings.length) return map
+  if (!Number.isSafeInteger(count) || count < 1 || count > 9) return map
   const nodes = payload?.prompt || payload
   const slots = Object.values(nodes || {}).flatMap((node: any) => {
     if (!/^MiniMaxH3AudioConditioning/i.test(node?.class_type || '') || !/^ref2va$/i.test(node?.inputs?.task_type || '')) return []
@@ -432,7 +432,35 @@ export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count:
     })
   })
   const ids = [...new Set(slots.sort((a, b) => a.index - b.index).map(slot => slot.nodeId))]
-  if (ids.length !== imageBindings.length || ids.some(id => !imageBindings.some(b => b.nodeId === id && b.field === 'image'))) return map
+  if (!ids.length || imageBindings.some(b => !ids.includes(b.nodeId) || b.field !== 'image')) return map
+  if (map.bindings.some(b => b.role !== 'image' && ids.includes(b.nodeId) && b.field === 'image')) return map
+  const conditioningInputs = [...new Set(slots.map(slot => slot.inputs))]
+  // 以实际连线补齐旧映射，而不是把导入时保存的映射条数当作上限。
+  if (conditioningInputs.some(inputs => {
+    const local = slots.filter(slot => slot.inputs === inputs)
+    return local.length !== ids.length || local.some((slot, index) =>
+      slot.index !== index || slot.nodeId !== ids[index] || inputs[slot.key][1] !== 0)
+  }) || ids.some(id => nodes[id]?.class_type !== 'LoadImage' || typeof nodes[id]?.inputs?.image !== 'string')) return map
+  const ordered: ComfyInputBinding[] = ids.map(nodeId => ({ role: 'image', nodeId, field: 'image', mediaMode: 'upload' }))
+  if (count > ids.length) {
+    for (const inputs of conditioningInputs) {
+      for (let i = ids.length; i < count; i++) {
+        if (Object.hasOwn(inputs, `ref_images.ref_image_${i}`)) return map
+      }
+    }
+    const allocated = new Set(Object.keys(nodes))
+    let next = 1
+    for (let i = ids.length; i < count; i++) {
+      while (allocated.has(String(next))) next++
+      const nodeId = String(next++)
+      allocated.add(nodeId)
+      nodes[nodeId] = { class_type: 'LoadImage', inputs: { image: '' }, _meta: { title: `Reference image ${i + 1}` } }
+      for (const inputs of conditioningInputs) inputs[`ref_images.ref_image_${i}`] = [nodeId, 0]
+      ordered.push({ role: 'image', nodeId, field: 'image', mediaMode: 'upload' })
+    }
+    return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered] }
+  }
+  if (count === ids.length) return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered] }
   const keep = ids.slice(0, count)
   // 不允许其余必填连线继续引用未上传的示例图。
   const removed = new Set(ids.slice(count))
@@ -447,7 +475,7 @@ export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count:
   ))) return map
   for (const slot of slots) if (removed.has(slot.nodeId)) delete slot.inputs[slot.key]
   for (const id of removed) delete nodes[id]
-  return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...keep.map(id => imageBindings.find(b => b.nodeId === id)!)] }
+  return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered.slice(0, keep.length)] }
 }
 
 /**

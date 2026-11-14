@@ -754,9 +754,10 @@ async function uploadComfyMedia(opts: {
   } catch {
     /* 某些网关返回纯文本文件名 */
   }
-  const filename = String(json.name || json.filename || text.trim().split('\n')[0] || '').replace(/^"|"$/g, '')
+  const plain = text.trim()
+  const filename = String(json.name || json.filename || (/^[^<>\r\n{}]+\.[a-z0-9]{2,8}$/i.test(plain) ? plain : '')).trim()
   if (!filename) throw new Error(`[comfyui] 上传成功但未返回文件名：${text.slice(0, 160)}`)
-  return filename
+  return [String(json.subfolder || '').trim(), filename].filter(Boolean).join('/')
 }
 
 /** 老模板仍支持 {{prompt}} / {{negative}} / {{image}} 占位；没有占位符时交给输入映射处理。 */
@@ -876,8 +877,17 @@ export async function comfyPromptGenerate(opts: {
   const imageSources = [opts.imageDataUrl, ...(opts.referenceImageDataUrls || [])].filter(Boolean) as string[]
   if (opts.kind === 'video') inputMap = fitComfyReferenceImages(payload, inputMap, imageSources.length)
   const imageBindings = inputMap.bindings.filter(b => b.role === 'image')
-  if (opts.kind === 'video' && imageBindings.length && imageSources.length !== imageBindings.length) {
+  if (opts.kind === 'video' && imageSources.length !== imageBindings.length) {
     throw new Error(`[comfyui] 工作流映射了 ${imageBindings.length} 张参考图，本次提供 ${imageSources.length} 张；请核对图片数量和映射顺序，避免使用工作流内的默认图片。`)
+  }
+  const imageInputs = inputMap.bindings.filter(b => b.role === 'image' || b.role === 'imageEnd' || b.role === 'mask')
+  if (new Set(imageInputs.map(b => JSON.stringify([b.nodeId, b.field]))).size !== imageInputs.length) {
+    throw new Error('[comfyui] 多张图片映射到了同一个节点字段，请在接入设置中检查图片映射。')
+  }
+  if (opts.kind === 'video' && imageSources.length) {
+    const bound = new Set(imageInputs.filter(b => b.role === 'image' || (b.role === 'imageEnd' ? opts.imageEndDataUrl : opts.maskDataUrl)).map(b => b.nodeId))
+    const unbound = guessInputMap(payload).bindings.filter(b => b.role === 'image' && !bound.has(b.nodeId))
+    if (unbound.length) throw new Error(`[comfyui] 图片节点 ${unbound.map(b => '#' + b.nodeId).join('、')} 未绑定本次素材，已停止提交，避免使用工作流默认图片。请检查参考图映射。`)
   }
   for (const b of inputMap.bindings) {
     if (!isMediaRole(b.role)) continue
@@ -923,6 +933,11 @@ export async function comfyPromptGenerate(opts: {
     uploadedImages
   }
   const { writes, skipped } = applyComfyInputs(payload, inputMap, values)
+  if (opts.kind === 'video' && imageBindings.some(b => {
+    const expected = uploadedImages[`${b.nodeId}:${b.field}`]
+    return !expected || payload.prompt?.[b.nodeId]?.inputs?.[b.field] !== expected
+  })) throw new Error('[comfyui] 本次参考图未全部写入工作流，已停止提交。')
+  if (opts.kind === 'video' && imageBindings.length) opts.onProgress?.(`已上传或传入并核对 ${imageBindings.length} 张参考图`)
   if (!writes.length) {
     const miss = missingRoles(inputMap)
     throw new Error(

@@ -2760,11 +2760,8 @@ export async function generateFreeformVideo(
   } else {
     for (const id of ids) {
       const b = (await assets.getBlob(id)) || (await library.getBlob(id))
-      if (b) blobs.push(b)
-    }
-    if (!blobs.length) throw new Error('参考图读取失败')
-    if (blobs.length < ids.length) {
-      onProgress?.(`有 ${ids.length - blobs.length} 张参考图读不到，已跳过`)
+      if (!b) throw new Error(`第 ${blobs.length + 1} 张参考图读取失败，请重新添加后再生成。`)
+      blobs.push(b)
     }
   }
   if (p.folderPath) setActiveProjectDir(p.folderPath)
