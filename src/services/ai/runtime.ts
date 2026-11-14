@@ -111,6 +111,9 @@ function videoKeyForProfile(
 export function getVideoConfig(profileId?: string) {
   const d = envDefaults().video
   const settings = pick()
+  if (profileId && settings && !settings.videos?.some((profile) => profile.id === profileId)) {
+    throw new Error('此节点原来选用的视频接入已删除，请重新选择模型或工作流。')
+  }
   let s = profileId
     ? settings?.videos?.find((profile) => profile.id === profileId) || settings?.video
     : settings?.video
@@ -136,10 +139,15 @@ export function getVideoConfig(profileId?: string) {
         !isAutodlHost(profile.baseUrl || '')
     ) || s
   }
+  const nativeComfy = s?.adapter?.type === 'comfyui-prompt'
+  const comfyBaseUrl = (s?.baseUrl || '').trim().replace(/\/+$/, '')
+  if (nativeComfy && (!comfyBaseUrl || isAutodlHost(comfyBaseUrl))) {
+    throw new Error('原生 ComfyUI 工作流没有有效的服务器地址。请在「ComfyUI 接入」中重新填写该工作流的 Base URL；不会回退到 AutoDL。')
+  }
   return {
-    baseUrl: migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
-    apiKey: videoKeyForProfile(s, d.apiKey),
-    workflowId: migrateVideoWorkflowId(s?.workflowId || d.workflowId),
+    baseUrl: nativeComfy ? comfyBaseUrl : migrateVideoBaseUrl(s?.baseUrl || d.baseUrl),
+    apiKey: nativeComfy ? videoKeyForProfile(s, '') : videoKeyForProfile(s, d.apiKey),
+    workflowId: nativeComfy ? (s?.workflowId || 'comfyui-local') : migrateVideoWorkflowId(s?.workflowId || d.workflowId),
     promptStyle: getVideoPromptStyle(),
     adapter: s?.adapter,
     provider: s?.provider,

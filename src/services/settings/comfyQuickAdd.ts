@@ -38,6 +38,7 @@ export function normalizeComfyBaseUrl(raw: string): string {
   u = u.replace(/\/+$/, '')
   // 去掉误粘的 Comfy 路径
   u = u
+    .replace(/\/upload\/image$/i, '')
     .replace(/\/prompt$/i, '')
     .replace(/\/system_stats$/i, '')
     .replace(/\/history(\/.*)?$/i, '')

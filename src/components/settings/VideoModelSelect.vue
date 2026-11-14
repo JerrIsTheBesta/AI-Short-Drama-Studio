@@ -18,10 +18,14 @@ const emit = defineEmits<{
   'selectProfile': [profileId: string]
 }>()
 const settings = useSettingsStore()
+const comfyWorkflows = computed(() => settings.config.videos.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate?.trim()))
+const otherProfiles = computed(() => settings.config.videos.filter(p => p.adapter?.type !== 'comfyui-prompt'))
+const missingProfile = computed(() => Boolean(props.profileId && !settings.config.videos.some(p => p.id === props.profileId)))
 
 const value = computed(() => {
   const m = normalizeVideoGenModel(props.modelValue)
   if (m === 'wan-prime' || m === 'h3-v5') return m
+  if (missingProfile.value) return '__missing__'
   if (props.profileId && settings.config.videos.some((profile) => profile.id === props.profileId)) {
     return props.profileId
   }
@@ -46,8 +50,12 @@ function onPick(v: string) {
 
 <template>
   <ParamSelect :label="label" max-width="260px" :model-value="value" @update:model-value="onPick">
-    <optgroup v-if="settings.config.videos.length" label="已配置的视频接入">
-      <option v-for="p in settings.config.videos" :key="p.id" :value="p.id">
+    <option v-if="missingProfile" value="__missing__" disabled>原工作流已删除，请重新选择</option>
+    <optgroup v-if="comfyWorkflows.length" label="ComfyUI 工作流">
+      <option v-for="p in comfyWorkflows" :key="p.id" :value="p.id">{{ p.name }}</option>
+    </optgroup>
+    <optgroup v-if="otherProfiles.length" label="已配置的视频接入">
+      <option v-for="p in otherProfiles" :key="p.id" :value="p.id">
         {{ profileLabel(p) }}{{ stillModeForVideoModel('h3', p) === 'keyframe' ? ' · 关键帧' : stillModeForVideoModel('h3', p) === 'storyboard' ? ' · 看板' : '' }}
       </option>
     </optgroup>

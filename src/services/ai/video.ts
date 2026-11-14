@@ -1278,9 +1278,13 @@ async function realComfyNativeVideo(
     apiKey: cfg.apiKey,
     prompt,
     imageDataUrl,
+    referenceImageDataUrls: await Promise.all((input.referenceImages || []).map(blobToDataUrl)),
     imageEndDataUrl,
     audioDataUrl,
     adapter: cfg.adapter,
+    duration: input.duration,
+    width: input.width,
+    height: input.height,
     signal: input.signal,
     kind: 'video',
     onProgress

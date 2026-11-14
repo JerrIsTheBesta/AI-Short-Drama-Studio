@@ -21,6 +21,7 @@ export type ComfyInputRole =
   | 'width'
   | 'height'
   | 'length'
+  | 'megapixels'
   | 'fps'
   | 'steps'
   | 'cfg'
@@ -45,6 +46,7 @@ export interface ComfyInputBinding {
   mediaMode?: 'upload' | 'path' | 'url'
   /** 助手给的备注 */
   note?: string
+  durationUnit?: 'seconds' | 'frames'
 }
 
 export interface ComfyInputMap {
@@ -70,6 +72,7 @@ export const COMFY_ROLE_LABEL: Record<ComfyInputRole, string> = {
   width: '宽',
   height: '高',
   length: '时长 / 帧数',
+  megapixels: '分辨率（百万像素）',
   fps: '帧率',
   steps: '采样步数',
   cfg: 'CFG',
@@ -78,7 +81,7 @@ export const COMFY_ROLE_LABEL: Record<ComfyInputRole, string> = {
 }
 
 const MEDIA_ROLES: ComfyInputRole[] = ['image', 'imageEnd', 'mask', 'audio']
-const NUMERIC_ROLES: ComfyInputRole[] = ['seed', 'width', 'height', 'length', 'fps', 'steps', 'cfg', 'strength', 'batch']
+const NUMERIC_ROLES: ComfyInputRole[] = ['seed', 'width', 'height', 'length', 'megapixels', 'fps', 'steps', 'cfg', 'strength', 'batch']
 
 export function isMediaRole(role: ComfyInputRole): boolean {
   return MEDIA_ROLES.includes(role)
@@ -114,7 +117,7 @@ export function summarizeWorkflow(payload: any, maxNodes = 160): string {
       else if (typeof v === 'number' || typeof v === 'boolean') parts.push(`${k}=${v}`)
       else parts.push(`${k}=<${typeof v}>`)
     }
-    lines.push(`#${id} ${ct} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}`)
+    lines.push(`#${id} ${ct} ${node._meta?.title ? `(${truncate(node._meta.title)}) ` : ''}${parts.length ? `{ ${parts.join(', ')} }` : '{}'}`)
   }
   if (entries.length > maxNodes) lines.push(`…（另有 ${entries.length - maxNodes} 个节点已省略）`)
   return lines.join('\n')
@@ -131,7 +134,8 @@ const ANALYZE_SYSTEM = `你是 ComfyUI 工作流分析器。给你一个 API For
 - audio：音频（数字人口播类）
 - seed：随机种子（整数）
 - width / height：宽高（整数）
-- length：时长或帧数
+- length：沿连线找实际控制生成长度的标量入口；必须附 durationUnit: seconds 或 frames。不要映射视频保存节点的帧率、循环次数、固定采样步数或已经接线的字段。无法确定时省略。
+- megapixels：控制分辨率的百万像素值（例如 ResolutionSelector.megapixels）。
 - fps / steps / cfg / strength / batch：数值参数
 
 判断规则：
@@ -157,6 +161,7 @@ function toBinding(raw: any): ComfyInputBinding | null {
     role,
     nodeId,
     field,
+    ...(raw?.durationUnit === 'seconds' || raw?.durationUnit === 'frames' ? { durationUnit: raw.durationUnit } : {}),
     ...(mode === 'upload' || mode === 'path' || mode === 'url' ? { mediaMode: mode } : {}),
     ...(raw?.note ? { note: String(raw.note).slice(0, 120) } : {})
   }
@@ -253,9 +258,27 @@ export function guessInputMap(payload: any): ComfyInputMap {
       }
     }
   }
+  const nodesMap = nodes as Record<string, any>
+  const refs = Object.values(nodesMap || {}).flatMap(n => Object.entries(n?.inputs || {}))
+    .filter(([key, value]) => /^ref_images\.ref_image_\d+$/.test(key) && Array.isArray(value))
+    .sort(([a], [b]) => Number(a.split('_').pop()) - Number(b.split('_').pop()))
+  const orderedIds = [...new Set(refs.map(([, value]) => String((value as unknown[])[0])))]
+  if (orderedIds.length) {
+    const images = bindings.filter(b => b.role === 'image' && orderedIds.includes(b.nodeId))
+    bindings.splice(0, bindings.length, ...bindings.filter(b => b.role !== 'image'), ...orderedIds.flatMap(id => images.filter(b => b.nodeId === id)))
+  }
+  const video = Object.values(nodesMap || {}).some((n) => /VideoCombine|SaveVideo|VideoConditioning|AudioConditioningT8/i.test(n?.class_type || ''))
+  const durations = Object.entries(nodesMap || {}).filter(([, n]) => /duration|时长|秒数/i.test(n?._meta?.title || '') && typeof n?.inputs?.value === 'number')
+  if (video && durations.length === 1) {
+    bindings.push({ role: 'length', nodeId: durations[0][0], field: 'value', durationUnit: 'seconds' })
+  }
+  for (const [id, node] of Object.entries(nodesMap || {})) {
+    if (/^CR Prompt Text$/i.test(node?.class_type || '') && typeof node.inputs?.prompt === 'string') mark('prompt', id, 'prompt')
+    if (/^ResolutionSelector$/i.test(node?.class_type || '') && typeof node.inputs?.megapixels === 'number') mark('megapixels', id, 'megapixels')
+  }
   return {
     version: 1,
-    kind: bindings.some((b) => b.role === 'image') ? 'image-to-image' : 'unknown',
+    kind: video ? (bindings.some((b) => b.role === 'image') ? 'image-to-video' : 'text-to-video') : bindings.some((b) => b.role === 'image') ? 'image-to-image' : 'unknown',
     summary: bindings.length ? '规则兜底识别（助手分析未生效）' : '未识别到可注入的输入节点',
     bindings,
     source: 'heuristic',
@@ -288,7 +311,11 @@ export async function analyzeWorkflowWithLlm(
       timeoutMs: opts.timeoutMs ?? 60_000
     })
     const map = parseMapJson(resp.content || '')
-    if (map && map.bindings.length) return { map }
+    if (map && map.bindings.length) {
+      const inferred = guessInputMap(payload).bindings.filter((b) => b.role === 'length' || b.role === 'megapixels')
+      const roles = new Set(inferred.map((b) => b.role))
+      return { map: { ...map, bindings: [...map.bindings.filter((b) => !roles.has(b.role)), ...inferred] } }
+    }
     return {
       map: guessInputMap(payload),
       error: map ? '助手没能定位到可注入的输入节点' : '助手返回内容无法解析为映射'
@@ -378,6 +405,7 @@ export interface ComfyInjectValues {
   seed?: number
   width?: number
   height?: number
+  megapixels?: number
   length?: number
   fps?: number
   steps?: number
@@ -386,6 +414,40 @@ export interface ComfyInjectValues {
   batch?: number
   /** 已上传到 Comfy 的文件名，key 为角色 */
   uploaded?: Partial<Record<ComfyInputRole, string>>
+  uploadedImages?: Record<string, string>
+}
+
+/** Ref2VA 的多参考槽是可选输入，只裁剪已确认属于动态参考槽的映射。 */
+export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count: number): ComfyInputMap {
+  const imageBindings = map.bindings.filter(b => b.role === 'image')
+  if (!count || count >= imageBindings.length) return map
+  const nodes = payload?.prompt || payload
+  const slots = Object.values(nodes || {}).flatMap((node: any) => {
+    if (!/^MiniMaxH3AudioConditioning/i.test(node?.class_type || '') || !/^ref2va$/i.test(node?.inputs?.task_type || '')) return []
+    return Object.keys(node.inputs).flatMap((key) => {
+      const link = node.inputs[key]
+      return /^ref_images\.ref_image_\d+$/.test(key) && Array.isArray(link)
+        ? [{ inputs: node.inputs, key, nodeId: String(link[0]), index: Number(key.split('_').pop()) }]
+        : []
+    })
+  })
+  const ids = [...new Set(slots.sort((a, b) => a.index - b.index).map(slot => slot.nodeId))]
+  if (ids.length !== imageBindings.length || ids.some(id => !imageBindings.some(b => b.nodeId === id && b.field === 'image'))) return map
+  const keep = ids.slice(0, count)
+  // 不允许其余必填连线继续引用未上传的示例图。
+  const removed = new Set(ids.slice(count))
+  const optionalSlots = new Map<object, Set<string>>()
+  for (const slot of slots) {
+    const keys = optionalSlots.get(slot.inputs) || new Set<string>()
+    keys.add(slot.key)
+    optionalSlots.set(slot.inputs, keys)
+  }
+  if (Object.values(nodes).some((node: any) => Object.entries(node?.inputs || {}).some(([key, value]) =>
+    Array.isArray(value) && removed.has(String(value[0])) && !optionalSlots.get(node.inputs)?.has(key)
+  ))) return map
+  for (const slot of slots) if (removed.has(slot.nodeId)) delete slot.inputs[slot.key]
+  for (const id of removed) delete nodes[id]
+  return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...keep.map(id => imageBindings.find(b => b.nodeId === id)!)] }
 }
 
 /**
@@ -415,21 +477,25 @@ export function applyComfyInputs(
       skipped.push(`${COMFY_ROLE_LABEL[b.role]}：节点 #${b.nodeId} 不存在`)
       continue
     }
-    const raw = (values as any)[b.role]
+    const raw = b.role === 'image' && values.uploadedImages ? values.uploadedImages[`${b.nodeId}:${b.field}`] : (values as any)[b.role]
     if (raw === undefined || raw === null || raw === '') {
       skipped.push(`${COMFY_ROLE_LABEL[b.role]}：本次没提供该输入`)
       continue
     }
     if (isMediaRole(b.role)) {
       const mode = b.mediaMode || 'upload'
-      const uploaded = values.uploaded?.[b.role]
+      const uploaded = b.role === 'image' && values.uploadedImages ? raw : values.uploaded?.[b.role]
       const value = mode === 'upload' && uploaded ? uploaded : String(raw)
       ;(node.inputs as Record<string, any>)[b.field] = value
       writes.push(`${COMFY_ROLE_LABEL[b.role]} → #${b.nodeId}.${b.field}`)
       continue
     }
     if (isNumericRole(b.role)) {
-      const num = Number(raw)
+      if (b.role === 'length' && b.durationUnit !== 'seconds' && (b.durationUnit !== 'frames' || !values.fps)) {
+        skipped.push('时长映射未明确单位，或帧数映射缺少帧率')
+        continue
+      }
+      const num = b.role === 'length' && b.durationUnit === 'frames' ? Math.round(Number(raw) * values.fps!) : Number(raw)
       if (!Number.isFinite(num)) {
         skipped.push(`${COMFY_ROLE_LABEL[b.role]}：值不是数字`)
         continue

@@ -579,9 +579,13 @@ function parseSettings(raw: string | null): AppSettings {
       {
         ...defaults.video,
         ...parsed.video,
-        baseUrl: migrateVideoBaseUrl(parsed.video?.baseUrl || defaults.video.baseUrl),
-        apiKey: parsed.video?.apiKey || defaults.video.apiKey,
-        workflowId: migrateVideoWorkflowId(parsed.video?.workflowId || defaults.video.workflowId),
+        baseUrl: parsed.video?.adapter?.type === 'comfyui-prompt'
+          ? (parsed.video.baseUrl || '').trim()
+          : migrateVideoBaseUrl(parsed.video?.baseUrl || defaults.video.baseUrl),
+        apiKey: parsed.video?.adapter?.type === 'comfyui-prompt' ? (parsed.video.apiKey || '') : (parsed.video?.apiKey || defaults.video.apiKey),
+        workflowId: parsed.video?.adapter?.type === 'comfyui-prompt'
+          ? (parsed.video.workflowId || 'comfyui-local')
+          : migrateVideoWorkflowId(parsed.video?.workflowId || defaults.video.workflowId),
         promptStyle:
           parsed.video?.promptStyle === 'formatted' ? 'formatted' : 'scene-narrative',
         stillMode: stillModeForVideoModel('h3', {
@@ -1017,9 +1021,10 @@ export const useSettingsStore = defineStore('settings', () => {
     })
   }
 
-  function removeImage(id: string) {
-    if (config.value.images.length <= 1) return
+  function removeImage(id: string, allowLast = false) {
+    if (config.value.images.length <= 1 && !allowLast) return
     const images = config.value.images.filter((p) => p.id !== id)
+    if (!images.length) images.push(buildDefaults().images[0])
     const next = images.find((p) => p.id === config.value.activeImageId) || images[0]
     syncImage(next, images)
   }
@@ -1168,9 +1173,10 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = { ...config.value, defaultVideoModel: model }
   }
 
-  function removeVideo(id: string) {
-    if (config.value.videos.length <= 1) return
+  function removeVideo(id: string, allowLast = false) {
+    if (config.value.videos.length <= 1 && !allowLast) return
     const videos = config.value.videos.filter((p) => p.id !== id)
+    if (!videos.length) videos.push(buildDefaults().videos[0])
     const next = videos.find((p) => p.id === config.value.activeVideoId) || videos[0]
     syncVideo(next, videos)
   }

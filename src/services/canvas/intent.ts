@@ -203,7 +203,7 @@ async function detectIntentWithLlm(
     jsonMode: true,
     maxTokens: 60,
     signal,
-    timeoutMs: 30_000
+    timeoutMs: 300_000
   })
   const kind = parseIntentJson(resp.content || '')
   if (kind) return intent(kind)

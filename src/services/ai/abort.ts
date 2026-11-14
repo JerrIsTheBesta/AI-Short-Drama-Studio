@@ -32,7 +32,7 @@ export function isTimeoutAbort(e: unknown, signal?: AbortSignal): boolean {
 export function llmAbortError(e: unknown, signal?: AbortSignal, timeoutMs = 120_000): Error {
   if (isTimeoutAbort(e, signal)) {
     const sec = Math.max(1, Math.round(timeoutMs / 1000))
-    return new Error(`模型超过 ${sec} 秒还没写完。长剧本很常见，请再点一次生成。`)
+    return new Error(`模型超过 ${sec} 秒未完成请求，请重试。`)
   }
   if (signal?.aborted || isAbortError(e)) {
     return new DOMException('任务已取消', 'AbortError')

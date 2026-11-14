@@ -325,7 +325,7 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       content = pickMessageContent(data.choices?.[0]?.message)
     }
     if (req.jsonMode && !isValidJsonOutput(content)) {
-      const followControl = controlledSignal(req.signal, Math.min(timeoutMs, 240_000))
+      const followControl = controlledSignal(req.signal, timeoutMs)
       try {
         const follow = {
           ...body,

@@ -118,7 +118,7 @@ const ASPECT_OPTIONS: { value: AspectRatio; label: string }[] = [
 ]
 /* 创作偏好弹窗：比例 + 图像/视频模型收进一个面板 */
 const prefOpen = ref(false)
-const prefTab = ref<'video' | 'image' | 'knowledge'>('video')
+const prefTab = ref<'video' | 'image' | 'knowledge' | 'comfyui'>('video')
 /* 父容器 overflow 会裁剪浮层，所以传送到 body 按按钮位置定位 */
 const prefBtn = ref<HTMLElement | null>(null)
 const prefPanel = ref<HTMLElement | null>(null)
@@ -799,8 +799,13 @@ function visibleRows(rows: TraceRow[]) {
                   图片偏好
                 </button>
                 <button type="button" :class="{ on: prefTab === 'knowledge' }" @click="prefTab = 'knowledge'">写作知识库</button>
+                <button type="button" :class="{ on: prefTab === 'comfyui' }" @click="prefTab = 'comfyui'">ComfyUI</button>
               </div>
-              <div v-if="prefTab !== 'knowledge'" class="pref-body">
+              <div v-if="prefTab === 'comfyui'" class="pref-body">
+                <label>图片工作流<select :value="settings.config.activeImageId" @change="pickImage(($event.target as HTMLSelectElement).value)"><option value="" disabled>选择 ComfyUI 图片工作流</option><option v-for="p in imageProfiles.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate)" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+                <label>视频工作流<select :value="videoDefault ? '' : settings.config.activeVideoId" @change="pickVideo(($event.target as HTMLSelectElement).value)"><option value="" disabled>选择 ComfyUI 视频工作流</option><option v-for="p in videoProfiles.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate)" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+              </div>
+              <div v-else-if="prefTab !== 'knowledge'" class="pref-body">
                 <div class="pref-models">
                   <p class="pref-k">模型选择</p>
                   <template v-if="prefTab === 'video'">

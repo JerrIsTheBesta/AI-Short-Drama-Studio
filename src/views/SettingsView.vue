@@ -5,6 +5,7 @@ import { useProjectStore, useSettingsStore, useAssetsStore, useToastStore, endpo
 import StudioSettings from '@/components/canvas/StudioSettings.vue'
 import SetupAgent from '@/components/settings/SetupAgent.vue'
 import ZealmanSettings from '@/components/settings/ZealmanSettings.vue'
+import ComfySettings from '@/components/settings/ComfySettings.vue'
 import AutodlSettings from '@/components/settings/AutodlSettings.vue'
 import Tag from '@/components/common/Tag.vue'
 import { estimateStorage } from '@/services/storage'
@@ -107,10 +108,16 @@ onMounted(async () => {
   await runDiagnostics()
 })
 
+const comfySettings = ref<InstanceType<typeof ComfySettings> | null>(null)
+
 async function saveSettings() {
   if (saving.value) return
   saving.value = true
   try {
+    if (section.value === 'comfyui' && comfySettings.value && !comfySettings.value.savePending()) {
+      toast.warn('工作流尚未保存，请查看 ComfyUI 页面上的提示。')
+      return
+    }
     await settings.flush()
     toast.success('配置已保存到本机')
     if (section.value === 'llm' && endpointReady(settings.config.llm)) {
@@ -310,8 +317,8 @@ const storagePct = computed(() => {
   return (storage.value.usage / storage.value.quota) * 100
 })
 
-type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'autodl' | 'zealman' | 'system'
-const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'autodl', 'zealman', 'system']
+type SettingsSection = 'agent' | 'llm' | 'vision' | 'image' | 'tts' | 'video' | 'comfyui' | 'autodl' | 'zealman' | 'system'
+const SECTIONS: SettingsSection[] = ['agent', 'llm', 'vision', 'image', 'tts', 'video', 'comfyui', 'autodl', 'zealman', 'system']
 
 const nav = [
   {
@@ -349,6 +356,12 @@ const nav = [
     label: '视频',
     desc: '图生视频',
     lead: '第五步：让静止的画面动起来。这里填图生视频的接口地址、凭证和模型（或工作流）名称。'
+  },
+  {
+    id: 'comfyui' as const,
+    label: 'ComfyUI 接入',
+    desc: '导入和管理工作流',
+    lead: '填写 ComfyUI 地址，导入或拉取工作流，确认提示词、图片、分辨率与时长入口。'
   },
   {
     id: 'autodl' as const,
@@ -492,8 +505,9 @@ function navReady(id: SettingsSection) {
         <SetupAgent v-show="section === 'agent'" @open="go($event as SettingsSection)" />
         <AutodlSettings v-if="settings.diskReady && section === 'autodl'" />
         <ZealmanSettings v-if="settings.diskReady && section === 'zealman'" />
+        <ComfySettings v-if="settings.diskReady && section === 'comfyui'" ref="comfySettings" />
         <StudioSettings
-          v-if="settings.diskReady && section !== 'agent' && section !== 'zealman' && section !== 'autodl' && section !== 'system'"
+          v-if="settings.diskReady && section !== 'agent' && section !== 'zealman' && section !== 'autodl' && section !== 'system' && section !== 'comfyui'"
           :module="section"
         />
         <p v-else-if="!settings.diskReady && section !== 'agent' && section !== 'system'" class="loading">

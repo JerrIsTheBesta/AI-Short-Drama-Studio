@@ -5,7 +5,6 @@ import { useProjectStore, useSettingsStore, uniqueProfileName } from '@/stores'
 import { TTS_VOICES } from '@/services/ai/tts'
 import EndpointForm from '@/components/settings/EndpointForm.vue'
 import AdapterFields from '@/components/settings/AdapterFields.vue'
-import ComfyQuickAdd from '@/components/settings/ComfyQuickAdd.vue'
 import ProfileLibrary from '@/components/settings/ProfileLibrary.vue'
 import type { AdapterConfig } from '@/services/ai/adapters'
 import { type VideoStillMode } from '@/types/canvas'
@@ -234,7 +233,7 @@ function patchAdapter(
         <p class="hint">工作流：{{ settings.config.image.model || '内置文生图' }}</p>
         <button type="button" @click="router.push('/settings/zealman')">打开 Zealman 镜像</button>
       </section>
-      <ComfyQuickAdd />
+      <button type="button" @click="router.push('/settings/comfyui')">打开 ComfyUI 接入</button>
       <ProfileLibrary
         title="已保存的生图接入"
         hint="角色设计、场景图、故事看板。保存多套后，出图节点里可以直接切换。Zealman 文生图会自动出现在这里。"
@@ -326,7 +325,7 @@ function patchAdapter(
         <p class="hint">工作流：{{ settings.config.video.workflowId || '内置工作流' }}</p>
         <button type="button" @click="router.push('/settings/zealman')">打开 Zealman 镜像</button>
       </section>
-      <ComfyQuickAdd />
+      <button type="button" @click="router.push('/settings/comfyui')">打开 ComfyUI 接入</button>
       <ProfileLibrary
         title="已保存的视频接入"
         hint="图生视频工作流。多套令牌或工作流可以分开保存，出视频时选用。"
@@ -401,7 +400,7 @@ function patchAdapter(
         </div>
         </details>
         <h3 class="api-title">中转站 / 云端工作流 API</h3>
-        <p class="hint">大厂官方接口和 API Router、中转站都填写在这里；本机 ComfyUI 请使用页面顶部的“本地 ComfyUI”。</p>
+        <p class="hint">大厂官方接口和中转站填写在这里；本机工作流请在左侧「ComfyUI 接入」配置。</p>
         <p v-if="settings.config.video.provider === 'apimart'" class="hint">
           只填接口地址和 API Key。默认 https://api.aishuch.com，模型默认 grok-imagine-1.5-video-ext。
         </p>

@@ -544,7 +544,7 @@ async function auditStoryboardNarrative(
       jsonMode: true,
       maxTokens: 2400,
       signal: input.signal,
-      timeoutMs: 30_000
+      timeoutMs: 300_000
     })
     const raw = parseJsonRobust(response.content)
     return (Array.isArray(raw?.issues) ? raw.issues : [])
@@ -3121,7 +3121,7 @@ async function ensurePlayNarrativeContinuity(
       jsonMode: true,
       maxTokens: 2400,
       signal: input.signal,
-      timeoutMs: 30_000
+      timeoutMs: 300_000
     })
     const audited = parseJsonRobust(audit.content)
     const issues = (Array.isArray(audited?.issues) ? audited.issues : [])

@@ -5,6 +5,11 @@ import {
   analyzeWorkflowWithLlm,
   describeInputMap,
   describeWorkflowKind,
+  guessInputMap,
+  COMFY_ROLE_LABEL,
+  sanitizeInputMap,
+  type ComfyInputBinding,
+  type ComfyInputRole,
   validateInputMap,
   type ComfyInputMap
 } from '@/services/ai/comfyInputMap'
@@ -22,10 +27,13 @@ const props = defineProps<{
   adapter?: AdapterConfig
   baseUrl?: string
   apiKey?: string
+  draftOnly?: boolean
 }>()
 
 const emit = defineEmits<{
   patch: [adapter: AdapterConfig]
+  confirmed: []
+  imported: [name: string]
 }>()
 
 const toast = useToastStore()
@@ -43,6 +51,33 @@ const analyzing = ref(false)
 const mapInfo = ref<ComfyInputMap | null>(props.adapter?.inputMap || null)
 const mapDraft = ref('')
 const showMapJson = ref(false)
+const editableMap = ref<ComfyInputBinding[]>([])
+const inputs = computed(() => {
+  try {
+    const value = JSON.parse(props.adapter?.workflowTemplate || '{}')
+    return Object.entries(value.prompt || value).flatMap(([id, node]: [string, any]) =>
+      Object.entries(node?.inputs || {}).filter(([, v]) => typeof v === 'number' || typeof v === 'string')
+        .map(([field, v]) => ({ key: JSON.stringify([id, field]), label: `#${id} ${node._meta?.title || node.class_type} · ${field} = ${String(v).slice(0, 36)}` })))
+  } catch { return [] }
+})
+function setTarget(binding: ComfyInputBinding, event: Event) {
+  const [nodeId, field] = JSON.parse((event.target as HTMLSelectElement).value)
+  Object.assign(binding, { nodeId, field })
+}
+function confirmBindings() {
+  const map = validateInputMap(JSON.parse(props.adapter?.workflowTemplate || '{}'), { ...guessInputMap({}), ...mapInfo.value, bindings: editableMap.value.map(b => ({ ...b })) })
+  if (map.bindings.length !== editableMap.value.length || map.bindings.some(b => b.role === 'length' && !b.durationUnit)) {
+    status.value = '请先为每行选择有效的节点字段，并为时长选择单位。'
+    toast.error(status.value)
+    return
+  }
+  commitTemplate(props.adapter!.workflowTemplate!, '已确认输入映射', map)
+  emit('confirmed')
+}
+function inspectLocally(template: string) {
+  const map = validateInputMap(JSON.parse(template), guessInputMap(JSON.parse(template)))
+  commitTemplate(template, '已本地识别，请核对输入映射；也可选择让助手分析。', map)
+}
 
 watch(
   () => props.adapter?.workflowTemplate,
@@ -53,6 +88,7 @@ watch(
 watch(
   () => props.adapter?.inputMap,
   (v) => {
+    editableMap.value = (v?.bindings || []).map(b => ({ ...b }))
     if (v && (!mapInfo.value || JSON.stringify(v) !== JSON.stringify(mapInfo.value))) {
       mapInfo.value = v
       mapDraft.value = JSON.stringify(v, null, 2)
@@ -81,7 +117,7 @@ function commitTemplate(template: string, detail: string, map?: ComfyInputMap | 
   draft.value = template
   emit('patch', next)
   status.value = detail
-  toast.success('工作流模板已保存到当前接入')
+  if (!props.draftOnly) toast.success('工作流模板已保存到当前接入')
 }
 
 /** 让助手读懂节点图，产出「提示词 / 参考图写到哪个节点」的映射 */
@@ -114,8 +150,7 @@ async function onValidateAndSave() {
     return
   }
   // 先落盘模板，再让助手分析映射（分析失败也至少保住了工作流本身）
-  commitTemplate(parsed.template, '已识别为 API Format，正在让助手分析输入节点…')
-  await analyzeWithAssistant(parsed.payload || JSON.parse(parsed.template), parsed.template)
+  inspectLocally(parsed.template)
 }
 
 async function onReanalyze() {
@@ -135,11 +170,13 @@ async function onReanalyze() {
 
 function onSaveMapJson() {
   try {
-    const obj = JSON.parse(mapDraft.value) as ComfyInputMap
+    const candidate = sanitizeInputMap(JSON.parse(mapDraft.value))
+    if (!candidate) throw new Error('无效的输入映射')
+    const obj = validateInputMap(JSON.parse(props.adapter?.workflowTemplate || '{}'), candidate)
     mapInfo.value = obj
     emit('patch', { ...(props.adapter || {}), inputMap: obj })
     status.value = `映射已更新：${describeInputMap(obj)}`
-    toast.success('输入映射已保存')
+    toast.success(props.draftOnly ? '映射已更新，请确认后保存工作流' : '输入映射已保存')
   } catch (e: any) {
     toast.error(`映射 JSON 无效：${e?.message || e}`)
   }
@@ -183,7 +220,7 @@ async function onDiscover() {
   }
 }
 
-async function applyParsed(parsed: Awaited<ReturnType<typeof parseComfyWorkflowJson>>) {
+async function applyParsed(parsed: Awaited<ReturnType<typeof parseComfyWorkflowJson>>, name = '') {
   status.value = parsed.detail
   triedUrls.value = parsed.tried || []
   showTried.value = triedUrls.value.length > 0
@@ -191,8 +228,8 @@ async function applyParsed(parsed: Awaited<ReturnType<typeof parseComfyWorkflowJ
     toast.error(parsed.detail)
     return
   }
-  commitTemplate(parsed.template, '已载入 API Format，正在让助手分析输入节点…')
-  await analyzeWithAssistant(parsed.payload || JSON.parse(parsed.template), parsed.template)
+  inspectLocally(parsed.template)
+  emit('imported', name.replace(/\.json$/i, '').trim())
 }
 
 async function onPickDiscovered() {
@@ -208,12 +245,14 @@ async function onPickDiscovered() {
     endpoint: item.endpoint,
     source: item.source
   })
-  await applyParsed(parsed)
+  await applyParsed(parsed, item.name)
 }
 
 async function onImportUrl() {
   const parsed = await fetchWorkflowFromUrl(importUrl.value, props.apiKey, props.adapter)
-  await applyParsed(parsed)
+  let name = ''
+  try { name = decodeURIComponent(new URL(importUrl.value.trim()).pathname.split('/').pop() || '') } catch { /* use default name */ }
+  await applyParsed(parsed, name)
 }
 
 async function onFileChange(ev: Event) {
@@ -221,7 +260,7 @@ async function onFileChange(ev: Event) {
   const file = input.files?.[0]
   if (!file) return
   const parsed = await readWorkflowFile(file)
-  await applyParsed(parsed)
+  await applyParsed(parsed, file.name)
   input.value = ''
 }
 
@@ -287,14 +326,14 @@ function clearTemplate() {
     />
     <div class="row">
       <button type="button" class="go" :disabled="analyzing" @click="onValidateAndSave">
-        {{ analyzing ? '助手分析中…' : '校验并保存' }}
+        {{ analyzing ? '助手分析中…' : draftOnly ? '校验 JSON' : '校验并保存' }}
       </button>
       <button type="button" class="mini" :disabled="analyzing || !draft.trim()" @click="onReanalyze">
         {{ analyzing ? '分析中…' : (hasMap ? '重新让助手分析' : '用助手分析工作流') }}
       </button>
       <button type="button" class="mini ghost" :disabled="!hasTemplate" @click="clearTemplate">清空</button>
     </div>
-    <p v-if="status" class="status">{{ status }}</p>
+    <p v-if="status" class="status" role="status">{{ status }}</p>
 
     <div v-if="mapInfo" class="map">
       <p class="map-head">
@@ -311,6 +350,17 @@ function clearTemplate() {
       <p v-if="!hasMap" class="hint">
         助手没定位到输入节点，生成时会跑工作流里写死的内容。可手动改下面的映射，或换一个工作流。
       </p>
+      <div v-if="hasTemplate">
+        <p>核对输入映射（候选字段显示工作流默认值）</p>
+        <div v-for="(binding, index) in editableMap" :key="index" class="mapping-row">
+          <select v-model="binding.role" aria-label="参数用途"><option v-for="(label, key) in COMFY_ROLE_LABEL" :key="key" :value="key">{{ label }}</option></select>
+          <select :value="JSON.stringify([binding.nodeId, binding.field])" aria-label="节点字段" @change="setTarget(binding, $event)"><option :value="JSON.stringify(['',''])" disabled>选择节点字段</option><option v-for="option in inputs" :key="option.key" :value="option.key">{{ option.label }}</option></select>
+          <select v-if="binding.role === 'length'" v-model="binding.durationUnit" aria-label="时长单位"><option :value="undefined">选择单位</option><option value="seconds">秒</option><option value="frames">帧</option></select>
+          <button type="button" class="mini" @click="editableMap.splice(index, 1)">移除</button>
+        </div>
+        <button type="button" class="mini" @click="editableMap.push({ role: 'prompt' as ComfyInputRole, nodeId: '', field: '' })">添加映射</button>
+        <button type="button" class="go" @click="confirmBindings">确认映射</button>
+      </div>
       <button type="button" class="mini ghost" @click="showMapJson = !showMapJson">
         {{ showMapJson ? '收起映射 JSON' : '手动编辑映射 JSON' }}
       </button>
@@ -336,6 +386,8 @@ function clearTemplate() {
 </template>
 
 <style scoped>
+.mapping-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.mapping-row select { min-width: 0; max-width: 100%; background: var(--color-bg-2); color: inherit; }
 .wf {
   display: flex;
   flex-direction: column;

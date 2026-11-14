@@ -94,8 +94,9 @@ import {
   videoMinSeconds
 } from '@/types'
 import { canvasReferenceSlotEntries, resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
-import { isH3PromptProfile } from './videoPromptProfile'
+import { resolveH3PromptProfile } from './videoPromptProfile'
 import { withVideoReferenceBlock } from '@/utils/videoReferenceBlock'
+import { optimizeH3FullReference } from '@/services/ai/h3FullReference'
 
 export type RunProgress = (nodeId: string, msg: string) => void
 export type NodeRunOpts = { hd?: boolean }
@@ -1628,6 +1629,7 @@ export async function rewriteShotPerformance(shot: Shot, signal?: AbortSignal): 
 /** 选了 H3 时，把节点原文编译成官方英文稿。多图参考是六段，首尾帧是对齐句加三段。 */
 async function compileH3NodePrompt(input: {
   source: string
+  referenceIds?: string[]
   imageSlots: ReturnType<typeof buildH3ImageSlots>
   duration: number
   aspectRatio?: AspectRatio
@@ -1647,6 +1649,10 @@ async function compileH3NodePrompt(input: {
   cameraMovement?: Shot['cameraMovement']
   signal?: AbortSignal
 }): Promise<string> {
+  if (input.mode === 'R2VA') {
+    return optimizeH3FullReference({ source: input.source, duration: input.duration, dialogue: input.voiceover, aesthetic: input.aesthetic, signal: input.signal,
+      references: (input.referenceIds || []).map((id, index) => ({ id, name: input.imageSlots[index]?.sourceName || input.imageSlots[index]?.name || `图${index + 1}`, kind: input.imageSlots[index]?.kind || 'extra' })) })
+  }
   const spoken = (input.voiceover || '').trim()
   const compiled = (
     await compileH3OfficialPrompt({
@@ -1674,9 +1680,6 @@ async function compileH3NodePrompt(input: {
   ).trim()
   const visible = stripReasoningLeak(compiled)
   if (!visible) throw new Error('模型只返回了思考过程，没有提示词')
-  if (input.mode === 'R2VA' && !isCompleteRef2VA(visible)) {
-    throw new Error('优化结果不是完整的 H3 六段英文稿，请再试一次')
-  }
   return visible
 }
 
@@ -1731,7 +1734,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   const videoModel = canvasVideoModelForShot(shot)
   const profile = videoProfileById(canvasVideoNodeForShot(shot)?.data.videoProfileId || shot.videoProfileId)
   let compiled: string
-  if (isH3PromptProfile(profile, videoModel)) {
+  if (await resolveH3PromptProfile(profile, videoModel, signal)) {
     const cast = subjectsForShot(shot, p)
     const scene = sceneForShot(shot, p)
     const place = resolveShotPlace(shot, scene)
@@ -1744,6 +1747,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
         : undefined
     compiled = await compileH3NodePrompt({
       source,
+      referenceIds: packed.map((entry) => entry.id),
       imageSlots,
       duration: clampVideoDuration(shot.duration, videoModel),
       aspectRatio: shotNodeAspect(p, shot.id, 'shotVideo'),
@@ -2829,11 +2833,12 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
   const videoModel = normalizeVideoGenModel(node.data.videoModel)
   const profile = videoProfileById(node.data.videoProfileId)
   let compiled: string
-  if (isH3PromptProfile(profile, videoModel)) {
+  if (await resolveH3PromptProfile(profile, videoModel, signal)) {
     const imageSlots = buildH3ImageSlots(slotEntries)
     const sceneSlot = slotEntries.find((entry) => entry.kind === 'scene')
     compiled = await compileH3NodePrompt({
       source,
+      referenceIds: resolvedCanvasReferenceAssetIds(p, node),
       imageSlots,
       duration: clampVideoDuration(node.data.duration, videoModel, 8),
       aspectRatio: canvasNodeAspect(node, p.settings.aspectRatio),

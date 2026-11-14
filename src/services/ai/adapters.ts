@@ -8,6 +8,7 @@ import {
   applyComfyInputs,
   COMFY_ROLE_LABEL,
   guessInputMap,
+  fitComfyReferenceImages,
   isMediaRole,
   missingRoles,
   sanitizeInputMap,
@@ -720,10 +721,11 @@ async function uploadComfyMedia(opts: {
   onProgress?: (msg: string) => void
 }): Promise<string> {
   const { bytes, mime } = dataUrlToBytes(opts.dataUrl)
-  const name = `aicust-${Date.now().toString(36)}.${extOfMime(mime)}`
-  const { bodyBase64, contentType } = buildMultipart({ overwrite: 'true' }, { name, mime, bytes }, 'image')
+  const name = `aicust-${crypto.randomUUID()}.${extOfMime(mime)}`
+  const { bodyBase64, contentType } = buildMultipart({ type: 'input', overwrite: 'false' }, { name, mime, bytes }, 'image')
   opts.onProgress?.('上传参考图到 ComfyUI…')
-  const res = await providerHttp(joinUrl(trimSlash(opts.baseUrl), '/upload/image'), {
+  const base = trimSlash(opts.baseUrl).replace(/\/upload\/image$/i, '')
+  const upload = (path: string) => providerHttp(joinUrl(base, path), {
     method: 'POST',
     headers: buildAuthHeader(opts.apiKey || '', {
       ...opts.adapter,
@@ -734,8 +736,18 @@ async function uploadComfyMedia(opts: {
     signal: opts.signal,
     timeoutMs: 120_000
   })
+  let path = '/upload/image'
+  let res = await upload(path)
+  if ((res.status === 404 || res.status === 405) && !/\/api$/i.test(base)) {
+    path = '/api/upload/image'
+    opts.onProgress?.('使用 ComfyUI /api 上传入口重试…')
+    res = await upload(path)
+  }
   const text = await res.text()
-  if (!res.ok) throw new Error(`[comfyui] 上传素材失败 ${res.status} ${text.slice(0, 160)}`)
+  if (!res.ok) {
+    const target = new URL(joinUrl(base, path))
+    throw new Error(`[comfyui] 上传素材失败（POST ${target.origin}${target.pathname}，HTTP ${res.status}）。请核对当前节点选中工作流的服务器地址与代理上传路由。`)
+  }
   let json: any = {}
   try {
     json = JSON.parse(text || '{}')
@@ -763,6 +775,7 @@ export async function comfyPromptGenerate(opts: {
   prompt: string
   negative?: string
   imageDataUrl?: string
+  referenceImageDataUrls?: string[]
   /** 尾帧（首尾帧工作流） */
   imageEndDataUrl?: string
   /** 蒙版（局部重绘） */
@@ -780,7 +793,7 @@ export async function comfyPromptGenerate(opts: {
   kind?: 'image' | 'video'
   onProgress?: (msg: string) => void
 }): Promise<{ blob: Blob; mimeType: string }> {
-  const base = trimSlash(opts.baseUrl)
+  const base = trimSlash(opts.baseUrl).replace(/\/upload\/image$/i, '')
   const adapter = opts.adapter || {}
   const submitPath = adapter.path || '/prompt'
   const pollPath = adapter.pollPath || '/history/{id}'
@@ -841,6 +854,17 @@ export async function comfyPromptGenerate(opts: {
     inputMap = guessInputMap(payload)
   }
   inputMap = validateInputMap(payload, inputMap)
+  const outputRates = [...new Set(Object.values(payload.prompt || {}).flatMap((node: any) =>
+    /VideoCombine|SaveVideo/i.test(node?.class_type || '') && typeof node.inputs?.frame_rate === 'number' && node.inputs.frame_rate > 0 ? [node.inputs.frame_rate as number] : []
+  ))]
+  const fps = opts.fps || (outputRates.length === 1 ? outputRates[0] : undefined)
+  const knownDuration = guessInputMap(payload).bindings.find((b) => b.role === 'length')
+  if (knownDuration && !inputMap.bindings.some((b) => b.role === 'length' && b.durationUnit)) {
+    inputMap = { ...inputMap, bindings: [...inputMap.bindings.filter((b) => b.role !== 'length'), knownDuration] }
+  }
+  if (opts.kind === 'video' && opts.duration && !inputMap.bindings.some((b) => b.role === 'length' && (b.durationUnit === 'seconds' || (b.durationUnit === 'frames' && fps)))) {
+    throw new Error('[comfyui] 未找到明确的时长入口，已停止提交，避免使用工作流默认时长。请在 ComfyUI 接入中检查时长映射和单位。')
+  }
   const mediaSources: Partial<Record<ComfyInputRole, string>> = {
     image: opts.imageDataUrl,
     imageEnd: opts.imageEndDataUrl,
@@ -848,15 +872,25 @@ export async function comfyPromptGenerate(opts: {
     audio: opts.audioDataUrl
   }
   const uploaded: Partial<Record<ComfyInputRole, string>> = {}
+  const uploadedImages: Record<string, string> = {}
+  const imageSources = [opts.imageDataUrl, ...(opts.referenceImageDataUrls || [])].filter(Boolean) as string[]
+  if (opts.kind === 'video') inputMap = fitComfyReferenceImages(payload, inputMap, imageSources.length)
+  const imageBindings = inputMap.bindings.filter(b => b.role === 'image')
+  if (opts.kind === 'video' && imageBindings.length && imageSources.length !== imageBindings.length) {
+    throw new Error(`[comfyui] 工作流映射了 ${imageBindings.length} 张参考图，本次提供 ${imageSources.length} 张；请核对图片数量和映射顺序，避免使用工作流内的默认图片。`)
+  }
   for (const b of inputMap.bindings) {
     if (!isMediaRole(b.role)) continue
-    const src = mediaSources[b.role]
+    const src = b.role === 'image' ? imageSources[imageBindings.indexOf(b)] : mediaSources[b.role]
     if (!src) continue
     const mode = b.mediaMode || 'upload'
-    if (mode !== 'upload') continue
-    if (uploaded[b.role]) continue
+    if (mode !== 'upload') {
+      if (b.role === 'image') uploadedImages[`${b.nodeId}:${b.field}`] = src
+      continue
+    }
+    if (b.role !== 'image' && uploaded[b.role]) continue
     try {
-      uploaded[b.role] = await uploadComfyMedia({
+      const file = await uploadComfyMedia({
         baseUrl: base,
         dataUrl: src,
         apiKey: opts.apiKey,
@@ -864,6 +898,8 @@ export async function comfyPromptGenerate(opts: {
         signal: opts.signal,
         onProgress: opts.onProgress
       })
+      if (b.role === 'image') uploadedImages[`${b.nodeId}:${b.field}`] = file
+      else uploaded[b.role] = file
     } catch (e: any) {
       throw new Error(
         `[comfyui] ${COMFY_ROLE_LABEL[b.role]}上传失败：${e?.message || e}。该工作流需要先把素材传到 Comfy 的 input 目录。`
@@ -880,9 +916,11 @@ export async function comfyPromptGenerate(opts: {
     ...(opts.seed != null ? { seed: opts.seed } : {}),
     ...(opts.width ? { width: opts.width } : {}),
     ...(opts.height ? { height: opts.height } : {}),
+    ...(opts.width && opts.height ? { megapixels: opts.width * opts.height / 1_000_000 } : {}),
     ...(opts.duration ? { length: opts.duration } : {}),
-    ...(opts.fps ? { fps: opts.fps } : {}),
-    uploaded
+    ...(fps ? { fps } : {}),
+    uploaded,
+    uploadedImages
   }
   const { writes, skipped } = applyComfyInputs(payload, inputMap, values)
   if (!writes.length) {
