@@ -16,6 +16,7 @@ import { mockStoryboardFromPrompt } from './mock'
 import type { Scene, Script, Shot, ShotAudioMode, StoryProp, Subject, VisualStyle } from '@/types'
 import { directorPlaybookText, importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { scriptReferenceBrief } from './scriptReference'
+import { SHORT_DRAMA_SHOT_RULES, SHORT_DRAMA_WRITING_RULES } from './shortDramaRhythm'
 import { useSettingsStore } from '@/stores/settings'
 import { getLlmConfig, getVideoPromptStyle } from './runtime'
 import {
@@ -501,7 +502,11 @@ const NARRATIVE_CONTINUITY_RULES = `
 7. 相邻段落逐对核对人物位置、姿势、朝向、手中物、伤势、情绪、已知信息和环境时间。后一段开头必须接住前一段末态；若跳时空，必须用用户允许的可见转场完成。
 8. 不用旁白代替本集本应看见的关键过程，也不为了补过程虚构用户未要求的新事实。`
 
+const SYSTEM_CUE_RULES = '【叙事信息锁定】原剧本中的系统通知、HUD、面板文字、身份、倒计时与生存规则都是剧情，不得泛写成“弹出系统框”。逐条保留原文与顺序，在 videoPrompt 写清何时弹出、显示哪句原文、该条与人物反应的关系。非说话角色不得对口型。明确写成纯屏显的内容只显示；无载体标注的系统通知可用独立系统画外音辅助，逐字写入 voiceover（系统：原文）、设为 h3-voiceover，不让主角代念。不要把动作、场记或普通括号说明当作台词。读不完就拆镜，不删信息。'
+
 const SPEAKER_STAGING_RULES = `
+${SYSTEM_CUE_RULES}
+${SHORT_DRAMA_SHOT_RULES}
 【对白原文锁定】已有剧本是台词的唯一来源。voiceover 必须逐字保留原台词、说话人和先后顺序，不得润色、缩写、换词、补写或把两个人的台词并到一人名下。时长放不下就增加或拆分镜头，不得靠删改台词压缩；videoPrompt 只描述说话时的表演，不另编一份台词。
 【出镜对白与站位】
 1. 开口的人嘴要可读，但不等于他必须正面朝向镜头、站在画面正中。说话者可以在后面、侧面、跪着。
@@ -958,8 +963,10 @@ async function generateShotWorkBatch(
           content: `${importedDirectorPrefix()}${verbatimSplitRule(input.verbatim)}你是电影分镜导演小组。你只负责眼前这一小段剧本，不处理整部剧本。把本段拆成 1–${limit} 个真正能拍的连续镜头，绝对不得超过 ${limit} 个。${budgetLine}
 
 画面必须有生命：明确起幅里人物和关键物处于什么状态，什么事件触发动作，人物怎样连续行动和反应，摄影机为什么移动、最后落在哪里。不要用“固定镜头、轻微自然晃动、保持表情、让画面呼吸”这类模板填空；只有剧情确实需要静止时才用 static。运镜必须服务于空间揭示、人物关系或情绪变化。
-忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；只有剧本明确写旁白/画外音才使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白才写空字符串和 none。
-短剧以对白和行动共同推进：原文有对白时，优先让多数镜头承载原文台词；只有确有必要的转场、动作或沉默反应才保留少量无台词镜头，不要连续安排多个空镜。原文没有对白或用户明确要求无声时不得编造台词。同场景连续的问答和反应可在一个模型允许的镜头中完成；每镜必须推进新的动作、信息或情绪，禁止为同一动作重复生成镜头。保留全部原文台词，不得为了减少镜数删词。
+忠实覆盖本段所有可见动作与对白，不另编故事。对白逐字放进 voiceover，格式“人物名：原台词”；剧本明确写旁白/画外音时使用 h3-voiceover，否则出镜说话使用 h3-dialogue。没有对白或画外音才写空字符串和 none。
+${SHORT_DRAMA_SHOT_RULES}
+${SYSTEM_CUE_RULES}
+短剧以对白和行动共同推进：原文有对白时，优先让多数镜头承载原文台词；必要的无台词过渡优先控制在 2–4 秒，不要连续安排两个接近 10 秒的无对白镜头。把能并入对白镜的表情、走位或动作并进去；关键动作确实需要留长时，也不要再紧接一个长无对白镜。原文没有对白或用户明确要求无声时不得编造台词。同场景连续的问答和反应可在一个模型允许的镜头中完成；每镜必须推进新的动作、信息或情绪，禁止为同一动作重复生成镜头。保留全部原文台词，不得为了减少镜数删词。
 visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频时间轴，从0秒到本镜结束按实际拍点分2–5段。每段写清谁行动、谁说话、其他人如何占位和反应、表情变化以及一个有动机的运镜，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要机械等分时间。
 每镜要写清景别和人物空间关系。人物看场景内的人或物，不看镜头。
 优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字、从0秒覆盖到结束的2-5段电影化时间轴","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${limit} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
@@ -1199,6 +1206,7 @@ async function extractShotOutline(
       : '先把剧本交给模型出分镜场记（只要画面、时长、声音）…'
   )
   const shortSystem = `${importedDirectorPrefix()}你是分镜导演。只写一份能拍的场记，像聊天里列镜头那样短、快。
+${SHORT_DRAMA_SHOT_RULES}
 按剧本顺序拆镜。同一空间的对白往来可以留在一镜；同一人连续短句可留在一镜。
 每镜写：标题（括号里写景别或运镜）、画面（2–4 句看见的动作）、内容（这一镜演什么）、时长、声音。
 有对白时必须加一行「口播：人物名：原词」，剧本里的对白原词一条都不能丢。没有对白的纯空镜/赶路镜才不写口播。
@@ -1213,6 +1221,8 @@ async function extractShotOutline(
 声音：踩草声、急促呼吸、水流声、泼水声`
 
   const filmSystem = `${importedDirectorPrefix()}你是电影分镜导演。输入是完整章节剧本，不是短视频口播表。按剧本顺序拆能拍的镜头，忠实覆盖每一场和每一条蒙太奇，不要另编情节。
+${SHORT_DRAMA_SHOT_RULES}
+${SYSTEM_CUE_RULES}
 
 拆镜原则：
 - 一场戏里按戏剧拍点拆：进入、看见、犹豫、开口、反应、离开。不要把整场压成一镜，也不要一句对白拆成三镜空表情。
@@ -1830,7 +1840,7 @@ ${extractPlayForSceneStage(play)}`
       scenes: sceneRows,
       shots: rawShots
     }
-    const parsed = await ensureShotDuration(
+    let parsed = await ensureShotDuration(
       normalizeStoryboard(merged, {
         style: input.style,
         topic: input.topic,
@@ -1842,6 +1852,19 @@ ${extractPlayForSceneStage(play)}`
       parallelModel,
       onProgress
     )
+    const pacingIssues = storyboardQualityIssues(parsed, input).filter(issue => issue.startsWith('连续长无对白') || issue.startsWith('严重：系统面板'))
+    if (pacingIssues.length) {
+      onProgress?.('正在检查并修订系统面板原文与无对白镜头节奏…')
+      try {
+        const repairInput = { ...input, targetDurationSec: targetDurationSec || input.targetDurationSec }
+        const repaired = await repairStoryboardOnce(parsed, repairInput, parallelModel, pacingIssues)
+        const issues = storyboardQualityIssues(repaired, repairInput)
+        if (repaired.shots.length && !issues.some(issue => issue.startsWith('严重') || issue.startsWith('连续长无对白'))) parsed = repaired
+      } catch (error) {
+        if (input.signal?.aborted) throw error
+        log(`⚠ 无对白节奏修订失败，保留初稿：${(error as Error).message}`)
+      }
+    }
     const warnings = storyboardQualityIssues(parsed, input)
     if (warnings.length) {
       log(`⚠ 并行提炼完成，保留可编辑稿并提示 ${warnings.length} 项：${warnings.join('；')}`)
@@ -2237,6 +2260,17 @@ export function storyboardQualityIssues(
   input: Pick<StoryboardInput, 'content' | 'topic' | 'targetDurationSec' | 'maxShotDuration'>
 ): string[] {
   const issues: string[] = []
+  const compact = (value: string) => value.replace(/\s+/g, '')
+  const screenText = compact(result.shots.map(shot => shot.videoPrompt || '').join('\n'))
+  const systemCues = [...(input.content || '').matchAll(/【([^】]+)】/g)]
+    .map(match => compact(match[1]))
+    .filter(line => /^(?:系统(?:提示|通知|播报)?[：:]|检测到|身份[：:]|危机警报[：:]|生存法则[：:]|任务(?:提示|发布)[：:]|倒计时[：:])/.test(line))
+  let offset = 0
+  for (const cue of systemCues) {
+    const found = screenText.indexOf(cue, offset)
+    if (found < 0) issues.push(`严重：系统面板缺少原文或顺序错误：「${cue}」。在 videoPrompt 中逐字写明显示内容和出现时机。`)
+    else offset = found + cue.length
+  }
   issues.push(...dialogueVerbatimIssues(input.content || '', result.shots, (result.subjects || []).map((subject) => subject.name)))
   if (!result.shots.length) issues.push('严重：没有生成任何分镜')
   const targetSec = Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content)
@@ -2281,11 +2315,20 @@ export function storyboardQualityIssues(
   }
   const people = (result.subjects ?? []).filter((s) => s.kind !== 'other')
   const voicedShots = result.shots.filter((shot) => (shot.voiceover || '').trim())
-  const sourceHasDialogue = (input.content || '').split('\n').some((line) => {
-    const match = line.trim().match(/^(?:\*\*)?([^：:\n]{1,16})[：:](?:\*\*)?\s*(\S.+)$/)
+  const sourceHasDialogue = (input.content || '').split('\n').some((line, index, lines) => {
+    const match = line.trim().match(/^(?:\*\*)?([^：:\n]{1,16})[：:](?:\*\*)?\s*(.*)$/)
     const label = match?.[1]?.replace(/\*\*/g, '').trim() || ''
-    return Boolean(match && !/^(?:场景|场次|人物|地点|时间|画面|动作|音效|环境|剧情|背景|标题|风格|时长|镜头|道具|备注|旁白说明|类型|目标|关键词)$/.test(label))
+    return Boolean(match && (match[2].trim() || /^[「“『]/.test(lines.slice(index + 1).find(l => l.trim())?.trim() || '')) &&
+      !/^(?:场景|场次|人物|地点|时间|画面|动作|音效|环境|剧情|背景|标题|风格|时长|镜头|道具|备注|旁白说明|类型|目标|关键词)$/.test(label))
   })
+  if (sourceHasDialogue) {
+    for (let i = 1; i < result.shots.length; i++) {
+      const [a, b] = [result.shots[i - 1], result.shots[i]]
+      if (!a.voiceover?.trim() && !b.voiceover?.trim() && a.duration >= 8 && b.duration >= 8) {
+        issues.push(`连续长无对白：第 ${i}、${i + 1} 镜分别为 ${a.duration}、${b.duration} 秒。检查是否遗漏原台词；保留原词和说话人，将无对白动作并入相邻对白镜或压短。不得编造台词或删除关键事件。`)
+      }
+    }
+  }
   if (sourceHasDialogue && result.shots.length >= 3 && voicedShots.length < Math.ceil(result.shots.length * 0.7)) {
     issues.push('无台词镜头偏多：请检查原剧本对白是否遗漏，优先合并连续动作与对话，只保留少量确有叙事作用的无台词镜头。')
   }
@@ -3248,7 +3291,7 @@ async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayD
   const hint = (input.continueHint || '').trim()
   const targetSec =
     Number(input.targetDurationSec) || extractTargetDurationSec(input.topic, input.content, hint)
-  const scaleBrief = playScaleBrief(targetSec)
+  const scaleBrief = playScaleBrief(targetSec) || '未指定时长：按不超过两分钟的单集成片设计，不必填满两分钟。'
   const { model: cfgModel } = getLlmConfig()
   const model = resolvePlayModel(input) || cfgModel
   log(`→ ${continueMode ? '续写剧本' : '写剧本'} LLM: ${model}`)
@@ -3259,6 +3302,7 @@ async function realGeneratePlay(input: StoryboardInput): Promise<{ result: PlayD
         role: 'system',
         content: `${importedDirectorPrefix()}你是编剧。根据用户的要求和已有内容，直接写出剧本。
 只输出 Markdown 正文，不要 JSON，不要解释，不要自检。
+${SHORT_DRAMA_WRITING_RULES}
 用简体中文。先写标题、故事背景、人物、环境与场景，再写分场。分场标题用「## 场景N｜标题」，对白用「**人物名：**」。
 用户给了时长，就按这个时长写完。有交流的地方写出能念的对白。不要新增用户没提的价格和功效。
 ${scriptReferenceBrief(useSettingsStore().config.scriptReferenceType, input.topic, input.content, input.continueHint, ...(input.keywords || []))}`

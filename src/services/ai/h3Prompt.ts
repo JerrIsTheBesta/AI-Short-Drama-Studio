@@ -1686,7 +1686,7 @@ Rules:
 - MUST COPY the speaker-lock block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder (S1)/(S2)/<Picture N>.
 - overall_soundscape names the script's real sounds (chip crunch, cushion rustle, room tone). Do not write a generic sentence such as "close breath stay synchronized with the picture. Spoken words appear only inside the d tag."
 - Delivery format is chosen by the app, not by you. Write the shot body only. Multimodal reference (R2VA) is wrapped into six sections: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. First-frame (I2VA), first-and-last-frame (FL2VA), last-frame (L2VA) and text-only (T2VA) stay three fields, with the official alignment line added outside your JSON. Do not emit those headers yourself.
-- Do not show grids, four-view sheets, storyboards, collage, captions, subtitles, or labels on screen.
+- Do not show grids, four-view sheets, storyboards, collage, or added subtitles. Story-required HUD panels, system alerts and countdowns are diegetic text: preserve their exact original wording and order in the visual timeline; never turn them into dialogue unless specified as audio.
 - End the visual description once with: The complete action develops continuously and finishes naturally within ${durationText(resolved)} seconds.
 - overall_soundscape must follow the visible chronology and name the exact synchronized sounds of each action. English ambience and physical sounds only; spoken words are represented by their d tags and should not be quoted again. No music.
 - non_diegetic_music is always N/A.

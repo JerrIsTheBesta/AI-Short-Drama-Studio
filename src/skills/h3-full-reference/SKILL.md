@@ -19,6 +19,7 @@ description: MiniMax H3 全参考模式的六段式提示词改写。仅在 H3 f
 
 写作规范：
 - 六段全部用英文书写。只有 <d> 里的台词/歌词，以及画面中可见的文字，保留原语言。
+- 剧情内的系统面板、HUD、通知与倒计时不属于字幕。逐条保留已经指定的屏显原文和顺序，在 detailed_description 描述出现时机；若另有系统画外音，用独立声源的 <d>，不要给主角做口型。
 - 主体开口的完整格式是 <Subject N> (Sx) + 动作/语气 + <d>[Language] 台词</d>，三者缺一不可。Language 必须用英文语言全称，与 ref-en.txt 及页面 @ 对白一致，常用：Chinese / English / Korean / Japanese。正确：<Subject 1> (S1) 开口说，<d>[Chinese] 师姐我终于找到你了。</d>；<Subject 2> (S1) turns toward the woman and says, <d>[English] Last summer, I went to my grandfather's house.</d>。禁止只写 <d> 不带 <Subject N> (Sx)；禁止只写主体名不带 (S1)；禁止 zh、en、ja、ko、zh-CN。
 - subject_definitions 是身份锁定段：标签含义 + 参考角色 + 需要跟随的主要特征。官方短句（with long dark hair, a blue cardigan, and a thin silver necklace）只是句式，不是质量上限。
 - 每一行写清三件事：这个标签是什么、来自哪张图/哪段视频/哪段音频、在成片里起什么作用、要跟随哪些可见特征。

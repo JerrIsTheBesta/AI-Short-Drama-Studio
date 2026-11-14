@@ -221,10 +221,11 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
       ? shotsNeedingStills.length > 0
       : (project.settings?.h3ShotChainMode || 'auto') !== 'fl2va'
   const useStills =
-    stillsWanted &&
+    shots.some(s => s.imageAssetId || s.boardAssetId) ||
+    (stillsWanted &&
     (shotVideoPrev.length
       ? shotVideoPrev.some((n) => videoStillNeedsCanvas(stillModeFromNode(n)))
-      : videoStillNeedsCanvas(defaultStill))
+      : videoStillNeedsCanvas(defaultStill)))
   const stillGroupLabel = shotVideoPrev.some((n) => stillModeFromNode(n) === 'storyboard')
     ? '故事看板'
     : '分镜关键帧'
@@ -428,7 +429,8 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
     // 首尾帧镜头不铺关键帧节点；但这镜如果已经画过关键帧/看板，保留节点不删图
     const keepExistingStill = Boolean(shot.imageAssetId || shot.boardAssetId)
     const stillType =
-      shotUsesFrames(shot, project) && !keepExistingStill ? null : stillTypeForMode(resolvedStill)
+      shotUsesFrames(shot, project) && !keepExistingStill ? null :
+        stillTypeForMode(resolvedStill) || (shot.imageAssetId ? 'shotImage' : shot.boardAssetId ? 'shotBoard' : null)
     const stillId = stillType ? `${stillType}:${shot.id}` : ''
     if (stillType && stillId) {
       const prevStillNode = prev.get(stillId) || prevAny.get(stillId)

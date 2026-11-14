@@ -2238,7 +2238,7 @@ export async function runExtractStoryboard(
   const look = lookFromScript(project.current.script)
   const keepApproved = Boolean(stage && isPlayApproved(project.current))
   // 断点续跑：同一份剧本重跑拆分镜时，复用上次已完成的小组结果，不重复消费 token。
-  const playKey = `shot-plan-v2:${scriptPlayKey(project.current.script.content || '')}:${resolveTargetDurationSec(project.current.script) || 0}:${videoMaxSeconds(storyboardVideoModel())}`
+  const playKey = `shot-plan-v3:${scriptPlayKey(project.current.script.content || '')}:${resolveTargetDurationSec(project.current.script) || 0}:${videoMaxSeconds(storyboardVideoModel())}`
   const savedBatches = project.current.script.shotBatches
   const resumeBatches: Array<Record<string, unknown>[] | undefined> | undefined =
     savedBatches?.playKey === playKey

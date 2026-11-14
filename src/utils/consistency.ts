@@ -2,7 +2,7 @@ import type { ID, Project, Scene, Shot, StoryProp, Subject } from '@/types'
 import { sceneForShotPlace, shotMentionsScene } from '@/utils/shotPlace'
 import { lookFromScript, mediumLockText } from '@/utils/visualStyle'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
-import { shotVideoNode, stillModeForShot } from '@/utils/videoStill'
+import { shotVideoNode, shotUsesFrames, stillModeForShot } from '@/utils/videoStill'
 
 export interface ShotRefBundle {
   ids: ID[]
@@ -112,7 +112,7 @@ export interface VideoRefEntry {
   name?: string
 }
 
-/** 视频参考：按该镜视频模型的 stillMode 打包。H3 identity 只人设+场景，不传看板/四宫格。 */
+/** identity 不要求生成关键帧，但已存在的关键帧可作为多模态参考。 */
 export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefEntry[] {
   const omitted = new Set(shot.omittedRefAssetIds ?? [])
   const stillMode = stillModeForShot(shot, project)
@@ -158,7 +158,8 @@ export function collectShotVideoEntries(shot: Shot, project: Project): VideoRefE
       label: `six-panel STORYBOARD for [Shot 1]; action plan only; one continuous full-frame take; never copy panels or play them as a slideshow`
     })
   }
-  if (stillMode === 'keyframe' && shot.imageAssetId && !omitted.has(shot.imageAssetId)) {
+  if ((stillMode === 'keyframe' || (stillMode === 'identity' && !shotUsesFrames(shot, project))) &&
+    shot.imageAssetId && !omitted.has(shot.imageAssetId)) {
     out.unshift({
       id: shot.imageAssetId,
       kind: 'keyframe',

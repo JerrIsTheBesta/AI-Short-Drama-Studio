@@ -21,6 +21,7 @@ import { parseScriptDoc, serializeScriptDoc, toEpisodes, updateEpisode } from '@
 import { callLLM } from '@/services/ai/client'
 import { assertScriptCompletion } from '@/services/ai/scriptCompletion'
 import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference, scriptReferenceBrief } from '@/services/ai/scriptReference'
+import { SHORT_DRAMA_WRITING_RULES } from '@/services/ai/shortDramaRhythm'
 import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { desktop, isDesktop } from '@/services/desktop'
 import { parseJsonRobust } from '@/utils/jsonRepair'
@@ -362,7 +363,7 @@ async function writeStoryPlan(brief: string, revision = false) {
       model: llmModel.value, disableThinking: true, temperature: 0.6, useProviderOutputLimit: true,
       timeoutMs: 300_000, signal: controller.signal,
       messages: [
-        { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。先为整部剧策划大纲与分集目录，不写剧本正文。尊重用户指定的集数、时长、题材和结局；未指定集数时先规划适合短剧的 8 集，并在大纲中说明可修改。每集明确戏剧任务、冲突变化和下集钩子，人物关系和事件因果前后一致。只输出合法 JSON：{"outline":"故事梗概、人物设定及关系、世界规则和情绪主线","episodes":[{"title":"第1集标题","summary":"本集推进与结尾"}]}。不要用 Markdown 代码块。\n${scriptReferenceBrief(settings.config.scriptReferenceType, request)}` },
+        { role: 'system', content: `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是专业短剧编剧。先为整部剧策划大纲与分集目录，不写剧本正文。尊重用户指定的集数、时长、题材和结局；未指定集数时先规划适合短剧的 8 集，并在大纲中说明可修改。每集明确戏剧任务、冲突变化和下集钩子，人物关系和事件因果前后一致。只输出合法 JSON：{"outline":"故事梗概、人物设定及关系、世界规则和情绪主线","episodes":[{"title":"第1集标题","summary":"本集推进与结尾"}]}。不要用 Markdown 代码块。\n${scriptReferenceBrief(settings.config.scriptReferenceType, request)}` },
         { role: 'user', content: `${revision && oldPlan ? `原大纲：${oldPlan.outline}\n原分集目录：${JSON.stringify(oldPlan.episodes)}\n修改要求：` : '创作需求：'}${request}` }
       ]
     })
@@ -406,7 +407,7 @@ async function writePlannedEpisode() {
   try {
     const resp = await callLLM({ model: llmModel.value, disableThinking: true, temperature: 0.6, useProviderOutputLimit: true, timeoutMs: 300_000, signal: controller.signal,
       messages: [
-        { role: 'system', content: `${importedDirectorPrefix()}你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文，包含具体场次、行动与自然对白。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。场次使用三级标题，禁止输出一级或二级标题。只输出本集 Markdown 正文。\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
+        { role: 'system', content: `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文，包含具体场次、行动与自然对白。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。场次使用三级标题，禁止输出一级或二级标题。只输出本集 Markdown 正文。\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
         { role: 'user', content: `用户创作需求：${plan.brief}\n已确认大纲：${plan.outline}\n完整分集目录：${JSON.stringify(plan.episodes)}\n已完成前文${prior.length > 30000 ? '（仅显示最近部分，更早剧情请参考分集目录）' : ''}：\n${prior.slice(-30000) || '（第一集）'}\n当前要写：第 ${index + 1} 集 ${episode.title}\n本集任务：${episode.summary}\n${existing ? `需要替换的原正文：\n${existing}` : ''}` }
       ] })
     assertScriptCompletion(resp)
@@ -521,7 +522,7 @@ async function writeCurrentEpisode() {
         {
           role: 'system',
           content:
-            `${importedDirectorPrefix()}你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。\n${scriptReferenceBrief(settings.config.scriptReferenceType, activeDoc.value?.title, draft.value.title, existing, hint)}`
+            `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。\n${scriptReferenceBrief(settings.config.scriptReferenceType, activeDoc.value?.title, draft.value.title, existing, hint)}`
         },
         {
           role: 'user',
