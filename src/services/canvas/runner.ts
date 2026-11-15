@@ -47,6 +47,7 @@ import { pickDocImageResolution } from '@/services/ai/modelOptions'
 import { importedDirectorPrefix } from '@/services/settings/directorSkill'
 import { collectShotRefIds, collectShotBoardRefIds, collectShotKeyframeRefIds, collectShotVideoEntries, packVideoRefEntries, boundSubjectIds, sceneAssetForShot, sceneForShot, subjectsForShot, sceneHasKeyProps } from '@/utils/consistency'
 import { resolveShotPlace } from '@/utils/shotPlace'
+import { DIRECTOR_TIMELINE_SPEC, directorTimelineIssue, h3DirectorBodyIssue, preservesScreenText } from '@/utils/shotPrompt'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeForShot, shotsMissingKeyframe, shotsMissingStoryboard, needsShotFrames, shotUsesFrames } from '@/utils/videoStill'
 import {
@@ -1622,8 +1623,7 @@ export async function rewriteShotPerformance(shot: Shot, signal?: AbortSignal): 
     sceneExcerpt: extractSceneSlice(play, scene?.name),
     signal
   })
-  project.updateShot(shot.id, { videoPrompt: performance })
-  return optimizeShotVideoPrompt({ ...shot, videoPrompt: performance }, signal)
+  return optimizeShotVideoPrompt(shot, signal, performance)
 }
 
 /** 选了 H3 时，把节点原文编译成官方英文稿。多图参考是六段，首尾帧是对齐句加三段。 */
@@ -1680,6 +1680,11 @@ async function compileH3NodePrompt(input: {
   ).trim()
   const visible = stripReasoningLeak(compiled)
   if (!visible) throw new Error('模型只返回了思考过程，没有提示词')
+  const body = visible.match(/integrated_multimodal_description:\s*([\s\S]*?)(?=\n\s*overall_soundscape:|$)/i)?.[1] || ''
+  const issue = h3DirectorBodyIssue(body, input.duration)
+  if (issue || !preservesScreenText(withVideoReferenceBlock(input.source, []), body)) {
+    throw new Error(`H3 首尾帧提示词优化未通过：${issue || '屏显原文缺失或顺序被改动'}。原提示词已保留。`)
+  }
   return visible
 }
 
@@ -1689,25 +1694,29 @@ async function rewritePromptText(input: {
   pictures?: string
   modelName?: string
   dialogue?: string
+  duration: number
+  aspectRatio?: AspectRatio
   signal?: AbortSignal
 }): Promise<string> {
-  const resp = await callLLM({
+  let issue = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resp = await callLLM({
     disableThinking: true,
     messages: [
       {
         role: 'system',
         content: `${importedDirectorPrefix()}你在为当前选用的视频模型优化提示词：${input.modelName || '用户选择的视频模型'}。按该模型适合的自然语言视频描述组织内容；不要套用其他模型专有格式，不要强行使用 MiniMax H3 的六段结构或标签。只输出改写后的提示词正文，不要 JSON，不要解释，不要标题。
-必须改写，不要原样返回。保留原文里的人物、动作和台词原词，把含糊的地方写成能看见的画面，补上一种运镜和声音。不要新增原文没有的人物。
-有参考图时，开头严格按提供的顺序写明图片几对应哪个角色或场景，不得编造对应关系。每句台词必须保留原说话人，逐人分别标注，不得把不同人的话合并或交给其他人说；无法确定说话人时不要猜测。`
+${DIRECTOR_TIMELINE_SPEC}
+当前片段 ${input.duration} 秒，画幅 ${input.aspectRatio || '以节点为准'}。保留已有的拍摄细节、画风、人物、动作和对白，不把导演稿缩成总结；不新增人物、事件或台词。图片对应表由程序添加，不在正文重复。每句台词必须保留原词、原说话人和顺序，逐人分别标注；无法确定说话人时不要猜测。`
       },
       {
         role: 'user',
-        content: `${input.pictures ? `实际参考图顺序：\n${input.pictures}\n\n` : ''}${input.dialogue ? `原始对白及说话人（逐句保留）：\n${input.dialogue}\n\n` : ''}原文：\n${input.source}`
+        content: `${input.pictures ? `实际参考图顺序：\n${input.pictures}\n\n` : ''}${input.dialogue ? `原始对白及说话人（逐句保留）：\n${input.dialogue}\n\n` : ''}原文：\n${input.source}${issue ? `\n上一次未通过：${issue}。请完整重写正文。` : ''}`
       }
     ],
     temperature: 0.5,
-    maxTokens: 1200,
-    timeoutMs: 45_000,
+    useProviderOutputLimit: true,
+    timeoutMs: 300_000,
     signal: input.signal
   })
   const text = stripReasoningLeak(
@@ -1715,12 +1724,16 @@ async function rewritePromptText(input: {
       .replace(/^```(?:json|text|markdown)?\s*/i, '')
       .replace(/\s*```$/, '')
   )
-  if (!text) throw new Error('模型只返回了思考过程，没有提示词')
-  return text
+    issue = resp.finishReason === 'length' ? '输出被截断' :
+      directorTimelineIssue(text, input.duration) ||
+      (!preservesScreenText(withVideoReferenceBlock(input.source, []), text) ? '屏显原文缺失或顺序被改动' : '')
+    if (!issue) return text
+  }
+  throw new Error(`未写出可用的导演分镜：${issue}。原提示词已保留。`)
 }
 
 /** 把节点上现有的提示词交给语言模型，直接拿回正文。 */
-export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal): Promise<string> {
+export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal, rewrittenPerformance?: string): Promise<string> {
   const project = useProjectStore()
   if (!project.current) throw new Error('没有打开的项目')
   shot = refreshShot(shot.id)
@@ -1729,7 +1742,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
   const imageSlots = buildH3ImageSlots(packed)
   const box = (shot.compiledVideoPrompt || '').trim()
   const performance = (shot.videoPrompt || '').trim()
-  const source = box || performance
+  const source = rewrittenPerformance || box || performance
   if (!source) throw new Error('请先写提示词')
   const videoModel = canvasVideoModelForShot(shot)
   const profile = videoProfileById(canvasVideoNodeForShot(shot)?.data.videoProfileId || shot.videoProfileId)
@@ -1771,7 +1784,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     const pictures = imageSlots
       .map((slot) => `图片${slot.index}：${slot.sourceName || slot.name}`)
       .join('\n')
-    compiled = await rewritePromptText({ source, pictures, modelName: videoModel === 'wan-prime' ? '万相 3.0 Prime' : [profile?.name, profile?.workflowId].filter(Boolean).join(' / '), dialogue: shot.voiceover, signal })
+    compiled = await rewritePromptText({ source, pictures, modelName: videoModel === 'wan-prime' ? '万相 3.0 Prime' : [profile?.name, profile?.workflowId].filter(Boolean).join(' / '), dialogue: shot.voiceover, duration: clampVideoDuration(shot.duration, videoModel), aspectRatio: shotNodeAspect(p, shot.id, 'shotVideo'), signal })
   }
   const currentShot = refreshShot(shot.id)
   const currentProfile = videoProfileById(canvasVideoNodeForShot(currentShot)?.data.videoProfileId || currentShot.videoProfileId)
@@ -1782,6 +1795,7 @@ export async function optimizeShotVideoPrompt(shot: Shot, signal?: AbortSignal):
     throw new Error('优化期间提示词或参考图已变更，请重新优化')
   }
   compiled = withVideoReferenceBlock(compiled, packed)
+  if (rewrittenPerformance) project.updateShot(shot.id, { videoPrompt: rewrittenPerformance })
   project.setShotVideoPrompt(shot.id, compiled)
   await project.save()
   return compiled
@@ -2238,7 +2252,7 @@ export async function runExtractStoryboard(
   const look = lookFromScript(project.current.script)
   const keepApproved = Boolean(stage && isPlayApproved(project.current))
   // 断点续跑：同一份剧本重跑拆分镜时，复用上次已完成的小组结果，不重复消费 token。
-  const playKey = `shot-plan-v3:${scriptPlayKey(project.current.script.content || '')}:${resolveTargetDurationSec(project.current.script) || 0}:${videoMaxSeconds(storyboardVideoModel())}`
+  const playKey = `shot-plan-v4:${scriptPlayKey(project.current.script.content || '')}:${resolveTargetDurationSec(project.current.script) || 0}:${videoMaxSeconds(storyboardVideoModel())}`
   const savedBatches = project.current.script.shotBatches
   const resumeBatches: Array<Record<string, unknown>[] | undefined> | undefined =
     savedBatches?.playKey === playKey
@@ -2848,7 +2862,8 @@ export async function optimizeFreeformVideoPrompt(nodeId: string, signal?: Abort
     const pictures = slotEntries
       .map((entry, index) => `图片${index + 1}：${entry.name || '参考图'}`)
       .join('\n')
-    compiled = await rewritePromptText({ source, pictures, modelName: videoModel === 'wan-prime' ? '万相 3.0 Prime' : [profile?.name, profile?.workflowId].filter(Boolean).join(' / '), signal })
+    compiled = await rewritePromptText({ source, pictures, modelName: videoModel === 'wan-prime' ? '万相 3.0 Prime' : [profile?.name, profile?.workflowId].filter(Boolean).join(' / '), duration: clampVideoDuration(node.data.duration, videoModel, 8), aspectRatio: canvasNodeAspect(node, p.settings.aspectRatio), signal })
+    compiled = withVideoReferenceBlock(compiled, slotEntries)
   }
   const currentNode = project.current?.canvas?.nodes.find((item) => item.id === nodeId)
   const currentProfile = videoProfileById(currentNode?.data.videoProfileId)

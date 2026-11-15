@@ -28,7 +28,7 @@ import {
   styleLabel,
   VISUAL_STYLE_GUIDE
 } from '@/utils/visualStyle'
-import { normalizeCameraMovement, synthesizeVideoPerformance, isVideoPerformanceTemplate, videoPerformanceIssue, videoPerformanceSpec, videoPromptJsonHint } from '@/utils/shotPrompt'
+import { DIRECTOR_TIMELINE_SPEC, directorTimelineIssue, preservesScreenText, normalizeCameraMovement, synthesizeVideoPerformance, isVideoPerformanceTemplate, videoPerformanceIssue, videoPerformanceSpec, videoPromptJsonHint } from '@/utils/shotPrompt'
 import { extractJsonText, parseJsonRobust } from '@/utils/jsonRepair'
 import { boundSubjectIds, inferSubjectsFromText, shotCastText, subjectMatchKeys } from '@/utils/consistency'
 import { sceneConflictsWithShot, shotMentionsScene } from '@/utils/shotPlace'
@@ -968,6 +968,7 @@ ${SHORT_DRAMA_SHOT_RULES}
 ${SYSTEM_CUE_RULES}
 短剧以对白和行动共同推进：原文有对白时，优先让多数镜头承载原文台词；必要的无台词过渡优先控制在 2–4 秒，不要连续安排两个接近 10 秒的无对白镜头。把能并入对白镜的表情、走位或动作并进去；关键动作确实需要留长时，也不要再紧接一个长无对白镜。原文没有对白或用户明确要求无声时不得编造台词。同场景连续的问答和反应可在一个模型允许的镜头中完成；每镜必须推进新的动作、信息或情绪，禁止为同一动作重复生成镜头。保留全部原文台词，不得为了减少镜数删词。
 visualPrompt 是最有代表性的关键帧静态画面；videoPrompt 是具体、连续、可执行的动态图生视频时间轴，从0秒到本镜结束按实际拍点分2–5段。每段写清谁行动、谁说话、其他人如何占位和反应、表情变化以及一个有动机的运镜，并让环境中的风、雨、烟、衣摆、光影或道具有合理反馈。不要复述 visualPrompt，不要机械等分时间。
+${DIRECTOR_TIMELINE_SPEC}
 每镜要写清景别和人物空间关系。人物看场景内的人或物，不看镜头。
 优先输出 JSON：{"shots":[{"title":"3-8字","purpose":"戏剧作用","shotSize":"景别变化","visualPrompt":"电影关键帧画面","videoPrompt":"220-650字、从0秒覆盖到结束的2-5段电影化时间轴","duration":6,"audioDescription":"同步现场声","voiceover":"人物名：原台词或空字符串","audioMode":"h3-dialogue|h3-voiceover|none","cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["人物短名"],"sceneName":"已有地点短名"}]}。shots 数组只能有 1–${limit} 项。若不能输出 JSON，也可按“镜头 N / 画面 / 内容 / 时长 / 声音 / 口播”返回；系统可以解析。${retry ? '上一轮没有可解析镜头；这次直接交付，不要写思考过程。' : ''}`
         },
@@ -989,14 +990,14 @@ ${batch.nextHint ? `\n下一工作包开头（只用于留下末态，不要提�
       // 不强制 response_format：部分兼容接口在并发 JSON 约束下会一直推理到超时。
       // 提示仍优先要 JSON，同时下方解析器接受普通分镜文本。
       jsonMode: false,
-      maxTokens: limit > 3 ? 6000 : 3200,
+      maxTokens: Math.max(3200, limit * 1300),
       signal: input.signal,
       timeoutMs: retry ? FILM_SHOT_OUTLINE_TIMEOUT_MS : 90_000
     })
   try {
     const response = await ask()
     const rows = parseBatch(response.content)
-    const shots = rows.map((item: Record<string, unknown>) => {
+    const shots = rows.map((item: Record<string, unknown>): Record<string, unknown> => {
       const text = `${item.title || ''}\n${item.visualPrompt || ''}\n${item.videoPrompt || ''}\n${item.voiceover || ''}`
       const inferredSubjects = subjectNames.filter((name) => name && text.includes(name))
       const inferredScene = sceneNames.find((name) => name && text.includes(name))
@@ -1010,6 +1011,34 @@ ${batch.nextHint ? `\n下一工作包开头（只用于留下末态，不要提�
       }
     })
     if (!shots.length) throw new Error('模型回复中没有可解析的分镜')
+    const weak = shots.flatMap((shot, index) => {
+      const duration = Number(shot.duration) || 6
+      const issue = directorTimelineIssue(String(shot.videoPrompt || ''), duration)
+      return issue ? [{ index, shot, issue, duration }] : []
+    })
+    if (weak.length) {
+      try {
+        const revision = await callLLM({
+          messages: [
+            { role: 'system', content: `你是摄影指导，只局部扩写不合格镜头的 videoPrompt。${DIRECTOR_TIMELINE_SPEC}\n以本镜原有剧情和剧本原文为准。不得借用相邻镜剧情，不得修改镜数、人物、场景、时长和对白，不得改动或新增屏显台词。只返回 JSON：{"shots":[{"index":0,"videoPrompt":"…"}]}；index 使用输入原值。` },
+            { role: 'user', content: `剧本片段：\n${batch.excerpt}\n视觉约束：\n${directives}\n待修镜头：\n${JSON.stringify(weak)}` }
+          ],
+          model, temperature: 0.2, maxTokens: Math.max(1600, weak.length * 1000),
+          signal: input.signal, timeoutMs: SHOT_EXPAND_TIMEOUT_MS
+        })
+        const patches = parseBatch(revision.content)
+        for (const row of weak) {
+          const candidate = patches.find(patch => patch.index === row.index)?.videoPrompt
+          if (typeof candidate === 'string' && !directorTimelineIssue(candidate, row.duration) &&
+              preservesScreenText(String(row.shot.videoPrompt || ''), candidate)) {
+            row.shot.videoPrompt = candidate.trim()
+          }
+        }
+      } catch (error) {
+        if (input.signal?.aborted) throw error
+        log(`⚠ 分镜工作包 ${batch.index + 1} 动态正文补写未完成，保留可编辑初稿`)
+      }
+    }
     return { shots, model: response.model }
   } catch (error) {
     if (isAbortError(error) && !isTimeoutAbort(error)) throw error
@@ -1304,6 +1333,7 @@ async function expandOneShot(
           content: `${importedDirectorPrefix()}你是分镜节点填写员。只把下面这一条场记扩成画布字段，不改故事、不改时长、不改画面原意。
 口播必须用场记里的原词；场记写了对白而你输出空字符串视为不合格。同一空间的对白往来可以留在一镜。只有场记标明画外音/旁白时才用 audioMode=h3-voiceover。
 必须写 videoPrompt：从0秒到本镜结束按实际剧情拍点分2–5段。每段先写当前行动者、具体动作和表情，再写说话者与原词，并交代其他出场人物站在近处还是后面、身体朝哪、眼睛看谁、如何非语言反应；最后写这一段的合理运镜和落点。说话者可以在后面，前面的人侧对或回头看他。禁止合影看镜头，禁止只在结尾加「不要看镜头」。
+${DIRECTOR_TIMELINE_SPEC}
 ${film ? '本镜必须能在剧本原文里找到对应拍点。蒙太奇要写成看得见的连续动作。剧本写了不拍的，写进 videoPrompt 末尾一句。善意是普通人做的小事。' : ''}
 只输出一个 JSON 对象：{"title":"3-8字","purpose":"钩子/说明/反应/揭示/转场/收口","shotSize":"景别","blocking":"每个人：近处或后面、身体朝向、相对谁站","eyeline":"每个人看谁或看什么，禁止看镜头","continuity":"上一镜末态 → 本镜变化 → 下一镜初态","propFocus":"道具或无","visualPrompt":"中文静帧画面","videoPrompt":"中文220-650字可执行时间轴：从0秒覆盖到结束，分2-5段写当前行动者、动作表情、说话人与原词、其他人物占位反应、运镜落点、同步声音","audioDescription":"现场声音","voiceover":"人物名：台词，无则空","audioMode":"h3-dialogue|h3-voiceover|tts|none","speakerHint":"声线与情绪","duration":6,"cameraMovement":"push|pull|pan|tilt|static|orbit","subjectNames":["短名"],"sceneName":"地点原名"}`
         },
@@ -2392,7 +2422,7 @@ export function storyboardQualityIssues(
       const names = (result.subjects || [])
         .filter((s) => (shot.subjectIds || []).includes(s.id) || performance.includes(s.name))
         .map((s) => s.name)
-      const perfIssue = videoPerformanceIssue(performance, names)
+      const perfIssue = directorTimelineIssue(performance, shot.duration) || videoPerformanceIssue(performance, names)
       if (perfIssue) issues.push(`${label} ${perfIssue}`)
     }
     if (!shot.sceneId) issues.push(`${label} 没有关联场景`)
@@ -2529,7 +2559,7 @@ function pickBoundScene(
 function stampCastNames(prompt: string, chars: Subject[]): string {
   const body = (prompt || '').trim()
   if (!chars.length) return body
-  const line = `出场：${chars.map((c) => c.name).join('、')}。必须是人设里这些人，脸、发型、衣服跟设计图一致，禁止另造路人。`
+  const line = `出场：${chars.map((c) => c.name).join('、')}。主体的外形和已有特征与各自参考图一致，不新增未指定角色。`
   if (body.includes('出场：') && chars.every((c) => body.includes(c.name))) return body
   return body ? `${body}\n${line}` : line
 }

@@ -163,23 +163,23 @@ export function isMessyH3Prompt(text: string): boolean {
   return /[㐀-鿿]/.test(stripAllowedCjk(t))
 }
 
-/** 允许留在正文里的中文只有 <d> 台词。人名、地名、音色都不算台词。 */
+/** 允许保留 <d> 台词和用方头括号标记的剧情内屏显原文。 */
 function stripAllowedCjk(text: string): string {
-  return String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, '')
+  return String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>|【[^】\n]+】/gi, '')
 }
 
 function cjkOutsideSpokenTags(text: string): boolean {
   return /[㐀-鿿]/.test(stripAllowedCjk(text))
 }
 
-/** 正文里的汉字一律删掉。只有 <d> 里的台词原词保留。 */
+/** 正文仍用英文，保留原语言台词和明确标记的剧情内文字。 */
 export function stripCjkOutsideSpokenTags(text: string): string {
   const held: string[] = []
   const mask = (block: string) => {
     held.push(block)
     return `__H3KEEP${held.length - 1}__`
   }
-  const masked = String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>/gi, mask)
+  const masked = String(text || '').replace(/<d>\s*\[[^\]]+\]\s*[\s\S]*?<\/d>|【[^】\n]+】/gi, mask)
   const cleaned = masked
     .replace(/[\u3400-\u9fff]+/g, '')
     .replace(/[「」『』]/g, '')
@@ -1668,7 +1668,7 @@ The tag contains ONLY the spoken words. Never dump 场记, timestamps, style, pi
 
 Timeline writing standard:
 - Use the user's timing when supplied; otherwise divide the full duration according to action and dialogue, never into generic equal thirds.
-- Write 2–4 filmable sentences per time range. This is richer than an outline but shorter and clearer than a screenplay paragraph.
+- Preserve the source's shot sizes, camera positions, focus changes, movement start and end points, visible action steps, and motivated transitions. Do not flatten a detailed source into a plot summary or replace its specific direction with a generic camera move. Write enough filmable sentences to carry those details per time range.
 - Preserve spatial blocking throughout: who is foreground/background, left/right, seated/standing, and exactly whom each person looks at. Nobody looks into the camera unless the story explicitly demands it.
 - Expressions must evolve from a visible trigger: eyes refocus, brows tighten or release, jaw sets, breath catches, a hand hesitates, weight shifts. Avoid abstract emotion labels without behavior.
 - Use at most one primary camera move per range. Motivate it through a hand movement, eyeline, reveal or emotional turn; state where it starts and where it lands. Keep screen direction and axis continuous unless an explicit cut is needed.
@@ -1680,13 +1680,13 @@ Rules:
 - Preserve the user's event. Expand only what is already explicitly implied by the script, and never invent a different incident or new characters.
 - STYLE LOCK: when reference pictures are supplied, their art style is authoritative. Match the reference pictures' rendering (medium, palette, texture, character design) exactly. Ignore the Style line above if it conflicts; never switch the referenced subject to a different medium such as live-action, CG, or a generic "cinematic" look.
 - Write direct, decisive filmmaking prose like a director describing the finished moving image. The format is a container, not a prose template.
-- English for action, camera, light, names, places and performance. Chinese is allowed ONLY inside <d> dialogue. Never write Chinese names, even inside 「」. A Chinese name or scene sentence is deleted. Write the actual blocking in English: who is left/right, what they hold, what a prop does over time.
+- English for action, camera, light, names, places and performance. Preserve the original language inside <d> dialogue and for exact visible diegetic text. Do not use Chinese names as subject labels in action prose. Write the actual blocking in English: who is left/right, what they hold, what a prop does over time.
 - In action prose, call people (S1), (S2) exactly as the speaker lock defines them. Do not invent a new S number per line. Do not anonymize a known character as “the man.” Recurring props keep the (P#) and <Picture N> written in the lock. When a hand touches that object, name that picture.
 - Spoken lines already extracted below are the ONLY dialogue. If the list is empty, do not write dialogue, speech, lips, mouths, voices, or the words "no dialogue". H3 treats those words as a cue to invent English lines. Describe only visible action and ambient sound. NEVER invent speech from 场记, timestamps, style, or the speaker lock. Never put 无 or director notes inside a d tag.
 - MUST COPY the speaker-lock block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder (S1)/(S2)/<Picture N>.
 - overall_soundscape names the script's real sounds (chip crunch, cushion rustle, room tone). Do not write a generic sentence such as "close breath stay synchronized with the picture. Spoken words appear only inside the d tag."
 - Delivery format is chosen by the app, not by you. Write the shot body only. Multimodal reference (R2VA) is wrapped into six sections: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. First-frame (I2VA), first-and-last-frame (FL2VA), last-frame (L2VA) and text-only (T2VA) stay three fields, with the official alignment line added outside your JSON. Do not emit those headers yourself.
-- Do not show grids, four-view sheets, storyboards, collage, or added subtitles. Story-required HUD panels, system alerts and countdowns are diegetic text: preserve their exact original wording and order in the visual timeline; never turn them into dialogue unless specified as audio.
+- Do not show grids, four-view sheets, storyboards, collage, or added subtitles. Story-required HUD panels, system alerts and countdowns are diegetic text: place exact literals inside 【】 to preserve their original language and order. Describe when and where the panel appears, how long it remains, and keep it clear of the main action; never turn it into dialogue unless specified as audio.
 - End the visual description once with: The complete action develops continuously and finishes naturally within ${durationText(resolved)} seconds.
 - overall_soundscape must follow the visible chronology and name the exact synchronized sounds of each action. English ambience and physical sounds only; spoken words are represented by their d tags and should not be quoted again. No music.
 - non_diegetic_music is always N/A.
@@ -1751,7 +1751,7 @@ Write the moving image itself. Preserve the exact speaker lock and trusted dialo
 
 Dialogue is exclusive turn-taking. Immediately before every <d>, write the stable (S#) and says/asks/replies. Form: (S1) says: <d>[Chinese] 原词</d> Only (S1) speaks in this shot. (S2) keeps their lips completely closed. Bare <d> tags are forbidden. Do not split the clip merely because the delivery is fast.
 
-Rebuild the prompt as a concise cinematic timeline, not a four-line outline and not a dense screenplay paragraph. For every range write 2–4 filmable sentences covering framing or one motivated camera move, active body action and eyeline, a trigger-based facial change, listener blocking/reaction, and dialogue when present. Preserve foreground/background and left/right positions, keep the camera axis continuous, prevent anyone from staring into the lens, and use only story-relevant props, light and environmental motion. Every range must visibly advance the event. End once with the full ${durationText(resolved)}-second completion sentence.`
+Rebuild the prompt as a detailed cinematic timeline, not an outline. Preserve source timing, shot sizes, camera positions, focus, movement start and landing, motivated cuts and visible action steps. For each range explain the starting posture, specific movement, environmental feedback and landing image. Preserve any exact diegetic on-screen text in 【】, with its placement and timing; it is not dialogue. Preserve foreground/background and left/right positions, keep the camera axis continuous, and use only story-relevant props, light and environmental motion. Every range must visibly advance the event. End once with the full ${durationText(resolved)}-second completion sentence.`
           },
           {
             role: 'user',

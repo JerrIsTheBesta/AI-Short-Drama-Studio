@@ -3,6 +3,8 @@ import { callLLM, getAIMode } from './client'
 import { getVideoPromptStyle } from './runtime'
 import {
   composeVideoPerformance,
+  directorTimelineIssue,
+  preservesScreenText,
   isVideoPerformanceTemplate,
   isVideoPerformanceThin,
   lacksEnsembleBlocking,
@@ -113,10 +115,14 @@ ${(opts.shot.visualPrompt || '').slice(0, 400)}`
     })
     const parsed = parseJsonRobust(resp.content) as { videoPrompt?: string }
     const rich = stripFrameLead(String(parsed.videoPrompt || ''))
-    if (!rich || rich === (opts.shot.visualPrompt || '').trim()) return current
-    if (isVideoPerformanceTemplate(rich)) return current
+    if (!rich || rich === (opts.shot.visualPrompt || '').trim() || isVideoPerformanceTemplate(rich) ||
+        directorTimelineIssue(rich, opts.shot.duration) || !preservesScreenText(own, rich)) {
+      if (opts.force) throw new Error('重写稿仍缺少完整时间轴或可拍细节，或改动了屏显原文；已保留原稿。')
+      return own || current
+    }
     return rich
-  } catch {
-    return current
+  } catch (error) {
+    if (opts.force || opts.signal?.aborted) throw error
+    return own || current
   }
 }

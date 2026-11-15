@@ -48,7 +48,14 @@ export function formatBeatRangeEn(start: number, end: number): string {
 }
 
 /** 编辑器里仍写中文内容表现；选 H3 出片时再编译成官方 Ref2VA / I2VA。用户若已粘贴官方英文全文，原样使用。 */
-export const SCENE_NARRATIVE_SPEC = `用导演给演员和摄影说戏的口吻，写这一镜最终会怎样动起来。中文 220–650 字。只写本镜，不要把上一镜或下一镜的剧情演进来。
+export const DIRECTOR_TIMELINE_SPEC = `参考图角色/场景对应由程序单独生成；不要重写图号清单，也不要把身份锁定凑进正文。正文用中文，按剧情拍点每段另起一行，格式“镜头 N（起秒–止秒）：…”。从 0 连续覆盖到 duration，上一段止秒等于下一段起秒（例如 0–4、4–9、9–15），不能跳秒或重叠。4–6 秒可用两段，10–15 秒通常用三至四段；拍点不等于硬切，同一次运镜可以跨段。短镜通常写约 180–300 字，10–15 秒通常约 280–500 字，以信息量为准，不灌水。
+每段都给出可执行的拍法：① 景别、机位角度或主体在构图中的位置；② 摄影机固定、推拉、摇移或跟随的方向、速度和起落位置，焦点跟什么走、逐步揭示什么；③ 用起始姿态、连续可见的动作及反应、可见的落幅状态说明表演。对关键拍点补光线/景深/材质、被动作影响的环境和同步现场声，不强行添加道具或声音。转场处说明是同机位连续运镜还是硬切；不中断的就写继续，不制造切镜。
+例如“镜头拉远，展现困境”不够。可写“贴地侧拍从虚化腐叶间的前足起幅，足节蜷起再徒劳伸直；焦点留在打滑的足尖，镜头沿原轴匀速后撤到中全景，露出压在身侧的湿叶。停在坑沿与角色同框的位置，叶片随扒抓擦响。”只借鉴写法，不能照抄动作到别的剧情。
+系统面板/屏显文字是画面事件：写出现的拍点、屏幕方位、层级和停留/消失时机，避开角色关键动作；逐字保留原文和顺序，禁止擅自简写、数字换格式或编造文字。人物不是人类时，按参考图的真实形态写表演，不默认有手、衣服、发型或人脸。`
+
+export const SCENE_NARRATIVE_SPEC = `用导演给演员和摄影说戏的口吻，写这一镜最终会怎样动起来。只写本镜，不要把上一镜或下一镜的剧情演进来。
+
+${DIRECTOR_TIMELINE_SPEC}
 
 先写清楚开场站位：画面里每一个出场的人各写一句——在近处还是后面、身体朝哪、眼睛看谁或看什么。说话的人可以在后面或侧面，前面的人必须侧对或回头看他、或看他指的东西。禁止合影式正面排排站、禁止所有人看镜头。人设图是正面身份锁，成片姿势不要抄人设。
 
@@ -71,7 +78,7 @@ export function videoPerformanceSpec(style: VideoPromptStyle = 'scene-narrative'
 }
 
 export function videoPromptJsonHint(_style: VideoPromptStyle = 'scene-narrative'): string {
-  return '<中文220-650字的可执行时间轴。从0秒到本镜结束分2-5段，每段写当前行动者、动作与表情、说话人和原词、其他人物占位与视线、一个合理运镜及落点、同步声音和环境反应。按剧情拍点分段，禁止机械等分和套话。>'
+  return '<中文可执行分镜：每段另起一行写镜头 N（起秒–止秒），无缝覆盖全时长。逐段写景别、机位、运镜起落与焦点、可见动作过程和落幅，按剧情交代转场、声音及屏显原文。不是剧情简述。>'
 }
 
 /** 写给编剧 / 质检 / 出视频：默认按当前主流的场景叙事 */
@@ -153,6 +160,52 @@ export function isVideoPerformanceTemplate(text: string): boolean {
 
 export function timedBeatCount(text: string): number {
   return ((text || '').match(/\d+(?:\.\d+)?\s*(?:秒|s)?\s*[–\-~到至]\s*\d+(?:\.\d+)?\s*(?:秒|s)/gi) || []).length
+}
+
+/** 只验收时间轴正文；图号清单和出场锁定不计入细节。 */
+export function directorTimelineIssue(text: string, duration?: number): string | null {
+  const body = text.split(/\n\s*(?:出场|转场)\s*[:：]/)[0]
+  const ranges = [...body.matchAll(/(?:^|[^\d.])([0-9]+(?:\.[0-9]+)?)\s*(?:秒|s)?\s*[-–—~～到至]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:秒|s)(?=\s*[）)】：:]|\s|$)/gi)]
+  if (ranges.length < 2) return '缺少分段导演时间轴（至少两段）'
+  let end = 0
+  for (const range of ranges) {
+    const start = Number(range[1])
+    const next = Number(range[2])
+    if (Math.abs(start - end) > 0.001 || next <= start) return '时间轴有跳秒、重叠或倒序；必须从 0 秒连续覆盖本镜'
+    end = next
+  }
+  if (duration && Math.abs(end - duration) > 0.001) return `时间轴止于 ${end} 秒，与本镜 ${duration} 秒不一致`
+  const camera = /景别|特写|近景|中景|全景|远景|微距|机位|俯拍|仰拍|侧拍|过肩|构图|固定|跟拍|跟移|拉远|后撤|推近|焦点|景深|连续拉|沿原轴|镜头(?:慢|缓|匀|向|从|沿|停|不动|保持)/
+  const beats = ranges.map((range, i) => body.slice(range.index! + range[0].length, ranges[i + 1]?.index ?? body.length)
+    .replace(/(?:镜头\s*\d+\s*[（(【]?|[\s\p{P}])/gu, ''))
+  if (beats.some(beat => beat.length < 36 || !camera.test(beat))) return '部分拍点只是剧情摘要；逐段补机位或构图、运镜起落与连续动作细节'
+  const min = end >= 10 ? 210 : end >= 7 ? 150 : 105
+  if (beats.reduce((sum, beat) => sum + beat.length, 0) < min) return '动态正文缺少可拍细节；补足景别、焦点、动作过程、环境反馈及结束姿势，不要用身份锁定凑字数'
+  return null
+}
+
+/** 自动补写必须逐字保留旧稿中已标明的屏显，不接受缩写或调换次序。 */
+export function preservesScreenText(previous: string, next: string): boolean {
+  let from = 0
+  for (const [, literal] of previous.matchAll(/【([^】\n]+)】/g)) {
+    if (/^(?:\s*\d+:\d+\s*(?:[｜|].*)?$|.*(?:参考图对应|画面风格|镜头\s*\d+|画幅|首尾帧).*$)/.test(literal)) continue
+    const found = next.indexOf(literal, from)
+    if (found < 0) return false
+    from = found + literal.length
+  }
+  return true
+}
+
+/** H3 用英文正文和自己的分镜格式，不套中文时间段校验。 */
+export function h3DirectorBodyIssue(body: string, duration: number): string | null {
+  const prose = body
+    .replace(/<d>[\s\S]*?<\/d>/gi, ' ')
+    .replace(/Speaker lock \(these labels are the pictures\):[\s\S]*?(?=\d+[:.]\d+|\b(?:at|from)\s+\d+|$)/i, ' ')
+  const words = prose.match(/[a-z]+(?:[-'][a-z]+)*/gi)?.length || 0
+  if (words < (duration >= 10 ? 105 : duration >= 7 ? 75 : 45)) return '动态正文过短，须写足连续表演与摄影调度，身份和台词不计入'
+  if (!/\b(?:close[- ]?up|wide shot|medium shot|low[- ]angle|over[- ]the[- ]shoulder|eye[- ]level|framing|foreground|macro|profile)\b/i.test(prose) ||
+      !/\b(?:camera|lens|focus|dolly|tracks?|pans?|tilts?|push(?:es)?|pulls?|locked[- ]off)\b/i.test(prose)) return '动态正文缺少具体景别、机位或运镜焦点'
+  return null
 }
 
 /** continuity 常写成「上一镜末态 → 本镜变化 → 下一镜初态」；出视频只演中间这一截。 */

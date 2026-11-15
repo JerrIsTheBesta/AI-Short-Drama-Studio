@@ -3,6 +3,8 @@ import { useAssetsStore, useLibraryStore } from '@/stores'
 import { blobToChatImageUrl, callLLM, type LLMContentPart } from './client'
 import { getVisionConfig } from './runtime'
 import { parseJsonRobust } from '@/utils/jsonRepair'
+import { h3DirectorBodyIssue, preservesScreenText } from '@/utils/shotPrompt'
+import { withVideoReferenceBlock } from '@/utils/videoReferenceBlock'
 
 const fields = ['subject_definitions', 'summary', 'retention_analysis', 'detailed_description', 'overall_soundscape', 'non_diegetic_music'] as const
 
@@ -29,7 +31,7 @@ export async function optimizeH3FullReference(input: {
   const context = `当前视频提示词：\n${input.source}\n目标时长：${input.duration}秒\n画风：${input.aesthetic || '遵循参考图'}\n参考图编号（身份来源，不是说话顺序）：\n${input.references.map((item, i) => `图${i + 1}=${item.name}（${item.kind}）`).join('\n')}\n视觉观察：\n${visualContext}\n原始对白（保留原词、说话人和先后顺序）：\n${input.dialogue ?? '从当前提示词识别，不新增台词'}`
   let defect = ''
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await callLLM({ messages: [{ role: 'system', content: skill.replace(/^---[\s\S]*?---\s*/, '') }, { role: 'user', content: context + (defect ? `\n上次格式错误，请重新输出完整对象：${defect}` : '') }], jsonMode: true, useProviderOutputLimit: true, timeoutMs: 300_000, signal: input.signal })
+    const response = await callLLM({ messages: [{ role: 'system', content: skill.replace(/^---[\s\S]*?---\s*/, '') }, { role: 'user', content: context + (defect ? `\n上次未通过验收，请重新输出完整对象：${defect}` : '') }], jsonMode: true, useProviderOutputLimit: true, timeoutMs: 300_000, signal: input.signal })
     try {
       if (response.finishReason === 'length') throw new Error('输出被截断')
       const parsed = parseJsonRobust(response.content)
@@ -41,9 +43,12 @@ export async function optimizeH3FullReference(input: {
         } else if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} 不能为空`)
       }
       if (!/\[Shot 1\]/.test(parsed.detailed_description)) throw new Error('缺少 [Shot 1]')
+      const issue = h3DirectorBodyIssue(parsed.detailed_description, input.duration)
+      if (issue) throw new Error(issue)
+      if (!preservesScreenText(withVideoReferenceBlock(input.source, []), parsed.detailed_description)) throw new Error('动态正文未逐字保留原屏显文字和顺序')
       if (/\(S\d/.test(parsed.retention_analysis.join('\n'))) throw new Error('保留关系段不得出现说话人编号')
       return fields.map((field) => `${field}:\n${Array.isArray(parsed[field]) ? parsed[field].join('\n') : parsed[field]}`).join('\n\n')
     } catch (error) { defect = error instanceof Error ? error.message : String(error) }
   }
-  throw new Error(`H3 全参考提示词格式校验失败：${defect}`)
+  throw new Error(`H3 全参考提示词优化未通过：${defect}。原提示词已保留。`)
 }

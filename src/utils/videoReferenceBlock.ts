@@ -1,7 +1,7 @@
 import type { VideoRefEntry } from './consistency'
 
 /** 编号来自本次实际提交的图片数组，不从出场人物名单推测。 */
-export function withVideoReferenceBlock(prompt: string, entries: VideoRefEntry[]): string {
+export function withVideoReferenceBlock(prompt: string, entries: ReadonlyArray<Pick<VideoRefEntry, 'name' | 'kind'>>): string {
   const body = prompt.replace(/【实际参考图对应】[\s\S]*?【参考图对应结束】\s*/g, '').trim()
   if (!entries.length) return body
   const labels: Record<string, string> = { character: '人物人设', scene: '场景图', prop: '道具图', keyframe: '关键帧图', board: '分镜看板', extra: '补充参考' }
