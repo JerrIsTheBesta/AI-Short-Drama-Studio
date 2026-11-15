@@ -27,6 +27,7 @@ export type AgentToolName =
   | 'continue_play'
   | 'generate_storyboard'
   | 'extract_cast'
+  | 'set_visual_style'
   | 'approve_play'
   | 'revise_shot'
   | 'generate_sheet'
@@ -80,6 +81,8 @@ export interface AgentToolAction {
   duration?: number
   cameraMovement?: 'push' | 'pull' | 'pan' | 'tilt' | 'static' | 'orbit'
   extractStage?: ExtractStage
+  /** Explicitly regenerate existing assets, rather than only filling missing ones. */
+  regenerate?: boolean
 }
 
 export interface ToolExecutionContext {
@@ -174,6 +177,10 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
   const project = useProjectStore().current
   if (!project) return { state: 'ready' }
 
+  if (action.tool === 'extract_cast' && !action.extractStage && !nextExtractStage(project)) {
+    return { state: 'skip', detail: '人物、场景和分镜已经提炼完毕；没有重复提取。重画图片应使用生成工具。' }
+  }
+
   if (action.tool === 'extract_cast' && !(project.script?.playReady && project.script.content?.trim())) {
     return {
       state: 'repair',
@@ -185,7 +192,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
   if (action.tool === 'generate_shot_image') {
     const shot = shotFor(action)
     if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
-    if (shot.imageAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
+    if (shot.imageAssetId && !action.regenerate) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
     if (stillModeForShot(shot, project) !== 'keyframe') {
       return { state: 'skip', detail: `第 ${shot.index + 1} 镜当前视频模型不需要分镜关键帧` }
     }
@@ -207,7 +214,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     if (!shotUsesFrames(shot, project)) {
       return { state: 'skip', detail: `第 ${shot.index + 1} 镜不是首尾帧模式，不需要画帧` }
     }
-    if (shot.firstFrameAssetId && shot.lastFrameAssetId) {
+    if (shot.firstFrameAssetId && shot.lastFrameAssetId && !action.regenerate) {
       return { state: 'skip', detail: `第 ${shot.index + 1} 镜首尾帧已经存在` }
     }
     const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
@@ -227,7 +234,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
     if (!shot) throw new AgentToolError(`找不到分镜 ${action.shotId}`, action.tool, 'invalid_action', true)
 
     if (action.tool === 'generate_video') {
-      if (shot.videoAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜视频已经存在` }
+      if (shot.videoAssetId && !action.regenerate) return { state: 'skip', detail: `第 ${shot.index + 1} 镜视频已经存在` }
       const fl2vaShot = shotUsesFrames(shot, project)
       const stillMode = stillModeForShot(shot, project)
       if (!fl2vaShot && stillMode === 'storyboard' && !shot.boardAssetId) {
@@ -267,7 +274,7 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
 
     if (action.tool === 'generate_audio') {
       if (!needsExternalTts(shot, project)) return { state: 'skip', detail: `第 ${shot.index + 1} 镜由 H3 负责声音，不需要独立 TTS` }
-      if (shot.audioAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜口播已经存在` }
+      if (shot.audioAssetId && !action.regenerate) return { state: 'skip', detail: `第 ${shot.index + 1} 镜口播已经存在` }
     }
 
     if (action.tool === 'generate_shot_board') {
@@ -276,8 +283,8 @@ export function preflightRegisteredTool(raw: unknown): ToolPreflight {
         return { state: 'skip', detail: `第 ${shot.index + 1} 镜当前视频模型不需要看板或关键帧` }
       }
       if (stillMode === 'keyframe') {
-        if (shot.imageAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
-      } else if (shot.boardAssetId) return { state: 'skip', detail: `第 ${shot.index + 1} 镜故事看板已经存在` }
+        if (shot.imageAssetId && !action.regenerate) return { state: 'skip', detail: `第 ${shot.index + 1} 镜关键帧已经存在` }
+      } else if (shot.boardAssetId && !action.regenerate) return { state: 'skip', detail: `第 ${shot.index + 1} 镜故事看板已经存在` }
       const subjectIds = shot.subjectIds?.length ? shot.subjectIds : (project.subjects ?? []).map((subject) => subject.id)
       const missingFour = (project.subjects ?? []).filter(
         (subject) => subjectIds.includes(subject.id) && !subject.designSheetAssetId
@@ -361,6 +368,8 @@ export function verifyRegisteredTool(raw: unknown): string | null {
     case 'continue_play':
       return project.script?.playReady && project.script.content?.trim() ? null : '完整剧本没有成功写入项目'
     case 'extract_cast':
+      if (action.extractStage === 'scenes') return project.scenes?.length ? null : '场景节点没有成功写入项目'
+      if (action.extractStage === 'shots') return project.shots.length ? null : '分镜节点没有成功写入项目'
       return (project.subjects ?? []).length ? null : '人物节点没有成功写入项目'
     case 'generate_sheet': {
       const subject = (project.subjects ?? []).find((item) => item.id === action.subjectId)
@@ -465,6 +474,19 @@ function spotNextToSource(sourceId: string, fallbackX: number, fallbackY: number
 }
 
 const definitions: ToolDefinition[] = [
+  {
+    name: 'set_visual_style', phase: 0, timeoutMs: 5_000, required: ['text'], estimate: noCost,
+    async execute(action) {
+      const project = useProjectStore()
+      const script = project.current?.script
+      if (!script) throw new AgentToolError('当前没有剧本，无法设置项目画风', action.tool, 'invalid_action')
+      const visualStyleOverride = action.text!.trim()
+      project.setScript({ ...script, visualStyleOverride,
+        style: inferVisualStyleFromText(visualStyleOverride) || script.style })
+      await project.save()
+      return `已设置项目画风：${visualStyleOverride}。后续生成沿用此风格；未改剧本、台词，也未删除或自动重生已有素材。`
+    }
+  },
   {
     name: 'seed_script', phase: 0, timeoutMs: 5_000, required: ['text'], estimate: noCost,
     async execute(action, ctx) {
@@ -969,6 +991,16 @@ const definitions: ToolDefinition[] = [
       const project = useProjectStore()
       const node = project.current?.canvas?.nodes.find((item) => item.id === action.nodeId)
       if (!node) throw new Error(`找不到画布节点 ${action.nodeId}`)
+      if (node.type === 'subject' || node.type === 'scene') {
+        if (!action.text?.trim()) throw new AgentToolError('请提供完整的新图片提示词', action.tool, 'invalid_action')
+        if (node.type === 'subject' && node.data.subjectId) {
+          project.updateSubject(node.data.subjectId, { sheetPrompt: action.text })
+        } else if (node.type === 'scene' && node.data.sceneId) {
+          project.updateScene(node.data.sceneId, { platePrompt: action.text })
+        } else throw new AgentToolError('节点缺少人物或场景关联', action.tool, 'invalid_action')
+        await project.save()
+        return '图片提示词已更新，旧图片保留；运行此节点后才生成新图。'
+      }
       if (node.type !== 'imageGen' && node.type !== 'videoGen') {
         throw new Error('update_node 只修改自由图片/视频节点；分镜节点请用 revise_shot')
       }
@@ -1053,6 +1085,12 @@ export function validateToolAction(raw: unknown): AgentToolAction {
   const name = String(action.tool || '') as AgentToolName
   const definition = registry.get(name)
   if (!definition) throw new AgentToolError(`不允许的工具：${name || '空'}`, name, 'invalid_action')
+  if (action.extractStage !== undefined && !['subjects', 'scenes', 'shots'].includes(String(action.extractStage))) {
+    throw new AgentToolError('提炼范围必须为 subjects、scenes 或 shots', name, 'invalid_action')
+  }
+  if (action.regenerate !== undefined && typeof action.regenerate !== 'boolean') {
+    throw new AgentToolError('regenerate 必须为布尔值', name, 'invalid_action')
+  }
   for (const key of definition.required ?? []) {
     if (typeof action[key] !== 'string' || !String(action[key]).trim()) {
       throw new AgentToolError(`${name} 缺少参数 ${key}`, name, 'invalid_action')
@@ -1060,6 +1098,7 @@ export function validateToolAction(raw: unknown): AgentToolAction {
   }
   return {
     tool: name,
+    ...(typeof action.regenerate === 'boolean' ? { regenerate: action.regenerate } : {}),
     ...(typeof action.text === 'string' ? { text: action.text } : {}),
     ...(typeof action.subjectId === 'string' ? { subjectId: action.subjectId } : {}),
     ...(typeof action.sceneId === 'string' ? { sceneId: action.sceneId } : {}),

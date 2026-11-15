@@ -38,7 +38,7 @@ export const STYLE_ALIASES: Record<VisualStyle, string[]> = {
   watercolor: ['水彩画风', '水彩画', '水彩风', 'watercolor', '水彩'],
   'oil-painting': ['古典油画', '油画风', 'oil painting', 'oil-painting', '厚涂', '油画'],
   'pixel-art': ['像素风格', '像素风', 'pixel-art', 'pixel art', '像素画', '像素'],
-  '3d-render': ['三维渲染', '3d渲染', '3d-render', 'blender', 'octane', 'c4d'],
+  '3d-render': ['3d动画', '3d 动画', '三维动画', '3d stylized animation', 'pixar', '皮克斯', '三维渲染', '3d渲染', '3d-render', 'blender', 'octane', 'c4d'],
   anime: ['日系动画', '二次元', '赛璐璐', '动漫风', '动画风', 'anime', '动漫', '动画'],
   photorealistic: ['写实摄影', '超写实', 'photorealistic', '纪实摄影', '真人实拍'],
   cinematic: ['电影剧照', '院线电影', '胶片摄影', '电影感', 'cinematic', '胶片颗粒']
@@ -301,6 +301,7 @@ export function styleLinesFromPlay(content?: string): string {
 export function lookFromScript(
   script?: {
     style?: VisualStyle
+    visualStyleOverride?: string
     topic?: string
     content?: string
     keywords?: string[]
@@ -310,6 +311,7 @@ export function lookFromScript(
   ...extra: Array<string | undefined>
 ): VisualLook {
   const fallback = script?.style ?? 'cinematic'
+  if (script?.visualStyleOverride?.trim()) return lookFromTexts(fallback, script.visualStyleOverride)
   return lookFromTexts(
     fallback,
     script?.topic,

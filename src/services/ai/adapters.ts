@@ -877,17 +877,14 @@ export async function comfyPromptGenerate(opts: {
   const imageSources = [opts.imageDataUrl, ...(opts.referenceImageDataUrls || [])].filter(Boolean) as string[]
   if (opts.kind === 'video') inputMap = fitComfyReferenceImages(payload, inputMap, imageSources.length)
   const imageBindings = inputMap.bindings.filter(b => b.role === 'image')
-  if (opts.kind === 'video' && imageSources.length !== imageBindings.length) {
-    throw new Error(`[comfyui] 工作流映射了 ${imageBindings.length} 张参考图，本次提供 ${imageSources.length} 张；请核对图片数量和映射顺序，避免使用工作流内的默认图片。`)
+  if (opts.kind === 'video' && imageSources.length > imageBindings.length) {
+    throw new Error(`[comfyui] 本次提供 ${imageSources.length} 张参考图，但工作流只有 ${imageBindings.length} 个可用参考图槽位，无法接收全部图片。请增加参考图映射或减少图片；不会静默丢弃素材。`)
   }
+  // 槽位数是容量，不是必填数量。仅替换前 N 个，剩余默认黑图/固定素材保持原样。
+  const suppliedImageBindings = imageBindings.slice(0, imageSources.length)
   const imageInputs = inputMap.bindings.filter(b => b.role === 'image' || b.role === 'imageEnd' || b.role === 'mask')
   if (new Set(imageInputs.map(b => JSON.stringify([b.nodeId, b.field]))).size !== imageInputs.length) {
     throw new Error('[comfyui] 多张图片映射到了同一个节点字段，请在接入设置中检查图片映射。')
-  }
-  if (opts.kind === 'video' && imageSources.length) {
-    const bound = new Set(imageInputs.filter(b => b.role === 'image' || (b.role === 'imageEnd' ? opts.imageEndDataUrl : opts.maskDataUrl)).map(b => b.nodeId))
-    const unbound = guessInputMap(payload).bindings.filter(b => b.role === 'image' && !bound.has(b.nodeId))
-    if (unbound.length) throw new Error(`[comfyui] 图片节点 ${unbound.map(b => '#' + b.nodeId).join('、')} 未绑定本次素材，已停止提交，避免使用工作流默认图片。请检查参考图映射。`)
   }
   for (const b of inputMap.bindings) {
     if (!isMediaRole(b.role)) continue
@@ -933,11 +930,13 @@ export async function comfyPromptGenerate(opts: {
     uploadedImages
   }
   const { writes, skipped } = applyComfyInputs(payload, inputMap, values)
-  if (opts.kind === 'video' && imageBindings.some(b => {
+  if (suppliedImageBindings.some(b => {
     const expected = uploadedImages[`${b.nodeId}:${b.field}`]
     return !expected || payload.prompt?.[b.nodeId]?.inputs?.[b.field] !== expected
   })) throw new Error('[comfyui] 本次参考图未全部写入工作流，已停止提交。')
-  if (opts.kind === 'video' && imageBindings.length) opts.onProgress?.(`已上传或传入并核对 ${imageBindings.length} 张参考图`)
+  if (suppliedImageBindings.length) opts.onProgress?.(`已上传或传入并核对 ${suppliedImageBindings.length} 张参考图，按顺序替换前 ${suppliedImageBindings.length} 个槽位`)
+  const retainedImageCount = imageBindings.length - suppliedImageBindings.length
+  if (retainedImageCount) opts.onProgress?.(`其余 ${retainedImageCount} 个参考图槽位保留工作流默认图片，请确保默认图片已存在于 ComfyUI 中`)
   if (!writes.length) {
     const miss = missingRoles(inputMap)
     throw new Error(

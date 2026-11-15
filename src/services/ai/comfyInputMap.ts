@@ -417,7 +417,7 @@ export interface ComfyInjectValues {
   uploadedImages?: Record<string, string>
 }
 
-/** Ref2VA 的多参考槽是可选输入，仅在本次请求中按实际图数调整。 */
+/** Ref2VA 按连线恢复槽位顺序，并按需扩容；未使用的默认图及连线必须保留。 */
 export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count: number): ComfyInputMap {
   const imageBindings = map.bindings.filter(b => b.role === 'image')
   if (!Number.isSafeInteger(count) || count < 1 || count > 9) return map
@@ -460,22 +460,7 @@ export function fitComfyReferenceImages(payload: any, map: ComfyInputMap, count:
     }
     return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered] }
   }
-  if (count === ids.length) return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered] }
-  const keep = ids.slice(0, count)
-  // 不允许其余必填连线继续引用未上传的示例图。
-  const removed = new Set(ids.slice(count))
-  const optionalSlots = new Map<object, Set<string>>()
-  for (const slot of slots) {
-    const keys = optionalSlots.get(slot.inputs) || new Set<string>()
-    keys.add(slot.key)
-    optionalSlots.set(slot.inputs, keys)
-  }
-  if (Object.values(nodes).some((node: any) => Object.entries(node?.inputs || {}).some(([key, value]) =>
-    Array.isArray(value) && removed.has(String(value[0])) && !optionalSlots.get(node.inputs)?.has(key)
-  ))) return map
-  for (const slot of slots) if (removed.has(slot.nodeId)) delete slot.inputs[slot.key]
-  for (const id of removed) delete nodes[id]
-  return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered.slice(0, keep.length)] }
+  return { ...map, bindings: [...map.bindings.filter(b => b.role !== 'image'), ...ordered] }
 }
 
 /**

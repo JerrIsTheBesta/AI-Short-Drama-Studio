@@ -238,6 +238,8 @@ export interface Script {
   keywords: string[]
   /** 画面风格 */
   style: VisualStyle
+  /** 用户后续明确修改的项目画风，优先于原剧本中的旧画风，不改正文。 */
+  visualStyleOverride?: string
   /** 视频比例 */
   aspectRatio: AspectRatio
   /** 每个分镜目标时长 */

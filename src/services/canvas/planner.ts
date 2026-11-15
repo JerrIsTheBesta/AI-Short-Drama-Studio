@@ -2,7 +2,9 @@
  * 任务规划系统：把解析出来的工具动作整理成用户可读的任务计划。
  * 计划通过 AgentEvent(kind='plan') 推给面板，执行中按 stepKey 同步状态。
  */
-import { estimateToolActions, toolPhase, type AgentToolAction } from './toolRegistry'
+import { estimateToolActions, type AgentToolAction } from './toolRegistry'
+import { useProjectStore } from '@/stores'
+import { expandRegeneration, uniqueActions } from './actionPolicy'
 import { TOOL_LABEL } from './pipeline'
 
 export type PlanStepStatus = 'pending' | 'running' | 'done' | 'fail'
@@ -25,20 +27,20 @@ export interface AgentPlan {
 }
 
 export function stepKeyOf(action: AgentToolAction): string {
-  return `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || ''}`
+  return `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || action.extractStage || ''}`
 }
 
 function stepTitle(action: AgentToolAction): string {
-  const label = TOOL_LABEL[action.tool] || action.tool
+  const label = `${action.regenerate ? '重新' : ''}${TOOL_LABEL[action.tool] || action.tool}`
   if (action.tool === 'optimize_node_prompt' || action.tool === 'update_node' || action.tool === 'run_node') {
     return action.nodeId ? `${label} ${action.nodeId}` : label
   }
   return label
 }
 
-/** 按工具 phase 排序后生成计划（与 agentLoop 实际执行顺序一致）。 */
+/** 与执行器一致，保留用户计划的顺序，批量重做按目标展示。 */
 export function buildPlanFromActions(actions: AgentToolAction[], intentLabel: string): AgentPlan {
-  const sorted = [...actions].sort((a, b) => toolPhase(a.tool) - toolPhase(b.tool))
+  const sorted = uniqueActions(expandRegeneration(actions, useProjectStore().current))
   const estimate = estimateToolActions(sorted)
   const steps: AgentPlanStep[] = sorted.map((action) => ({
     key: stepKeyOf(action),

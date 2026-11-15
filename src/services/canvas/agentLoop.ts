@@ -6,12 +6,14 @@ import {
   estimateToolActions,
   executeRegisteredTool,
   preflightRegisteredTool,
-  toolPhase,
   validateToolAction,
   verifyRegisteredTool,
   type AgentToolAction
 } from './toolRegistry'
 import { TOOL_LABEL } from './pipeline'
+import { useProjectStore } from '@/stores'
+import { alreadyGenerated, expandRegeneration, uniqueActions } from './actionPolicy'
+import { stepKeyOf } from './planner'
 import { beginAgentTask, getAgentState, patchAgentTask } from './taskStore'
 
 export interface ReplanInput {
@@ -47,20 +49,13 @@ export interface AgentLoopOptions {
   continue?: (input: ContinueAgentInput) => Promise<ContinueAgentPlan>
 }
 
-function dedupe(actions: AgentToolAction[]) {
-  const seen = new Set<string>()
-  return actions.filter((action) => {
-    const key = `${action.tool}:${action.subjectId ?? ''}:${action.sceneId ?? ''}:${action.shotId ?? ''}:${action.nodeId ?? ''}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
+function prepare(actions: unknown[]) {
+  return uniqueActions(expandRegeneration(actions.map(validateToolAction), useProjectStore().current))
 }
 
 export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOptions) {
-  let actions = dedupe(rawActions.map(validateToolAction)).sort(
-    (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
-  )
+  // Preserve causal order (edit -> run). Missing dependencies are inserted by preflight.
+  let actions = prepare(rawActions)
   const estimate = estimateToolActions(actions)
   const budget = getAgentState().callBudget
   if (budget > 0 && estimate.calls > budget) {
@@ -101,9 +96,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
         if (next.say?.trim()) finalSay = next.say.trim()
         if (next.done || !next.actions?.length) break
 
-        const nextActions = dedupe(next.actions.map(validateToolAction)).sort(
-          (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
-        )
+        const nextActions = prepare(next.actions).filter((action) => !alreadyGenerated(action, completed))
         if (!nextActions.length) break
         const nextEstimate = estimateToolActions(nextActions)
         if (budget > 0 && scheduledCalls + nextEstimate.calls > budget) {
@@ -126,8 +119,8 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
       }
       if (options.signal?.aborted) throw new AgentToolError('任务已取消', 'agent', 'cancelled')
       const action = actions.shift()!
-      const stepKey = `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || ''}`
-      const stepLabel = TOOL_LABEL[action.tool] || action.tool
+      const stepKey = stepKeyOf(action)
+      const stepLabel = `${action.regenerate ? '重新' : ''}${TOOL_LABEL[action.tool] || action.tool}`
 
       let preflight
       try {
@@ -165,9 +158,7 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
           })
           return { results, graph, stopped: true, error: toolError }
         }
-        const candidate = dedupe([...preflight.actions, action, ...actions]).sort(
-          (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
-        )
+        const candidate = prepare([...preflight.actions, action, ...actions])
         const projected = estimateToolActions([...completed, ...candidate])
         if (budget > 0 && projected.calls > budget) {
           const toolError = new AgentToolError(
@@ -246,10 +237,19 @@ export async function runAgentLoop(rawActions: unknown[], options: AgentLoopOpti
             remaining: [action, ...actions],
             attempt: replanAttempt
           })
-          actions = dedupe([...replacement.map(validateToolAction), action, ...actions]).sort(
-            (a, b) => toolPhase(a.tool) - toolPhase(b.tool)
-          )
-          if (actions.length) continue
+          // Recovery replaces the failed step, including the original target only
+          // when it is still appropriate. An empty reply means stop, NOT blind retry.
+          const recovered = prepare(replacement).filter((item) => !alreadyGenerated(item, completed))
+          const recoveryEstimate = estimateToolActions(recovered)
+          if (budget > 0 && scheduledCalls + recoveryEstimate.calls > budget) {
+            options.onEvent({ kind: 'log', label: '恢复方案超过本轮调用预算，已停止；成功结果保留。' })
+          } else if (recovered.length) {
+            scheduledCalls += recoveryEstimate.calls
+            scheduledSeconds += recoveryEstimate.seconds
+            await patchAgentTask(task.id, { estimatedCalls: scheduledCalls, estimatedSeconds: scheduledSeconds })
+            actions = prepare([...recovered, ...actions])
+            continue
+          }
         }
 
         results.push({ tool: action.tool, ok: false, detail: toolError.message })

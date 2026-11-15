@@ -210,6 +210,7 @@ export function continueQuestion(next: PipelineStep | null, justDid: string) {
 }
 
 export const TOOL_LABEL: Record<string, string> = {
+  set_visual_style: '更新项目画风',
   generate_play: '写完整剧本',
   continue_play: '续写剧本',
   generate_storyboard: '写完整剧本',

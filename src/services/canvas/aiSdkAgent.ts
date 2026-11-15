@@ -25,6 +25,7 @@ const voiceover = z.string().describe('口播，写成「人物名：台词」')
 const duration = z.number().describe('秒数')
 const cameraMovement = z.enum(['static', 'push', 'pull', 'pan', 'tilt', 'orbit']).describe('运镜')
 const extractStage = z.enum(['subjects', 'scenes', 'shots']).describe('只提炼这一步')
+const regenerate = z.boolean().optional().describe('用户明确要求重做已有素材时为 true；默认仅补缺。不得为依赖补齐开启重做')
 
 function canvasTool(description: string, shape: Record<string, z.ZodType>) {
   return tool({
@@ -37,8 +38,9 @@ export const studioAgentTools = {
   seed_script: canvasTool('把用户这几轮的故事原文写入剧本草稿。新故事必须先走这一步。', { text }),
   generate_play: canvasTool('根据草稿写完整 Markdown 剧本。不要同时提炼人物或分镜。', { text: text.optional() }),
   continue_play: canvasTool('在已有剧本后面续写，保留已有场次。', { text: text.optional() }),
-  extract_cast: canvasTool('从已有剧本提炼。每次只做缺的那一步：人物、场景或分镜。', { extractStage: extractStage.optional() }),
-  generate_storyboard: canvasTool('把已验收的剧本拆成故事板。', {}),
+  extract_cast: canvasTool('从剧本提取人物、场景或分镜文本，不画图。只有明确重新提取才指定 extractStage；重画图片禁止使用。', { extractStage: extractStage.optional() }),
+  set_visual_style: canvasTool('修改当前项目全局画风，后续人物、场景和分镜沿用。text 只写用户确认的新画风；不改剧本、不自动生成素材。', { text }),
+  generate_storyboard: canvasTool('兼容旧工具名：实际写完整剧本，不拆节点。提炼请用 extract_cast。', {}),
   approve_play: canvasTool('用户确认剧本通过后，打开下游生成。', {}),
   revise_shot: canvasTool('修改某一个分镜的画面、视频提示词、口播或时长。', {
     shotId,
@@ -50,19 +52,19 @@ export const studioAgentTools = {
     cameraMovement: cameraMovement.optional()
   }),
   generate_sheet: canvasTool('给一个人物出设计图。', { subjectId }),
-  generate_all_sheets: canvasTool('补齐还没有设计图的人物。', {}),
+  generate_all_sheets: canvasTool('补齐人物设计图；用户要求重画现有人物图时传 regenerate:true。', { regenerate }),
   generate_scene: canvasTool('给一个场景出锚点图。', { sceneId }),
-  generate_all_scenes: canvasTool('补齐还没有锚点图的场景。', {}),
-  generate_shot_board: canvasTool('给一个分镜出故事看板。', { shotId }),
-  generate_all_boards: canvasTool('补齐缺少的故事看板。', {}),
-  generate_shot_image: canvasTool('给一个分镜出关键帧。', { shotId }),
-  generate_all_images: canvasTool('补齐缺少的分镜关键帧。', {}),
-  generate_shot_frames: canvasTool('给一个分镜画起始帧和结束帧。', { shotId }),
-  generate_all_frames: canvasTool('补齐所有需要首尾帧的镜头。', {}),
-  generate_video: canvasTool('给一个分镜出视频。', { shotId }),
-  generate_all_videos: canvasTool('补齐还没有视频的分镜。', {}),
-  generate_audio: canvasTool('给一个分镜出口播。', { shotId }),
-  generate_all_audio: canvasTool('补齐还没有口播的分镜。', {}),
+  generate_all_scenes: canvasTool('补齐场景锚点图；用户要求重画现有场景图时传 regenerate:true。', { regenerate }),
+  generate_shot_board: canvasTool('给一个分镜出故事看板。', { shotId, regenerate }),
+  generate_all_boards: canvasTool('补齐缺少的故事看板。', { regenerate }),
+  generate_shot_image: canvasTool('给一个分镜出关键帧。', { shotId, regenerate }),
+  generate_all_images: canvasTool('补齐缺少的分镜关键帧。', { regenerate }),
+  generate_shot_frames: canvasTool('给一个分镜画起始帧和结束帧。', { shotId, regenerate }),
+  generate_all_frames: canvasTool('补齐所有需要首尾帧的镜头。', { regenerate }),
+  generate_video: canvasTool('给一个分镜出视频。', { shotId, regenerate }),
+  generate_all_videos: canvasTool('补齐还没有视频的分镜。', { regenerate }),
+  generate_audio: canvasTool('给一个分镜出口播。', { shotId, regenerate }),
+  generate_all_audio: canvasTool('补齐还没有口播的分镜。', { regenerate }),
   sync_canvas: canvasTool('按当前剧本把画布节点对齐。', {}),
   focus_node: canvasTool('把画布视野移到某个节点。', { nodeId }),
   create_image_node: canvasTool('新建一个自由图片节点。要接在某个节点后面时带上 sourceNodeId。', {
@@ -78,7 +80,7 @@ export const studioAgentTools = {
   delete_node: canvasTool('删除一个自由图片或视频节点。', { nodeId }),
   arrange_canvas: canvasTool('重新整理画布布局。', {}),
   check_project: canvasTool('检查项目缺了什么，不生成新内容。', {}),
-  update_node: canvasTool('修改一个自由图片或视频节点的提示词、名字或时长。', {
+  update_node: canvasTool('修改图片/视频节点；也支持 subject:人物id、scene:场景id 的完整图片提示词(text)。修改后用 run_node 生成，不要重新提取剧本。', {
     nodeId,
     text: text.optional(),
     nodeLabel: nodeLabel.optional(),

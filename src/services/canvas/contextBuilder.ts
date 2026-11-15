@@ -107,6 +107,7 @@ export function buildProjectContext(userText: string) {
       name: p.name,
       /** 当前生成配置：用户在智能体底栏选的比例与模型，生成时直接照此执行 */
       genConfig: {
+        visualStyleOverride: p.script?.visualStyleOverride || null,
         aspectRatio: p.settings.aspectRatio,
         imageModel: imageProfile ? `${imageProfile.name} · ${imageProfile.model}` : null,
         videoModel: videoProfile ? videoProfile.name : null
@@ -139,6 +140,7 @@ export function buildProjectContext(userText: string) {
         ? {
             subjects: (p.subjects ?? []).map((s) => ({
               id: s.id,
+              nodeId: `subject:${s.id}`,
               name: s.name,
               kind: s.kind,
               role: s.role,
@@ -151,6 +153,7 @@ export function buildProjectContext(userText: string) {
         ? {
             scenes: (p.scenes ?? []).map((s) => ({
               id: s.id,
+              nodeId: `scene:${s.id}`,
               name: s.name,
               description: truncate(s.description, 120),
               hasAnchorSheet: Boolean(s.plateAssetId)

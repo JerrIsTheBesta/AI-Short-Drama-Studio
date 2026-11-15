@@ -352,6 +352,7 @@ function clearTemplate() {
       </p>
       <div v-if="hasTemplate">
         <p>核对输入映射（候选字段显示工作流默认值）</p>
+        <p class="hint">参考图按映射顺序替换：提供 1 张就替换第 1 个槽位，提供 6 张就替换前 6 个。其余槽位保留工作流默认图片，无需填满；请确保默认黑图等文件已存在于 ComfyUI 中。尾帧和蒙版单独映射，不占参考图顺序。</p>
         <div v-for="(binding, index) in editableMap" :key="index" class="mapping-row">
           <select v-model="binding.role" aria-label="参数用途"><option v-for="(label, key) in COMFY_ROLE_LABEL" :key="key" :value="key">{{ label }}</option></select>
           <select :value="JSON.stringify([binding.nodeId, binding.field])" aria-label="节点字段" @change="setTarget(binding, $event)"><option :value="JSON.stringify(['',''])" disabled>选择节点字段</option><option v-for="option in inputs" :key="option.key" :value="option.key">{{ option.label }}</option></select>

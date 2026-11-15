@@ -9,6 +9,7 @@ import { collectStoryBrief, isNewStoryBrief } from '@/utils/storyBrief'
 import { rebuildCanvasGraph } from './layout'
 import { projectContextPrompt } from './contextBuilder'
 import { runAgentLoop } from './agentLoop'
+import { explicitlyRequestsExtraction, normalizeAssetRedo, uniqueActions } from './actionPolicy'
 import { buildMaterialBlock, type AgentAttachment } from './attachments'
 import { getAgentState } from './taskStore'
 import {
@@ -87,6 +88,8 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 2. 需求含糊（「帮我做」「开始」这类）时不要调用工具，在正文里主动问主题、时长、只要剧本还是全流程。
 3. 剧本严格两步、默认不同轮：generate_play 只写完整 Markdown 剧本。写剧本、改编、续写必须按 ai-short-film-screenwriter 的故事引擎、改编硬约束、节拍、AI 制作约束和逐场规则来；成稿前自检。必须含一句话故事、对抗引擎、完整梗概、人物小传（主角/对手/关键亲人，含欲望恐惧弧光）、环境与场景、每场场次任务、分场动作和对白；禁止口播/画面/时长四格表；禁止把传说压成高潮切片；禁止默片，相认/唤名/对峙/问答必须有出镜对白往来；不创建人物/场景/分镜节点。用户再说「继续 / 提炼节点」才 extract_cast。禁止同一轮既 generate_play 又 extract_cast，除非用户说了「全流程」。
 3b. extract_cast 每次只做当前缺的那一步：先人物，停；再场景，停；再分镜，停。禁止一次拆完。say 里必须说清刚做完哪一步、下一步是什么。已有节点后若用户要改某一组，用 extractStage，不要整表重来。
+3d. 严格区别「提取」与「重画」：重做/更新人物图、场景图是生成素材，不是 extract_cast，不要重拆剧本。批量重画用 generate_all_sheets / generate_all_scenes 等并传 regenerate:true；补缺图不要传。单个重做用精确生成工具（视频/关键帧等已有产物时传 regenerate:true）或 run_node。修改人物/场景提示词用 update_node，nodeId 分别是 subject:人物id / scene:场景id。
+3e. 用户修改画风时先用 set_visual_style(text=明确的新画风)，再修改与新风格冲突的节点提示词，最后生成。用户说「这个风格/相应风格」时从最近对话找明确确认的风格，不得只在回复里承诺。不要改剧本台词、角色身份或节点连接。用户明确「先人物图，再场景图」就按此顺序执行；「后续视频也用这个风格」只更新偏好，不代表现在要付费重生全部视频。
 3c. 时长是硬预算，不是修辞：用户说了「约 40 秒」「30S」「1 分钟」这类目标成片时长，seed_script 和 generate_play 的 text 必须原样带上这句时长（系统按它反推剧本场次、正文字数和分镜数量；丢了就会拆出二十几镜、成片几分钟）。拆分镜后会检测总时长，只允许比用户要求多 10 秒或少 10 秒，超出就打回重拆。用户要短片却没说时长，在 say 里问清目标时长再动手。
 4. 已有完整剧本时：
    - 用户说「续写 / 接着写 / 再写两场」→ continue_play，保留已有场次。
@@ -106,6 +109,7 @@ const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活�
 { "tool": "continue_play", "text": "续写方向，可选。例如再写两场、写父亲回家之后" }
 { "tool": "extract_cast" }
 { "tool": "extract_cast", "extractStage": "subjects|scenes|shots" }
+{ "tool": "set_visual_style", "text": "用户确认的新画风，如三维卡通动画" }
 { "tool": "generate_storyboard" }
 { "tool": "approve_play" }
 { "tool": "revise_shot", "shotId": "shot_xxx", "visualPrompt": "静帧/关键帧画面，可选", "imagePrompt": "实际出图提示词，可选", "videoPrompt": "实际发给视频模型的动态导演提示词：起幅、触发、动作链、运镜、落幅、同步声音", "voiceover": "可选", "duration": 5, "cameraMovement": "static|push|pull|pan|tilt|orbit" }
@@ -455,8 +459,10 @@ export async function runAgentTurn(
     replan: getAIMode() === 'real'
       ? async ({ error, completed, remaining, attempt }) => {
           const repaired = await planStudioActions({
-            system: `${TOOLS_HINT}\n\n你正在做失败恢复。用工具给出修复动作，说明写在正文里。先根据错误、已完成步骤和最新项目状态判断根因属于：缺少上游产物、输入不合法、产物验收失败、临时服务错误，还是鉴权/额度/用户权限问题。\n- 缺上游：先补最小依赖，再让原目标继续。\n- 输入或产物质量问题：只修改有问题的局部节点，再重试目标。\n- 临时服务错误：允许一次同目标重试。\n- 鉴权、额度、内容安全或必须由用户决定的问题：不要调用工具，不得绕过。\n不要重复已经成功的工具，不要扩大用户授权范围，不要重做无关产物。最多给 4 个修复工具；AgentLoop 会在修复动作后自动重新验收原目标。`,
+            system: `${TOOLS_HINT}\n\n你正在做失败恢复。返回替换失败这一步的方案（最多12步）；原来选错的工具必须移除。仍需重试原目标时必须显式列出它，后续尚未执行的队列由系统保留，不用重复列出。空工具列表表示停止，不会自动重试。\n先根据错误、已完成步骤和最新项目状态判断根因。\n- 缺上游：先补最小依赖，再列出原目标。\n- 工具选错：换用正确工具，例如重画角色图不能重提炼。\n- 输入或产物质量问题：只修改局部，再重试目标。\n- 临时服务错误：允许一次同目标重试。\n- 鉴权、额度、内容安全或必须由用户决定的问题：不要调用工具。\n不要重复已经成功的工具，不要扩大用户授权范围，不要重做无关产物。`,
             messages: [
+              ...history.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-8)
+                .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
               {
                 role: 'user',
                 content: `原任务：${userText}\n第 ${attempt} 次恢复。\n失败工具：${error.tool}\n错误：${error.message}\n已完成：${JSON.stringify(completed)}\n剩余：${JSON.stringify(remaining)}\n最新项目：${projectContextPrompt(userText)}`
@@ -470,7 +476,7 @@ export async function runAgentTurn(
           return applyPlayGate(
             dedupeActions(alignNewStoryActions(sanitizeActions(repaired.actions, baseText), baseText, history)),
             baseText
-          ).slice(0, 4)
+          ).slice(0, MAX_ACTIONS_PER_TURN)
         }
       : undefined,
     continue: getAIMode() === 'real' && autonomy !== 'assist'
@@ -478,6 +484,8 @@ export async function runAgentTurn(
           const next = await planStudioActions({
             system: `${TOOLS_HINT}\n\n你现在处于同一个任务的第 ${round} 次观察。工具已经真实执行，项目状态已经改变。请对照原始任务逐项验收：\n- 需要写/改提示词：确认目标分镜字段已经具体、可拍、动态，不是静态模板。\n- 需要出图/视频：确认对应资产字段已经存在；如果提示词刚改导致旧资产失效，再生成一次。\n- 需要操控节点：使用 focus_node、run_node、sync_canvas 或对应的精确生成工具。\n- 目标已经完成：不要调用工具，正文简洁报告实际完成内容。\n- 仍缺一步：只调用下一批必要工具。\n禁止重复已成功且未被后续修改失效的工具，禁止扩大原始请求范围，禁止把“建议用户自己点”冒充完成。`,
             messages: [
+              ...history.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-8)
+                .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
               {
                 role: 'user',
                 content: `原始任务：${userText}\n\n已执行动作：${JSON.stringify(completed)}\n执行结果：${JSON.stringify(observedResults)}\n\n最新画布与项目状态：\n${projectContextPrompt(userText)}`
@@ -1001,7 +1009,7 @@ function sanitizeActions(actions: any[], userText: string): any[] {
   // 只有「批量」动作（会一次性烧掉大量额度）才需要用户的话里有对应意图，
   // 单个动作放手让模型根据最新画布决定，避免在意料之外被静默丢弃。
   const askedBoard = /拆分镜|拆镜|故事板|出分镜|生成分镜|写剧本|提炼节点|拆剧本|续写|接着写|再写|分镜|场次/.test(t)
-  const askedSheet = /人设|角色图|四视图|人物图|角色/.test(t)
+  const askedSheet = /人设|角色图|四视图|人物图|人物角色图|角色/.test(t)
   const askedScene = /场景图|底板|出场景|生成场景|场景/.test(t)
   const askedPanel = /故事看板|看板图|线稿分镜|线稿/.test(t)
   const askedImage = /配图|出图|关键帧|画面|图片|静帧|作图|图/.test(t)
@@ -1023,13 +1031,7 @@ function sanitizeActions(actions: any[], userText: string): any[] {
 }
 
 function dedupeActions(actions: any[]): any[] {
-  const seen = new Set<string>()
-  return actions.filter((a) => {
-    const key = `${a.tool}:${a.subjectId || ''}:${a.sceneId || ''}:${a.shotId || ''}:${a.nodeId || ''}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
+  return uniqueActions(actions)
 }
 
 const SCRIPT_REWRITE = /重新写(?:完整)?剧本|重写(?:完整)?剧本|改写剧本|换(?:一个|成).{0,12}(?:故事|剧本)|新故事|新剧本/
@@ -1041,14 +1043,16 @@ function protectImportedScript(actions: any[], userText: string): any[] {
   const kept = actions.filter(
     (item) => !['generate_play', 'generate_storyboard', 'seed_script'].includes(String(item?.tool || ''))
   )
-  const askedSplit = /拆分镜|拆镜|提炼|分镜|出节点|拆剧本|拆人物|拆场景/.test(userText)
-  if (askedSplit && !kept.some((item) => item.tool === 'extract_cast')) {
+  const askedSplit = explicitlyRequestsExtraction(userText)
+  if (askedSplit && actions.length && !kept.some((item) => item.tool === 'extract_cast')) {
     kept.unshift({ tool: 'extract_cast' })
   }
   return kept
 }
 
 function applyPlayGate(actions: any[], userText: string): any[] {
+  if (!actions.length) return actions
+  actions = normalizeAssetRedo(actions, userText, useProjectStore().current)
   actions = protectImportedScript(actions, userText)
   const all = wantAll(userText)
   const p = useProjectStore().current
