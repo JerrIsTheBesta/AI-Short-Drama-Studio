@@ -57,6 +57,8 @@ export type AgentToolName =
   | 'update_node'
   | 'run_node'
   | 'optimize_node_prompt'
+  | 'inspect_canvas_image'
+  | 'continue_from_video_tail'
   | 'remember'
   | 'forget'
 
@@ -83,6 +85,7 @@ export interface AgentToolAction {
   extractStage?: ExtractStage
   /** Explicitly regenerate existing assets, rather than only filling missing ones. */
   regenerate?: boolean
+  referenceIndex?: number
 }
 
 export interface ToolExecutionContext {
@@ -474,6 +477,21 @@ function spotNextToSource(sourceId: string, fallbackX: number, fallbackY: number
 }
 
 const definitions: ToolDefinition[] = [
+  {
+    name: 'inspect_canvas_image', phase: 0, timeoutMs: 135_000, required: ['nodeId'], estimate: oneLlm,
+    async execute(action, ctx) {
+      const { inspectCanvasImage } = await import('./agentMedia')
+      ctx.onLog('正在用视觉模型核对画布图片…')
+      return inspectCanvasImage(action.nodeId!, action.referenceIndex, action.text, ctx.signal)
+    }
+  },
+  {
+    name: 'continue_from_video_tail', phase: 2, timeoutMs: 300_000, required: ['nodeId'], estimate: () => ({ calls: 2, seconds: 120 }),
+    async execute(action, ctx) {
+      const { createTailContinuation } = await import('./agentMedia')
+      return createTailContinuation(action.nodeId!, action.text || '', ctx.signal, ctx.onLog)
+    }
+  },
   {
     name: 'set_visual_style', phase: 0, timeoutMs: 5_000, required: ['text'], estimate: noCost,
     async execute(action) {
@@ -977,7 +995,7 @@ const definitions: ToolDefinition[] = [
       }
 
       if (!blocking.length && !warnings.length) {
-        return `体检通过。剧本、${subjects.length} 个人物、${scenes.length} 个场景、${(p.shots ?? []).length} 个分镜、画布 ${free.length} 个生成节点都没问题。`
+        return `体检通过。剧本、${subjects.length} 个人物、${scenes.length} 个场景、${(p.shots ?? []).length} 个分镜都没问题。画布一共 ${nodes.length} 个节点。`
       }
       const lines: string[] = []
       if (blocking.length) lines.push(`【卡住】\n- ${blocking.join('\n- ')}`)
@@ -1096,8 +1114,12 @@ export function validateToolAction(raw: unknown): AgentToolAction {
       throw new AgentToolError(`${name} 缺少参数 ${key}`, name, 'invalid_action')
     }
   }
+  if (action.referenceIndex !== undefined && (!Number.isSafeInteger(action.referenceIndex) || Number(action.referenceIndex) < 1)) {
+    throw new AgentToolError('参考图编号必须从 1 开始', name, 'invalid_action')
+  }
   return {
     tool: name,
+    ...(typeof action.referenceIndex === 'number' ? { referenceIndex: action.referenceIndex } : {}),
     ...(typeof action.regenerate === 'boolean' ? { regenerate: action.regenerate } : {}),
     ...(typeof action.text === 'string' ? { text: action.text } : {}),
     ...(typeof action.subjectId === 'string' ? { subjectId: action.subjectId } : {}),

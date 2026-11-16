@@ -3,6 +3,8 @@ import type { Project, Shot } from '@/types'
 import { getAgentState } from './taskStore'
 import { effectiveShotAudioMode, needsExternalTts } from '@/utils/shot'
 import { shotsMissingKeyframe } from '@/utils/videoStill'
+import { canvasInspectionRefs, canvasVisionReady } from './agentMedia'
+import { canvasNodeOutputAssetId, canvasNodeProducesImage } from './references'
 
 /** 明细段最多带几段：上下文是给模型规划用的摘要，不是全量转储 */
 export const MAX_DETAIL_SECTIONS = 5
@@ -17,7 +19,7 @@ const SECTION_RULES: { key: SectionKey; test: RegExp }[] = [
     key: 'shots',
     test: /分镜|镜|镜头|关键帧|画面|出图|配图|图生视频|视频|配音|口播|台词|旁白|运镜|景别/
   },
-  { key: 'canvas', test: /节点|画布|连线|参考图|选中|整理|删除|布局|生成节点|跑一下/ }
+  { key: 'canvas', test: /节点|画布|连线|参考图|选中|整理|删除|布局|生成节点|跑一下|图|是谁/ }
 ]
 
 /** 明确要看全貌的话，放宽到带所有有数据的段（仍封顶 MAX 段） */
@@ -174,6 +176,10 @@ export function buildProjectContext(userText: string) {
                 duration: node.data.duration,
                 status: node.status ?? 'idle',
                 hasOutput: Boolean(node.data.outputAssetId),
+                ...(canvasVisionReady() ? {
+                  imageOutput: canvasNodeProducesImage(node) && Boolean(canvasNodeOutputAssetId(p, node)),
+                  imageReferenceCount: canvasInspectionRefs(p, node).length
+                } : {}),
                 error: node.error
               })),
               /** 连线关系，智能体据此判断谁接在谁后面、哪些节点还没下游 */

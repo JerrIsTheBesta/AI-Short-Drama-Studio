@@ -272,7 +272,7 @@ export async function extractVideoThumbnail(blob: Blob): Promise<Blob> {
 }
 
 /** 提取视频最后一帧（首尾帧连拍模式：上一镜的末帧 = 下一镜的首帧） */
-export async function extractVideoLastFrame(blob: Blob): Promise<Blob> {
+export async function extractVideoLastFrame(blob: Blob, options?: { preserveEnding?: boolean }): Promise<Blob> {
   const typed = playableMediaBlob(blob, 'video')
   const url = URL.createObjectURL(typed)
   const v = document.createElement('video')
@@ -303,7 +303,9 @@ export async function extractVideoLastFrame(blob: Blob): Promise<Blob> {
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('无法绘制末帧')
     // 末帧附近可能有编码噪声，向前微退半帧并在两个采样点里取非黑的那帧。
-    const candidates = [Math.max(0.04, dur - 0.08), Math.max(0.04, dur - 0.25)]
+    const candidates = options?.preserveEnding
+      ? [Math.max(0, dur - 0.001), Math.max(0, dur - 0.025)]
+      : [Math.max(0.04, dur - 0.08), Math.max(0.04, dur - 0.25)]
     let lastJpeg: Blob | null = null
     for (const t of candidates) {
       try {
@@ -321,7 +323,7 @@ export async function extractVideoLastFrame(blob: Blob): Promise<Blob> {
         canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('末帧为空'))), 'image/jpeg', 0.9)
       })
       lastJpeg = jpeg
-      if (!canvasIsDark(ctx, canvas.width, canvas.height)) return jpeg
+      if (options?.preserveEnding || !canvasIsDark(ctx, canvas.width, canvas.height)) return jpeg
     }
     if (lastJpeg) return lastJpeg
     throw new Error('无法绘制末帧')

@@ -381,8 +381,10 @@ const selectedGenNode = computed(() => {
   return n
 })
 const selectedKindLabel = computed(() =>
-  selectedGenNode.value?.type === 'videoGen' ? '图生视频' : '生图'
+  selectedGenNode.value?.type === 'videoGen' ? '图生视频' : selectedGenNode.value ? '生图' :
+    ['shotVideo', 'compose', 'final', 'export'].includes(props.selectedNode?.type || '') ? '视频' : '画布节点'
 )
+const canContinueSelected = computed(() => ['videoGen', 'shotVideo', 'compose', 'final', 'export'].includes(props.selectedNode?.type || ''))
 const polishChips = [
   { label: '更有画面感', text: '更有画面感：补构图、光影、材质和空气感，不改原文格式' },
   { label: '写清动作表情', text: '把眉眼嘴、手和身体怎么动写具体，不改原文格式' },
@@ -587,7 +589,7 @@ async function sendText(text: string) {
     const result = await runAgentTurn(messages.value, t, onProgress, {
       signal: turnController.signal,
       autonomy: autonomy.value,
-      selectedNodeId: selectedGenNode.value?.id,
+      selectedNodeId: props.selectedNode?.id,
       attachments: attachOptions
     })
     thinking.value = false
@@ -665,25 +667,25 @@ function visibleRows(rows: TraceRow[]) {
 
 <template>
   <aside class="agent">
-    <section class="target" :class="{ empty: !selectedGenNode }">
+    <section class="target" :class="{ empty: !selectedNode }">
       <p class="k">当前选中</p>
-      <p v-if="selectedGenNode" class="name">
-        {{ selectedGenNode.data.label || selectedGenNode.id }}
+      <p v-if="selectedNode" class="name">
+        {{ selectedNode.data.label || selectedNode.id }}
         <small>{{ selectedKindLabel }}</small>
       </p>
       <p v-else class="name dim">还没选节点。点画布上的图片或视频节点，我来改它的提示词。</p>
-      <p v-if="selectedGenNode?.data.prompt" class="preview">{{ selectedGenNode.data.prompt }}</p>
-      <div v-if="selectedGenNode && !busy" class="target-chips">
-        <button v-for="c in polishChips" :key="c.label" type="button" @click="sendText(c.text)">
+      <p v-if="selectedNode?.data.prompt" class="preview">{{ selectedNode.data.prompt }}</p>
+      <div v-if="(selectedGenNode || canContinueSelected) && !busy" class="target-chips">
+        <button v-for="c in selectedGenNode ? polishChips : []" :key="c.label" type="button" @click="sendText(c.text)">
           {{ c.label }}
         </button>
+        <button v-if="canContinueSelected" type="button" @click="sendText('用这个节点最后一帧继续往下拍')">用末帧续拍</button>
       </div>
     </section>
 
     <div ref="box" class="msgs">
       <template v-for="item in feed" :key="item.id">
         <div v-if="item.type === 'msg'" class="msg" :class="item.role">
-          <span v-if="item.role === 'assistant'" class="msg-avatar"><i /></span>
           <div class="bubble">
             <AgentRichText :content="item.content" />
             <button
@@ -1008,13 +1010,17 @@ function visibleRows(rows: TraceRow[]) {
 
 <style scoped>
 .agent {
+  --color-text-1: #c8c8ce;
+  --color-border: transparent;
+  --color-border-strong: transparent;
   position: relative;
   width: 100%;
   height: 100%;
   flex-shrink: 0;
   min-width: 0;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-1);
+  border-right: none;
+  background: #161618;
+  color: #c8c8ce;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1025,13 +1031,12 @@ function visibleRows(rows: TraceRow[]) {
 .target {
   margin: 12px 14px 8px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(126, 180, 255, 0.06), rgba(126, 180, 255, 0.02));
+  border: none;
+  border-radius: 4px;
+  background: #1c1c1f;
 }
 .target.empty {
-  border-style: dashed;
-  background: none;
+  background: transparent;
 }
 .k {
   margin: 0;
@@ -1076,16 +1081,18 @@ function visibleRows(rows: TraceRow[]) {
 }
 .target-chips button {
   margin: 0;
-  padding: 3px 9px;
-  border: 1px solid rgba(126, 180, 255, 0.3);
-  border-radius: 99px;
-  background: rgba(126, 180, 255, 0.08);
-  color: var(--color-accent);
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  background: #26262b;
+  color: #b7b7bc;
   font-size: 11px;
   cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 .target-chips button:hover {
-  background: rgba(126, 180, 255, 0.16);
+  background: #323238;
+  color: #d4d4d8;
 }
 
 /* ── 消息流 ── */
@@ -1114,47 +1121,27 @@ function visibleRows(rows: TraceRow[]) {
 .msg.user {
   justify-content: flex-end;
 }
-.msg-avatar {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin-top: 2px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #7eb4ff 0%, #a78bfa 60%, #f0abfc 100%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.msg-avatar i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: rgba(16, 19, 26, 0.8);
-}
 .bubble {
   min-width: 0;
   max-width: 100%;
   padding: 9px 12px;
-  border-radius: 12px;
+  border: none;
+  border-radius: 4px;
   font-size: 13px;
   line-height: 1.7;
   overflow-wrap: anywhere;
   word-break: break-word;
+  color: #c8c8ce;
 }
 .msg.user .bubble {
   max-width: 88%;
   padding: 8px 12px;
-  border-radius: 14px 14px 4px 14px;
-  background: linear-gradient(135deg, rgba(126, 180, 255, 0.22), rgba(167, 139, 250, 0.18));
-  border: 1px solid rgba(126, 180, 255, 0.25);
-  color: var(--color-text-1);
+  background: #2c2c32;
 }
 .msg.assistant .bubble {
   position: relative;
   flex: 1;
-  border: 1px solid var(--color-border);
-  border-radius: 4px 12px 12px 12px;
-  background: var(--color-bg-2);
+  background: #1c1c20;
 }
 .bubble-copy {
   position: absolute;
@@ -1164,13 +1151,13 @@ function visibleRows(rows: TraceRow[]) {
   height: 22px;
   margin: 0;
   padding: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-1);
-  color: var(--color-text-4);
+  border: none;
+  border-radius: 4px;
+  background: #26262b;
+  color: #8d8d93;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1179,13 +1166,13 @@ function visibleRows(rows: TraceRow[]) {
   opacity: 1;
 }
 .bubble-copy:hover {
-  color: var(--color-text-1);
-  border-color: rgba(126, 180, 255, 0.5);
+  color: #d4d4d8;
+  background: #323238;
 }
 .bubble-copy.ok {
   opacity: 1;
-  color: var(--color-success);
-  border-color: rgba(74, 222, 128, 0.5);
+  color: #b7c9be;
+  background: #24302a;
 }
 .bubble-copy svg {
   width: 12px;
@@ -1201,7 +1188,7 @@ function visibleRows(rows: TraceRow[]) {
   flex-direction: column;
   gap: 8px;
   padding: 10px 0 2px;
-  border-top: 1px solid var(--color-border);
+  border-top: none;
   min-width: 0;
 }
 
@@ -1243,7 +1230,7 @@ function visibleRows(rows: TraceRow[]) {
   margin: 0;
   padding: 5px 12px;
   border: none;
-  border-radius: 99px;
+  border-radius: 4px;
   background: transparent;
   color: var(--color-text-3);
   font-size: 11px;
@@ -1258,7 +1245,7 @@ function visibleRows(rows: TraceRow[]) {
 /* ── 输入区 ── */
 .composer {
   padding: 10px 12px 12px;
-  border-top: 1px solid var(--color-border);
+  border-top: none;
   min-width: 0;
 }
 .estimate {
@@ -1270,15 +1257,16 @@ function visibleRows(rows: TraceRow[]) {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: 14px;
+  background: #1c1c1f;
+  border: none;
+  border-radius: 4px;
   padding: 8px 8px 6px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: outline-color 0.2s ease, background-color 0.2s ease;
 }
 .box:focus-within {
-  border-color: rgba(126, 180, 255, 0.5);
-  box-shadow: 0 0 0 3px rgba(126, 180, 255, 0.1);
+  outline-color: rgba(255, 255, 255, 0.12);
 }
 textarea {
   width: 100%;
@@ -1386,9 +1374,9 @@ textarea {
   z-index: 8;
   width: 220px;
   padding: 6px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-bg-1);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c1f;
   box-shadow: var(--shadow-md);
 }
 .model-menu {
@@ -1430,10 +1418,10 @@ textarea {
   height: 30px;
   margin: 0;
   padding: 0 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
+  border: none;
+  border-radius: 4px;
+  background: #26262b;
+  color: #d0d0d4;
   font-size: 12px;
   cursor: pointer;
 }
@@ -1455,9 +1443,9 @@ textarea {
 .pref-panel {
   position: fixed;
   z-index: 2000;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-1);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c1f;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
   overflow: auto;
   animation: pref-pop 0.12s ease-out;
@@ -1501,7 +1489,7 @@ textarea {
 .pref-models {
   min-width: 0;
   padding-right: 10px;
-  border-right: 1px solid var(--color-border);
+  border-right: none;
   max-height: 520px;
   overflow: auto;
 }
@@ -1510,17 +1498,17 @@ textarea {
   width: 100%;
   height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
+  border: none;
+  border-radius: 4px;
+  background: #26262b;
+  color: #c8c8ce;
   font-size: 12px;
 }
 .knowledge-preference { padding: 14px; }
 .knowledge-preference .pref-hint { margin: 4px 0 14px; }
 .knowledge-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
-.knowledge-option { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-2); color: var(--color-text-2); text-align: left; cursor: pointer; }
-.knowledge-option.on { border-color: var(--color-accent); color: var(--color-text-1); background: var(--color-fill); }
+.knowledge-option { padding: 10px 12px; border: none; border-radius: 4px; background: #1c1c20; color: #b7b7bc; text-align: left; cursor: pointer; }
+.knowledge-option.on { color: #d4d4d8; background: #2c2c32; }
 .pref-k-gap {
   margin-top: 14px;
 }
@@ -1533,17 +1521,16 @@ textarea {
   height: 32px;
   min-width: 72px;
   padding: 0 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg-2);
-  color: var(--color-text-2);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c20;
+  color: #b7b7bc;
   font-size: 12px;
   cursor: pointer;
 }
 .res-btn.on {
-  border-color: var(--color-accent);
-  color: var(--color-text-1);
-  background: var(--grad-primary-soft, rgba(126, 180, 255, 0.16));
+  color: #d4d4d8;
+  background: #2c2c32;
 }
 
 /* 偏好面板里的分组小标题（视频工作流 / 已配置接入） */
@@ -1633,8 +1620,8 @@ textarea {
   width: 56px;
   height: 56px;
   margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border: none;
+  border-radius: 4px;
   background: transparent;
   color: var(--color-text-3);
   cursor: pointer;
@@ -1643,9 +1630,8 @@ textarea {
   background: var(--color-fill);
 }
 .ratio-item.on {
-  border-color: var(--color-primary, #7c6cff);
-  background: var(--color-fill);
-  color: var(--color-text-1);
+  background: #2c2c32;
+  color: #d4d4d8;
 }
 .ratio-box {
   border: 1.5px solid currentColor;
@@ -1710,7 +1696,7 @@ textarea {
 .tip {
   margin: 6px 2px 2px;
   padding-top: 6px;
-  border-top: 1px solid var(--color-border);
+  border-top: none;
   font-size: 11px;
   line-height: 1.45;
   color: var(--color-text-4);
@@ -1738,23 +1724,23 @@ textarea {
   stroke-linejoin: round;
 }
 .send {
-  background: linear-gradient(135deg, #7eb4ff, #a78bfa);
-  color: #fff;
-  transition: transform 0.12s, box-shadow 0.2s;
+  border-radius: 4px;
+  background: #3a3a40;
+  color: #e4e4e7;
+  transition: background 0.18s ease;
 }
 .send:hover:not(:disabled) {
-  box-shadow: 0 4px 14px rgba(126, 180, 255, 0.35);
-  transform: translateY(-1px);
+  background: #48484f;
 }
 .send:disabled {
   opacity: 0.35;
   cursor: default;
 }
 .stop {
-  background: transparent;
-  color: var(--color-error);
-  border: 1px solid rgba(185, 28, 28, 0.35);
-  border-radius: 10px;
+  background: #2a2222;
+  color: #c4a0a0;
+  border: none;
+  border-radius: 4px;
 }
 .stop svg {
   fill: currentColor;

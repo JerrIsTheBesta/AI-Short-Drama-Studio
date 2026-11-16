@@ -213,7 +213,7 @@ function labelOf(a: Asset) {
             :title="emptyTitle"
             :description="emptyDesc"
           />
-          <div v-else class="grid">
+          <div v-else class="grid" :class="{ 'library-grid': tab === 'library' && kind === 'image' }">
             <button
               v-for="a in list"
               :key="a.id"
@@ -275,13 +275,19 @@ function labelOf(a: Asset) {
 }
 .modal {
   width: min(960px, 100%);
-  max-height: min(86vh, 820px);
+  max-height: min(86vh, 820px, calc(100dvh - 48px));
   background: var(--color-bg-1);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-lg);
+}
+.head,
+.tabs,
+.folder-rail,
+.foot {
+  flex-shrink: 0;
 }
 .head {
   display: flex;
@@ -367,13 +373,26 @@ function labelOf(a: Asset) {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  /* Constrain the scroll viewport, not the rows inside it. Auto rows can
+     otherwise shrink their overflow-hidden button cards to thin strips. */
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 10px;
   padding: 16px 20px;
   overflow-y: auto;
+  min-height: 0;
   flex: 1;
+}
+.library-grid {
+  --library-preview-height: clamp(180px, 25vh, 248px);
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
+  grid-auto-rows: minmax(calc(var(--library-preview-height) + 44px), max-content);
 }
 .card {
   position: relative;
+  display: block;
+  min-width: 0;
+  padding: 0;
   text-align: left;
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
@@ -400,6 +419,13 @@ function labelOf(a: Asset) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.library-grid .thumb {
+  aspect-ratio: auto;
+  height: var(--library-preview-height);
+}
+.library-grid .thumb img {
+  object-fit: contain;
 }
 .zoom {
   position: absolute;

@@ -1291,18 +1291,19 @@ function goClassic() {
   gap: 6px;
   height: 30px;
   padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 38%, var(--color-border));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-1));
-  color: var(--color-text-1);
+  border: none;
+  border-radius: 4px;
+  background: #26262b;
+  color: #b7b7bc;
   font-size: 11px;
   white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 .bulk-optimize-btn:hover:not(:disabled) {
-  border-color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-bg-1));
+  background: #323238;
+  color: #d4d4d8;
 }
 .bulk-optimize-btn:disabled { opacity: .65; cursor: wait; }
 .empty-hint {
@@ -1468,7 +1469,7 @@ function goClassic() {
 .agent-shell :deep(.agent) {
   width: 100%;
   height: 100%;
-  border-right: 1px solid var(--color-border);
+  border-right: none;
 }
 .agent-resizer {
   position: absolute;

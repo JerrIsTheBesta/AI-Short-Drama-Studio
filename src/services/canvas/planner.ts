@@ -27,11 +27,12 @@ export interface AgentPlan {
 }
 
 export function stepKeyOf(action: AgentToolAction): string {
-  return `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || action.extractStage || ''}`
+  return `${action.tool}:${action.shotId || action.subjectId || action.sceneId || action.nodeId || action.extractStage || ''}${action.referenceIndex ? `:${action.referenceIndex}` : ''}`
 }
 
 function stepTitle(action: AgentToolAction): string {
   const label = `${action.regenerate ? '重新' : ''}${TOOL_LABEL[action.tool] || action.tool}`
+  if (action.tool === 'inspect_canvas_image' && action.referenceIndex) return `${label} · 图${action.referenceIndex}`
   if (action.tool === 'optimize_node_prompt' || action.tool === 'update_node' || action.tool === 'run_node') {
     return action.nodeId ? `${label} ${action.nodeId}` : label
   }

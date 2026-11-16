@@ -243,6 +243,8 @@ export const TOOL_LABEL: Record<string, string> = {
   update_node: '修改生成节点',
   run_node: '生成节点',
   optimize_node_prompt: '优化节点提示词',
+  inspect_canvas_image: '看图核对素材',
+  continue_from_video_tail: '提取末帧并创建续拍节点',
   remember: '记住偏好',
   forget: '删除记忆',
   focus_node: '定位画布节点'

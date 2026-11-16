@@ -36,6 +36,41 @@ const settings = useSettingsStore()
 const toast = useToastStore()
 
 const keyword = ref('')
+const SIDE_WIDTH_KEY = 'aicut:scripts:side-width'
+const AGENT_WIDTH_KEY = 'aicut:scripts:agent-width'
+
+function storedWidth(key: string, fallback: number, min: number, max: number) {
+  const raw = localStorage.getItem(key)
+  const n = Number(raw)
+  if (raw == null || raw === '' || !Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+const sideWidth = ref(storedWidth(SIDE_WIDTH_KEY, 220, 168, 420))
+const agentWidth = ref(storedWidth(AGENT_WIDTH_KEY, 320, 260, 560))
+const resizingPane = ref<'side' | 'agent' | ''>('')
+
+function startPaneResize(which: 'side' | 'agent', ev: PointerEvent) {
+  ev.preventDefault()
+  const startX = ev.clientX
+  const start = which === 'side' ? sideWidth.value : agentWidth.value
+  resizingPane.value = which
+  const move = (e: PointerEvent) => {
+    const dx = e.clientX - startX
+    if (which === 'side') sideWidth.value = Math.min(420, Math.max(168, start + dx))
+    else agentWidth.value = Math.min(560, Math.max(260, start - dx))
+  }
+  const stop = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', stop)
+    resizingPane.value = ''
+    localStorage.setItem(SIDE_WIDTH_KEY, String(sideWidth.value))
+    localStorage.setItem(AGENT_WIDTH_KEY, String(agentWidth.value))
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', stop)
+}
+
 const activeId = ref('')
 const detailOpen = ref(false)
 const activeTab = ref<EditorTab>('episodes')
@@ -329,7 +364,7 @@ const scriptReferenceType = computed({
   set: (value: string) => settings.update({ scriptReferenceType: normalizeScriptReference(value) })
 })
 const episodeWriting = ref(false)
-const writingPhase = ref<'episode' | 'outline'>('episode')
+const writingPhase = ref<'episode' | 'outline' | 'chat'>('episode')
 const episodeElapsed = ref(0)
 let episodeTimer: ReturnType<typeof setInterval> | undefined
 let episodeAbort: AbortController | null = null
@@ -479,6 +514,90 @@ async function confirmEpisodeAndContinue() {
   } catch (error: any) { toast.error(error?.message || '保存失败，请重试') }
 }
 
+function obviousWriterChat(hint: string) {
+  const text = hint.trim()
+  return /^(?:你好|您好|嗨|hi|hello|hey|在吗|在不在|谢谢|谢了|辛苦了?|哈哈+|嗯+|哦+|啊+|好的|好呀|早安|晚安|你是谁|你能干什么|你能做什么)[\s!！。.~～?？]*$/i.test(text)
+    || /^(?:先别写|别写了|先不要写|等一下|等会儿|暂停|不用了|算了)[\s!！。]*$/.test(text)
+}
+
+async function classifyWriterIntent(hint: string, signal: AbortSignal): Promise<'chat' | 'write'> {
+  if (obviousWriterChat(hint)) return 'chat'
+  try {
+    const resp = await callLLM({
+      model: llmModel.value,
+      disableThinking: true,
+      temperature: 0,
+      timeoutMs: 20_000,
+      signal,
+      messages: [
+        {
+          role: 'system',
+          content: '判断用户这句话要不要改剧本。只输出 chat 或 write。chat：打招呼、闲聊、提问、评价、讨论进度、让你先别写。提到「剧本」或「这一集」但没有要求落笔，仍是 chat。write：明确要求写出或修改正文、大纲、对白、情节。例子：你好→chat；这一集钩子够吗→chat；把这一集改得更狠→write。'
+        },
+        { role: 'user', content: hint }
+      ]
+    })
+    return /^write\b/i.test(String(resp.content || '').trim()) ? 'write' : 'chat'
+  } catch (error: any) {
+    if (signal.aborted) throw error
+    return /(?:请|帮我|把).{0,12}(?:写|改|续)|^(?:写|改|续|扩|润色|重写|生成|创作|补)/.test(hint) ? 'write' : 'chat'
+  }
+}
+
+async function replyAsWriter(hint: string) {
+  const id = activeId.value
+  const current = draft.value
+  if (!id || !current || !llmModel.value) return
+  writingPhase.value = 'chat'
+  const controller = startWriting()
+  addWritingMessage(id, { role: 'user', content: hint, episode: current.index, time: Date.now() })
+  const recent = writingMessages.value
+    .filter((message) => message.episode === current.index || message.episode < 0)
+    .slice(-8)
+    .map((message) => `${message.role === 'user' ? '用户' : '助手'}：${message.content}`)
+    .join('\n')
+  const plan = storyPlan.value
+  try {
+    const resp = await callLLM({
+      model: llmModel.value,
+      disableThinking: true,
+      temperature: 0.5,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+      messages: [
+        {
+          role: 'system',
+          content: '你是剧本助手。用户没有要求落笔时，只在对话里回答，不要输出剧本正文，也不要说已经写进某一集。可以讨论人物、情节、进度，或回一句招呼。简体中文，简短口语。'
+        },
+        {
+          role: 'user',
+          content: `剧本：${activeDoc.value?.title || '未命名剧本'}\n当前：第 ${current.index + 1} 集 ${current.title}\n创作进度：${plan ? plan.stage : '没有整剧大纲'}\n已有正文节选：\n${current.content.trim().slice(0, 800) || '（空）'}\n最近对话：\n${recent || '（无）'}\n\n用户刚说：${hint}`
+        }
+      ]
+    })
+    const text = String(resp.content || '').trim()
+    if (controller.signal.aborted || activeId.value !== id) return
+    addWritingMessage(id, {
+      role: 'assistant',
+      content: text || '我在。想改这一集，直接说要改哪里。',
+      episode: current.index,
+      time: Date.now()
+    })
+    episodeHint.value = ''
+  } catch (error: any) {
+    if (activeId.value === id) {
+      addWritingMessage(id, {
+        role: 'assistant',
+        content: controller.signal.aborted ? '已取消。' : `没接上：${error?.message || '请再发一次'}`,
+        episode: current.index,
+        time: Date.now()
+      })
+    }
+  } finally {
+    finishWriting()
+  }
+}
+
 async function writeCurrentEpisode() {
   if (!draft.value || episodeWriting.value) return
   if (!llmModel.value) {
@@ -490,6 +609,22 @@ async function writeCurrentEpisode() {
   if (writingHistoryLoading.value) { toast.warn('正在读取对话记录，请稍候'); return }
   if (storyPlan.value?.stage === 'outline-review' && /^\s*(?:确认|通过|开始写|可以|下一步)\s*[。！!]*$/.test(hint)) { await confirmStoryPlan(); return }
   if (storyPlan.value?.stage === 'episode-review' && /^\s*(?:确认|通过|继续|下一集|可以|下一步)\s*[。！!]*$/.test(hint)) { await confirmEpisodeAndContinue(); return }
+  if (hint) {
+    writingPhase.value = 'chat'
+    const controller = startWriting()
+    let turn: 'chat' | 'write' = 'chat'
+    try {
+      turn = await classifyWriterIntent(hint, controller.signal)
+    } catch {
+      finishWriting()
+      return
+    }
+    finishWriting()
+    if (turn === 'chat') {
+      await replyAsWriter(hint)
+      return
+    }
+  }
   if (storyPlan.value?.stage === 'outline-review' && hint && writingMode.value !== 'episode') { await writeStoryPlan(hint, true); return }
   const wantsSeries = writingMode.value === 'series' || (writingMode.value === 'auto' && (/(?:整部|整剧|全集|分集大纲|分集目录|多集)|(?:写|创作|策划|生成).{0,30}(?:短剧|剧本)(?!.*(?:本集|这一集|当前集))/.test(hint) || (!existing && /题材|科幻|悬疑|古装|都市|甜宠|穿越|重生|家庭伦理/.test(hint) && !/本集|这一集|当前集/.test(hint))))
   if (wantsSeries && hint) {
@@ -685,7 +820,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page" :class="{ detail: detailOpen }">
+  <div class="page" :class="{ detail: detailOpen, resizing: resizingPane }">
     <header class="page-head">
       <div>
         <div class="kicker">剧本创作</div>
@@ -698,7 +833,16 @@ onMounted(async () => {
         <GradientButton type="ghost" @click="router.push('/')">返回首页</GradientButton>
         <GradientButton v-if="detailOpen" type="ghost" @click="backToLibrary">返回剧本列表</GradientButton>
         <GradientButton type="ghost" @click="router.push('/drafts')">资源库</GradientButton>
-        <GradientButton type="secondary" icon="📥" title="支持 Markdown、TXT、README 和 Word" @click="importScript">导入剧本</GradientButton>
+        <GradientButton type="secondary" title="支持 Markdown、TXT、README 和 Word" @click="importScript">
+          <template #icon>
+            <svg class="import-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3.25 10.25v1.5a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1v-1.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M8 2.75v6.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+              <path d="M5.35 6.55 8 9.2l2.65-2.65" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </template>
+          导入剧本
+        </GradientButton>
         <GradientButton icon="＋" @click="createScript">新建剧本</GradientButton>
       </div>
     </header>
@@ -726,7 +870,7 @@ onMounted(async () => {
     </div>
 
     <div v-else class="workspace">
-      <aside class="ep-side">
+      <aside class="ep-side" :style="{ width: sideWidth + 'px' }">
         <div class="side-head">
           <strong>集数</strong>
           <span class="count">{{ episodes.length }}</span>
@@ -746,6 +890,7 @@ onMounted(async () => {
         </div>
         <button class="side-foot" @click="addEpisode">＋ 新增一集</button>
       </aside>
+      <div class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整集数栏宽度" @pointerdown="startPaneResize('side', $event)" />
 
       <section class="ep-main">
         <GlassCard v-if="activeDoc && draft" padding="none" class="editor-card">
@@ -799,7 +944,7 @@ onMounted(async () => {
                 :readonly="episodeWriting"
                 @input="scheduleFlush"
               />
-              <div v-if="episodeWriting" class="episode-writing-overlay" role="status" aria-live="polite">
+              <div v-if="episodeWriting && writingPhase !== 'chat'" class="episode-writing-overlay" role="status" aria-live="polite">
                 <span class="episode-writing-spinner" aria-hidden="true" />
                 <strong>{{ writingPhase === 'outline' ? 'AI 正在策划大纲' : 'AI 正在创作这一集' }}</strong>
                 <span>已等待 {{ episodeElapsed }} 秒 · {{ writingPhase === 'outline' ? '完成后请先确认大纲' : '完成后自动填入正文' }}</span>
@@ -815,13 +960,14 @@ onMounted(async () => {
           </div>
         </GlassCard>
       </section>
-      <aside v-if="activeDoc && draft" class="writing-agent" aria-label="AI 剧本助手">
+      <div v-if="activeDoc && draft" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整剧本助手宽度" @pointerdown="startPaneResize('agent', $event)" />
+      <aside v-if="activeDoc && draft" class="writing-agent" :style="{ width: agentWidth + 'px' }" aria-label="AI 剧本助手">
         <header class="writing-agent-head">
           <span class="writing-agent-icon" aria-hidden="true">✦</span>
           <div><strong>剧本助手</strong><p>一起打磨人物、对白和故事</p></div>
         </header>
         <div ref="writingList" class="writing-history" aria-live="polite">
-          <div class="writing-message assistant"><span>剧本助手</span><p>告诉我你想写什么，或说说这一集需要怎样修改。完成后正文会显示在左侧编辑区。</p></div>
+          <div class="writing-message assistant"><span>剧本助手</span><p>可以直接聊天。只有你明确要写或修改时，我才会改左侧正文。</p></div>
           <p v-if="writingHistoryLoading" class="writing-note">正在读取对话记录…</p>
           <p v-if="writingHistoryError" class="writing-note">对话记录读取或保存失败，正文不受影响。</p>
           <div v-for="(message, i) in writingMessages" :key="`${message.time}-${i}`" class="writing-message" :class="message.role">
@@ -829,7 +975,7 @@ onMounted(async () => {
             <p>{{ message.content }}</p>
           </div>
           <div v-if="episodeWriting" class="writing-message assistant writing-pending" role="status">
-            <span>剧本助手</span><p><i class="writing-pulse" /> {{ writingPhase === 'outline' ? '正在策划大纲' : '正在创作本集' }}，已等待 {{ episodeElapsed }} 秒</p>
+            <span>剧本助手</span><p><i class="writing-pulse" /> {{ writingPhase === 'outline' ? '正在策划大纲' : writingPhase === 'chat' ? '正在回复' : '正在创作本集' }}，已等待 {{ episodeElapsed }} 秒</p>
           </div>
           <section v-if="storyPlan" class="story-plan">
             <div class="story-plan-heading"><strong>整剧策划 · {{ storyPlan.episodes.length }} 集</strong><button type="button" :disabled="episodeWriting" @click="planEditing = !planEditing">{{ planEditing ? '收起' : '查看大纲' }}</button></div>
@@ -867,21 +1013,25 @@ onMounted(async () => {
 
 <style scoped>
 .page {
-  --color-bg-0: #0c0b14;
-  --color-bg-1: #141226;
-  --color-bg-2: #1b192b;
-  --color-bg-card: #151323;
-  --color-border: rgba(196, 180, 255, 0.12);
-  --color-accent: #a28bff;
-  padding: var(--space-6);
+  --color-bg-0: #121214;
+  --color-bg-1: #161618;
+  --color-bg-2: #1c1c1f;
+  --color-bg-card: #18181b;
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-accent: #9a9aa3;
+  --color-text-1: #c8c8ce;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 16px;
   height: 100%;
   min-height: 0;
   overflow-y: auto;
-  background: radial-gradient(750px 420px at 92% 0%, rgba(98, 54, 196, .13), transparent 65%), #0c0b14;
-  color: #f4f1ff;
+  background: #121214;
+  color: #c8c8ce;
 }
 .page-head {
   display: flex;
@@ -913,8 +1063,36 @@ onMounted(async () => {
 }
 .head-actions {
   display: flex;
-  gap: var(--space-2);
+  gap: 6px;
   flex-wrap: wrap;
+}
+.import-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+.head-actions :deep(.grad-btn) {
+  border-radius: 4px;
+  box-shadow: none;
+  font-weight: 550;
+}
+.head-actions :deep(.type-primary) {
+  background: #3a3a40;
+  color: #f2f2f3;
+}
+.head-actions :deep(.type-primary:hover:not(:disabled)) {
+  background: #48484f;
+}
+.head-actions :deep(.type-secondary),
+.head-actions :deep(.type-ghost) {
+  background: transparent;
+  border-color: transparent;
+  color: #b7b7bc;
+}
+.head-actions :deep(.type-secondary:hover:not(:disabled)),
+.head-actions :deep(.type-ghost:hover:not(:disabled)) {
+  background: #222226;
+  color: #eee;
 }
 
 .page.detail {
@@ -944,35 +1122,66 @@ onMounted(async () => {
 }
 .script-card {
   text-align: left;
-  padding: 14px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-card);
+  padding: 14px 14px 12px;
+  border-radius: 4px;
+  border: none;
+  background: #18181b;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 112px;
+  min-height: 104px;
   cursor: pointer;
 }
 .script-card:hover {
-  border-color: rgba(126, 180, 255, 0.55);
+  background: #202024;
+}
+.script-card :deep(.tag) {
+  border-radius: 3px;
+  background: #26262b;
+  color: #b7b7bc;
 }
 .workspace {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 200px minmax(320px, 1fr) minmax(280px, 340px);
-  gap: 12px;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.pane-resizer {
+  flex: 0 0 8px;
+  margin: 0 -2px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+.pane-resizer::after {
+  content: '';
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+}
+.pane-resizer:hover::after,
+.page.resizing .pane-resizer::after {
+  background: rgba(255, 255, 255, 0.16);
+}
+.page.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .ep-side {
+  flex: none;
   min-height: 0;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: 10px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0 8px 0 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 .ep-item {
   display: grid;
@@ -981,68 +1190,72 @@ onMounted(async () => {
   column-gap: 8px;
   width: 100%;
   text-align: left;
-  padding: 8px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
+  padding: 7px 8px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: #d8d8dc;
   cursor: pointer;
 }
+.ep-item:hover { background: #1c1c20; }
 .ep-item.active {
-  border-color: rgba(162, 139, 255, 0.6);
-  background: rgba(109, 77, 255, 0.16);
+  background: #26262b;
+  color: #d4d4d8;
 }
 .writing-agent {
+  flex: none;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid rgba(196, 180, 255, .14);
-  border-radius: 16px;
-  background: #151323;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding-left: 8px;
 }
-.writing-agent-head { display: flex; align-items: center; gap: 11px; padding: 17px; border-bottom: 1px solid rgba(196, 180, 255, .1); }
-.writing-agent-head strong { color: #f4f1ff; font-size: 14px; }
-.writing-agent-head p { margin: 4px 0 0; color: #9992b3; font-size: 11px; }
-.writing-agent-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 11px; color: #e3d8ff; background: #5940bf; font-size: 20px; }
-.writing-history { flex: 1; min-height: 120px; overflow-y: auto; padding: 18px 14px; display: flex; flex-direction: column; gap: 16px; }
+.writing-agent-head { display: flex; align-items: center; gap: 10px; padding: 4px 2px 12px; border-bottom: none; }
+.writing-agent-head strong { color: #ececee; font-size: 13px; font-weight: 600; }
+.writing-agent-head p { margin: 2px 0 0; color: #8d8d93; font-size: 11px; }
+.writing-agent-icon { display: grid; place-items: center; flex: 0 0 22px; height: 22px; border-radius: 4px; color: #d0d0d4; background: #2a2a2e; font-size: 13px; }
+.writing-history { flex: 1; min-height: 120px; overflow-y: auto; padding: 8px 2px 12px; display: flex; flex-direction: column; gap: 12px; }
 .writing-message { max-width: 96%; align-self: flex-start; min-width: 0; }
 .writing-message.user { align-self: flex-end; }
-.writing-message > span { display: block; margin: 0 4px 6px; color: #9189aa; font-size: 11px; }
+.writing-message > span { display: block; margin: 0 2px 4px; color: #8a8a90; font-size: 11px; }
 .writing-message.user > span { text-align: right; }
-.writing-message p { margin: 0; padding: 11px 12px; border: 1px solid rgba(196, 180, 255, .08); border-radius: 4px 13px 13px 13px; background: #211e32; color: #e3dff0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
-.writing-message.user p { border: 1px solid rgba(156, 130, 255, .3); border-radius: 13px 4px 13px 13px; background: #473987; color: #fff; }
-.writing-note { margin: 0; color: #aaa0bf; font-size: 12px; }
-.writing-compose { padding: 13px; border-top: 1px solid rgba(196, 180, 255, .1); }
-.story-plan { padding: 12px; border: 1px solid rgba(162, 139, 255, .25); border-radius: 12px; background: #201b35; }
-.story-plan-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #f4f1ff; font-size: 12px; }
-.story-plan-heading button { border: 0; background: transparent; color: #b5a4ff; cursor: pointer; font-size: 11px; }
-.story-plan-status { margin: 7px 0; color: #b8aed2; font-size: 11px; }
-.story-plan-content { display: flex; flex-direction: column; gap: 10px; max-height: 300px; overflow: auto; margin: 10px 0; }
-.story-plan-content label { display: flex; flex-direction: column; gap: 5px; color: #c9c1de; font-size: 11px; }
-.story-plan-content textarea, .story-plan-content input, .writing-mode select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid rgba(196, 180, 255, .16); border-radius: 8px; background: #151323; color: #eeeafa; font: inherit; line-height: 1.5; }
+.writing-message p { margin: 0; padding: 8px 10px; border: none; border-radius: 4px; background: #1e1e22; color: #c4c4c8; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.writing-message.user p { border: none; border-radius: 4px; background: #2c2c32; color: #c8c8ce; }
+.writing-note { margin: 0; color: #8d8d93; font-size: 12px; }
+.writing-compose { padding: 10px 0 0; border-top: none; }
+.story-plan { padding: 10px; border: none; border-radius: 4px; background: #1c1c20; }
+.story-plan-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #ececee; font-size: 12px; }
+.story-plan-heading button { border: 0; background: transparent; color: #b0b0b6; cursor: pointer; font-size: 11px; }
+.story-plan-status { margin: 6px 0; color: #8d8d93; font-size: 11px; }
+.story-plan-content { display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow: auto; margin: 8px 0; }
+.story-plan-content label { display: flex; flex-direction: column; gap: 4px; color: #a3a3a8; font-size: 11px; }
+.story-plan-content textarea, .story-plan-content input, .writing-mode select { width: 100%; box-sizing: border-box; padding: 7px 8px; border: none; border-radius: 4px; background: #141416; color: #c8c8ce; font: inherit; line-height: 1.5; }
 .story-plan-content textarea { resize: vertical; }
-.story-plan-content p { margin: 0; color: #aaa0bf; font-size: 11px; line-height: 1.5; }
-.story-plan-confirm { width: 100%; padding: 9px; border: 1px solid #8a70ef; border-radius: 8px; background: #5d44c7; color: white; cursor: pointer; font-size: 12px; }
+.story-plan-content p { margin: 0; color: #8d8d93; font-size: 11px; line-height: 1.5; }
+.story-plan-confirm { width: 100%; padding: 8px; border: none; border-radius: 4px; background: #3a3a40; color: #f4f4f5; cursor: pointer; font-size: 12px; }
+.story-plan-confirm:hover:not(:disabled) { background: #48484f; }
 .story-plan-confirm:disabled { opacity: .5; cursor: default; }
-.story-plan-save { align-self: flex-start; padding: 6px 10px; border: 1px solid rgba(162, 139, 255, .35); border-radius: 7px; background: transparent; color: #cabfff; cursor: pointer; font-size: 11px; }
-.writing-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #a8a0bd; font-size: 11px; }
+.story-plan-save { align-self: flex-start; padding: 5px 8px; border: none; border-radius: 4px; background: #26262b; color: #d4d4d8; cursor: pointer; font-size: 11px; }
+.writing-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: #8d8d93; font-size: 11px; }
 .writing-mode span { flex-shrink: 0; }
-.writing-mode select { height: 32px; padding: 0 8px; background: #201d30; }
-.writing-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
-.writing-options label { display: flex; min-width: 0; flex-direction: column; gap: 5px; color: #a8a0bd; font-size: 11px; }
-.writing-options select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; border: 1px solid rgba(196, 180, 255, .16); border-radius: 8px; background: #201d30; color: #e8e3f5; font-size: 11px; }
-.writing-input { display: block; width: 100%; min-height: 86px; box-sizing: border-box; resize: vertical; padding: 11px; border: 1px solid rgba(196, 180, 255, .15); border-radius: 10px; outline: none; background: #201d30; color: #f4f1ff; font: inherit; font-size: 12px; line-height: 1.6; }
-.writing-input:focus { border-color: #927aff; }
-.writing-input::placeholder { color: #817a98; }
-.writing-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
-.writing-actions > span { color: #817a98; font-size: 10px; }
-.writing-send { padding: 8px 15px; border: 0; border-radius: 9px; background: #7555f5; color: white; font-size: 12px; font-weight: 600; cursor: pointer; }
-.writing-send:hover { background: #896dff; }
+.writing-mode select { height: 32px; padding: 0 8px; background: #1c1c20; }
+.writing-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.writing-options label { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: #8d8d93; font-size: 11px; }
+.writing-options select { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: none; border-radius: 4px; background: #1c1c20; color: #e6e6e8; font-size: 11px; }
+.writing-input { display: block; width: 100%; min-height: 78px; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: none; border-radius: 4px; outline: none; background: #1c1c20; color: #c8c8ce; font: inherit; font-size: 12px; line-height: 1.6; }
+.writing-input:focus { background: #222226; }
+.writing-input::placeholder { color: #7c7c82; }
+.writing-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.writing-actions > span { color: #7c7c82; font-size: 10px; }
+.writing-send { padding: 7px 12px; border: 0; border-radius: 4px; background: #3a3a40; color: #f4f4f5; font-size: 12px; font-weight: 550; cursor: pointer; }
+.writing-send:hover { background: #48484f; }
 .writing-send:disabled { opacity: .5; cursor: default; }
-.writing-send.cancel { background: #342c48; }
-.writing-pulse { display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; background: #b5a3ff; animation: writing-pulse 1s ease-in-out infinite alternate; }
+.writing-send.cancel { background: #2a2a2e; }
+.writing-pulse { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: #bdbdc2; animation: writing-pulse 1s ease-in-out infinite alternate; }
 @keyframes writing-pulse { to { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .writing-pulse { animation: none; } }
 .ep-item-title {
@@ -1055,10 +1268,15 @@ onMounted(async () => {
 .ep-main {
   min-height: 0;
   min-width: 0;
+  flex: 1;
 }
-.ep-main .editor-card {
+.ep-main :deep(.glass-card-root) {
   height: 100%;
   min-height: 0;
+  border: none;
+  border-radius: 4px;
+  box-shadow: none;
+  background: #18181b;
 }
 .episode-editor {
   flex: 1;
@@ -1076,9 +1294,9 @@ onMounted(async () => {
 .ep-title-input {
   flex: 1;
   min-width: 0;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  background: #141416;
+  border: none;
+  border-radius: 4px;
   padding: 8px 10px;
   color: var(--color-text-1);
   font-size: 14px;
@@ -1090,14 +1308,14 @@ onMounted(async () => {
 .episode-move button {
   height: 32px;
   padding: 0 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-bg-2);
+  border: none;
+  border-radius: 4px;
+  background: #141416;
   color: var(--color-text-2);
   cursor: pointer;
 }
 .episode-move button.danger {
-  color: #f87171;
+  color: #c4a0a0;
 }
 .episode-body-wrap {
   position: relative;
@@ -1110,13 +1328,25 @@ onMounted(async () => {
   width: 100%;
   min-height: 240px;
   resize: none;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
+  background: #141416;
+  border: none;
+  border-radius: 4px;
   padding: 12px;
   color: var(--color-text-1);
   font-size: 14px;
   line-height: 1.7;
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: outline-color 0.2s ease, background-color 0.2s ease;
+}
+.episode-body:focus,
+.episode-body:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.16);
+  outline-offset: -1px;
+}
+.episode-body::selection {
+  background: rgba(255, 255, 255, 0.14);
+  color: #d4d4d8;
 }
 .episode-writing-overlay {
   position: absolute;
@@ -1126,8 +1356,8 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border-radius: 9px;
-  background: rgba(18, 19, 27, 0.88);
+  border-radius: 4px;
+  background: rgba(18, 18, 20, 0.9);
   color: var(--color-text-1);
   font-size: 13px;
 }
@@ -1135,8 +1365,8 @@ onMounted(async () => {
 .episode-writing-spinner {
   width: 30px;
   height: 30px;
-  border: 3px solid rgba(126, 180, 255, 0.2);
-  border-top-color: var(--color-accent);
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: #c8c8cc;
   border-radius: 50%;
   animation: episode-writing-spin 0.85s linear infinite;
 }
@@ -1194,27 +1424,29 @@ onMounted(async () => {
 .search {
   flex: 1;
   min-width: 0;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  background: #18181b;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 10px;
   font-size: 12px;
   color: var(--color-text-1);
   outline: none;
 }
 .search:focus {
-  border-color: var(--color-accent);
+  background: #202024;
 }
 .count {
   font-size: 11px;
   color: var(--color-text-4);
   flex-shrink: 0;
 }
-.list {
+.ep-side .list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: calc(100vh - 260px);
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
 }
 .script-item {
@@ -1256,14 +1488,16 @@ onMounted(async () => {
 }
 .side-foot {
   font-size: 11px;
-  color: var(--color-text-3);
-  padding: 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
+  color: #9a9aa1;
+  padding: 7px 8px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  text-align: left;
 }
 .side-foot:hover {
-  color: var(--color-text-1);
-  background: var(--color-fill);
+  color: #eee;
+  background: #1c1c20;
 }
 
 .editor-card {
@@ -1279,8 +1513,8 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--color-border);
+  padding: 12px 16px 8px;
+  border-bottom: none;
   flex-wrap: wrap;
 }
 .title-input {
@@ -1299,8 +1533,8 @@ onMounted(async () => {
   background: var(--color-fill);
 }
 .title-input:focus {
-  border-color: var(--color-accent);
-  background: var(--color-bg-2);
+  border-color: transparent;
+  background: #141416;
 }
 .ed-meta {
   display: flex;
@@ -1317,31 +1551,28 @@ onMounted(async () => {
 }
 .mini-btn {
   font-size: 11px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  color: var(--color-text-2);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: none;
+  color: #b7b7bc;
   background: transparent;
-  transition: all var(--duration-fast);
+  transition: background var(--duration-fast);
 }
 .mini-btn:hover:not(:disabled) {
-  color: var(--color-text-1);
-  border-color: var(--color-border-strong);
-  background: var(--color-fill);
+  color: #f2f2f3;
+  background: #26262b;
 }
 .mini-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
 .mini-btn.primary {
-  border-color: rgba(126, 180, 255, 0.4);
-  background: var(--grad-primary-soft);
-  color: #b9cbff;
+  background: #323238;
+  color: #f2f2f3;
 }
 .mini-btn.danger:hover {
-  color: var(--color-error);
-  border-color: rgba(248, 113, 113, 0.4);
-  background: rgba(248, 113, 113, 0.1);
+  color: #e4c4c4;
+  background: #2a2222;
 }
 
 .tabs {
@@ -1395,14 +1626,16 @@ onMounted(async () => {
   cursor: pointer;
 }
 .ep-no {
-  width: 22px;
-  height: 22px;
+  grid-row: 1 / span 2;
+  align-self: center;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
-  border-radius: 6px;
-  background: var(--grad-primary-soft);
-  color: var(--color-accent);
+  border-radius: 3px;
+  background: #2a2a2e;
+  color: #c8c8cc;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1427,9 +1660,11 @@ onMounted(async () => {
   background: var(--color-bg-1);
 }
 .ep-words {
+  grid-column: 2;
+  white-space: nowrap;
   font-size: 11px;
+  line-height: 1.2;
   color: var(--color-text-4);
-  flex-shrink: 0;
 }
 .ep-tools {
   display: flex;
@@ -1570,8 +1805,16 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
-  border-top: 1px solid var(--color-border);
+  padding: 8px 16px 12px;
+  border-top: none;
+}
+.ed-foot :deep(.grad-btn) {
+  border-radius: 4px;
+  box-shadow: none;
+  background: #3a3a40;
+}
+.ed-foot :deep(.grad-btn:hover:not(:disabled)) {
+  background: #48484f;
 }
 .foot-tip {
   font-family: var(--font-mono);
@@ -1580,12 +1823,13 @@ onMounted(async () => {
 }
 
 .empty-mini {
-  text-align: center;
-  color: var(--color-text-4);
-  font-size: 12px;
-  padding: var(--space-6) var(--space-3);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-md);
+  grid-column: 1 / -1;
+  text-align: left;
+  color: #8d8d93;
+  font-size: 13px;
+  padding: 8px 2px 0;
+  border: none;
+  background: transparent;
   line-height: 1.7;
 }
 
@@ -1618,7 +1862,6 @@ onMounted(async () => {
 }
 
 @media (max-width: 1080px) {
-  .workspace { grid-template-columns: 150px minmax(250px, 1fr) minmax(240px, 290px); }
   .ai-bar { flex-wrap: wrap; }
   .ai-hint { flex: 1 1 220px; }
   .body {
@@ -1627,15 +1870,15 @@ onMounted(async () => {
   .side {
     position: static;
   }
-  .list {
-    max-height: 220px;
-  }
 }
 @media (max-width: 760px) {
   .page.detail { height: auto; overflow: visible; }
   .workspace { display: flex; flex-direction: column; }
+  .pane-resizer { display: none; }
+  .ep-side,
+  .writing-agent { width: auto !important; max-height: none; padding: 0; }
   .ep-side { max-height: 200px; }
-  .ep-main .editor-card { min-height: 500px; }
+  .ep-main :deep(.glass-card-root) { min-height: 500px; }
   .writing-agent { min-height: 440px; }
 }
 

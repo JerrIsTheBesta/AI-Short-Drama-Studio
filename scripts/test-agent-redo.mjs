@@ -4,7 +4,9 @@ import { build } from 'esbuild'
 import { resolve, basename } from 'node:path'
 
 const mocks = {
-  stores: `export const useProjectStore=()=>globalThis.__agentTest.store; export const useSettingsStore=()=>({config:{}});`,
+  stores: `export const useProjectStore=()=>globalThis.__agentTest.store; export const useSettingsStore=()=>({config:{vision:globalThis.__agentTest.vision}});
+    export const useAssetsStore=()=>({getBlob:async id=>globalThis.__agentTest.blobs?.[id],add:async()=>({id:'saved-tail'})});
+    export const useLibraryStore=()=>({getBlob:async()=>null});`,
   shot: `export const needsExternalTts=()=>true;`,
   videoStill: `export const stillModeForShot=s=>s.mode||'identity';
     export const shotUsesFrames=s=>s.mode==='frames'; export const needsShotFrames=p=>p.shots.some(shotUsesFrames);
@@ -13,9 +15,15 @@ const mocks = {
   storyBrief: `export const topicFromBrief=t=>t;`,
   jobs: `export const VIDEO_GEN_CONCURRENCY=3;`,
   pipeline: `export const TOOL_LABEL={}; export const nextExtractStage=p=>!p.subjects?.length?'subjects':!p.scenes?.length?'scenes':!p.shots?.length?'shots':null;`,
-  canvasBridge: `export const revealCanvas=()=>{};`,
-  references: `export const appendCanvasReferenceSource=()=>true; export const canvasNodeProducesImage=()=>true; export const resolvedCanvasReferenceAssetIds=()=>[];`,
-  layout: `export const rebuildCanvasGraph=p=>p.canvas;`,
+  canvasBridge: `export const revealCanvas=()=>{}; export const selectCanvasNode=id=>{globalThis.__agentTest.selected=id};`,
+  references: `export const appendCanvasReferenceSource=()=>true; export const canvasNodeProducesImage=n=>n?.type==='imageGen'; export const resolvedCanvasReferenceAssetIds=(_p,n)=>n?.data.referenceAssetIds||[];
+    export const canvasNodeOutputAssetId=(p,n)=>n?.type==='shotVideo'?p.shots.find(s=>s.id===n.data.shotId)?.videoAssetId:n?.data.outputAssetId;`,
+  layout: `export const rebuildCanvasGraph=p=>p.canvas; export const absoluteCanvasPosition=(_n,node)=>node.position; export const NODE_W=100; export const nextFreeformPosition=(_n,o)=>o.click;`,
+  consistency: `export const packVideoRefEntries=x=>x; export const collectShotVideoEntries=(shot)=>shot.refs||[];`,
+  types: `export const normalizeVideoGenModel=x=>x||'h3'; export const videoMaxSeconds=()=>15; export const videoMinSeconds=()=>3;`,
+  ffmpeg: `export const extractVideoLastFrame=async (_blob,opts)=>{if(!opts?.preserveEnding)throw Error('expected exact ending path');return new Blob(['tail'],{type:'image/jpeg'})};`,
+  videoRemake: `export const extractVideoFrames=async()=>({frames:[new Blob(['sample'],{type:'image/jpeg'})]});`,
+  client: `export const blobToChatImageUrl=async b=>'image:'+await b.text(); export const callLLM=async r=>{(globalThis.__agentTest.llm??=[]).push(r);return {content:r.provider==='vision'?'看见主体在门口':'从门口继续向前走'}};`,
   ai: `export const isPlayReady=s=>s?.playReady;`,
   promptCoach: `export const optimizeNodePrompt=async()=>({prompt:'optimized',note:'ok'});`,
   memoryStore: `export const rememberMemory=async()=>({content:'ok'}); export const forgetMemory=async()=>'';`,
@@ -35,7 +43,7 @@ const mocks = {
     export const runExtractStoryboard=async(_log,_signal,_opts,stage)=>{globalThis.__agentTest.calls.push('extract:'+stage)};
   `
 }
-const real = new Set(['actionPolicy', 'toolRegistry', 'agentLoop', 'planner', 'taskStore', 'visualStyle', 'abort'])
+const real = new Set(['actionPolicy', 'toolRegistry', 'agentLoop', 'planner', 'taskStore', 'visualStyle', 'abort', 'agentMedia'])
 const result = await build({
   stdin: { contents: `export * from './src/services/canvas/actionPolicy'; export * from './src/services/canvas/toolRegistry';
     export * from './src/services/canvas/agentLoop'; export * from './src/services/canvas/planner'; export * from './src/utils/visualStyle';`, resolveDir: process.cwd() },
@@ -183,4 +191,36 @@ await test('按实际提取范围验收，非法范围不能静默降级',()=>{
   assert.throws(()=>api.validateToolAction({tool:'extract_cast',extractStage:'wrong'}),/提炼范围/)
   assert.throws(()=>api.validateToolAction({tool:'generate_video',shotId:'shot',regenerate:'true'}),/布尔/)
 })
-console.log(`${tests} agent redo regression tests passed (offline; no API calls).`)
+await test('视觉没配置时禁用；配置后按图号读取像素，工具不改画布',async()=>{
+  const h=globalThis.__agentTest, p=h.store.current
+  p.canvas.nodes.push({id:'video',type:'shotVideo',data:{shotId:'shot'}})
+  p.shots[0].refs=[{id:'first'},{id:'second'}]
+  h.blobs={second:new Blob(['actual-image-2'],{type:'image/png'})}
+  const action={tool:'inspect_canvas_image',nodeId:'video',referenceIndex:2,text:'核对人物'}
+  const before=JSON.stringify(p.canvas)
+  await assert.rejects(api.executeRegisteredTool(action,{onLog:()=>{}}),/配置/)
+  assert.equal(h.llm,undefined)
+  h.vision={baseUrl:'https://example.com',apiKey:'test-only',model:'vision'}
+  assert.match(await api.executeRegisteredTool(action,{onLog:()=>{}}),/参考图 2/)
+  assert.equal(h.llm[0].provider,'vision')
+  assert.equal(h.llm[0].messages[1].content.at(-1).image_url.url,'image:actual-image-2')
+  assert.equal(JSON.stringify(p.canvas),before)
+})
+for(const withVision of [false,true]) await test(`续拍使用真实末帧、存成下游视频，${withVision?'观察取样帧':'未配置不调用视觉'}`,async()=>{
+  const h=globalThis.__agentTest, p=h.store.current
+  p.canvas.nodes.push({id:'video',type:'shotVideo',position:{x:0,y:0},data:{shotId:'shot',prompt:'上一段角色到门口'}})
+  h.blobs={'old:video':new Blob(['video'],{type:'video/mp4'})}
+  if(withVision) h.vision={baseUrl:'https://example.com',apiKey:'test-only',model:'vision'}
+  h.store.addCanvasNode=node=>p.canvas.nodes.push(node)
+  h.store.setCanvas=canvas=>p.canvas=canvas
+  await api.executeRegisteredTool({tool:'continue_from_video_tail',nodeId:'video',text:'接着走'},{onLog:()=>{}})
+  const next=p.canvas.nodes.at(-1)
+  assert.equal(next.type,'videoGen'); assert.equal(next.status,'idle'); assert.equal(h.selected,next.id)
+  assert.deepEqual(next.data.referenceAssetIds,['saved-tail']); assert.equal(next.data.firstFrameAssetId,'saved-tail')
+  assert.equal(p.canvas.edges.at(-1).source,'video'); assert.equal(p.canvas.edges.at(-1).target,next.id)
+  assert.match(next.data.prompt,/从门口继续向前走/)
+  assert.match(h.llm.at(-1).messages[1].content,/上一段角色到门口/)
+  assert.deepEqual(h.llm.map(r=>r.provider),withVision ? ['vision',undefined] : [undefined])
+  assert.deepEqual(h.calls,[])
+})
+console.log(`${tests} canvas agent regression tests passed (offline; no API calls).`)

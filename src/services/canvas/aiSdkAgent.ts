@@ -8,6 +8,8 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { z } from 'zod'
 import { desktop, isDesktop } from '@/services/desktop'
 import { getLlmConfig } from '@/services/ai/runtime'
+import { finalAnswerText } from '@/services/ai/finalAnswer'
+import { canvasVisionReady } from './agentMedia'
 import type { AgentToolName } from './toolRegistry'
 
 const text = z.string().describe('故事原文、提示词、续写方向或要记住的话')
@@ -91,6 +93,10 @@ export const studioAgentTools = {
     nodeId,
     text: text.optional()
   }),
+  inspect_canvas_image: canvasTool('只读查看画布节点的真实图片。不确定某张图画了什么、能否和角色资料对应时调用；指定 referenceIndex=1 表示参考图1，不填则看节点当前图片。先看图，再根据返回证据安排修改，不得猜身份。', {
+    nodeId, referenceIndex: z.number().int().positive().optional(), text: text.optional()
+  }),
+  continue_from_video_tail: canvasTool('从已生成视频的实际最后一帧续拍：创建一个相连的视频节点、带上末帧并写续拍提示词，不提交生成。只在用户明确说用尾帧继续拍时调用。', { nodeId, text: text.optional() }),
   remember: canvasTool('记下用户说的长期偏好。', { text }),
   forget: canvasTool('忘掉一条记忆。', { text })
 }
@@ -155,13 +161,17 @@ export async function planStudioActions(options: {
   signal?: AbortSignal
   /** 问答时关掉工具，只返回正文。 */
   tools?: boolean
+  onlyInspect?: boolean
 }): Promise<{ say: string; actions: Record<string, unknown>[]; done: boolean }> {
+  const available = options.onlyInspect ? ['inspect_canvas_image'] : [...TOOL_NAMES]
   const useTools = options.tools !== false
+  const enabled = new Set(useTools ? available.filter(name => name !== 'inspect_canvas_image' || canvasVisionReady()) : [])
+  const tools = Object.fromEntries(Object.entries(studioAgentTools).filter(([name]) => enabled.has(name)))
   const result = await generateText({
     model: studioChatModel(),
     system: options.system,
     messages: options.messages,
-    ...(useTools ? { tools: studioAgentTools, toolChoice: 'auto' as const } : {}),
+    ...(enabled.size ? { tools, toolChoice: 'auto' as const } : {}),
     temperature: options.temperature ?? 0.2,
     maxOutputTokens: options.maxOutputTokens ?? 2000,
     abortSignal: options.signal,
@@ -169,20 +179,22 @@ export async function planStudioActions(options: {
     maxRetries: 1
   })
 
-  const calls = result.toolCalls.filter(
-    (call) => TOOL_NAMES.has(call.toolName) && !(call as { invalid?: boolean }).invalid
+  const answer = finalAnswerText(result.text)
+  const calls = (useTools ? result.toolCalls : []).filter(
+    (call) => enabled.has(call.toolName) && !(call as { invalid?: boolean }).invalid
   )
   if (!calls.length) {
-    const parsed = jsonPlan(result.text)
-    const known = parsed.actions.filter((action) => TOOL_NAMES.has(String(action.tool || '')))
+    if (!answer) throw new Error('语言模型未返回正式回答或有效工具调用，思考过程不会用于执行任务。请重试或切换模型。')
+    const parsed = jsonPlan(answer)
+    const known = parsed.actions.filter((action) => enabled.has(String(action.tool || '')))
     return {
-      say: (result.text.trim() || parsed.say).trim(),
+      say: (known.length ? parsed.say : answer).trim(),
       actions: known,
       done: known.length === 0
     }
   }
   return {
-    say: result.text.trim() || '好的，我来做。',
+    say: answer || '好的，我来做。',
     actions: calls.map((call) => {
       const input = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>) : {}
       return { tool: call.toolName as AgentToolName, ...input }

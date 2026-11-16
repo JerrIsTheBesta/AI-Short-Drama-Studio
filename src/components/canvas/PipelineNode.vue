@@ -10,7 +10,7 @@ import { cssAspectRatio } from '@/services/canvas/layout'
 import { applyShotVideoModel, applyShotVideoProfile } from '@/services/canvas/videoModel'
 import { videoRequiresStoryboard } from '@/utils/storyboardGate'
 import { stillModeFromNode } from '@/utils/videoStill'
-import { inspectCanvasNode } from '@/services/canvas/canvasBridge'
+import { inspectCanvasNode, selectCanvasNode } from '@/services/canvas/canvasBridge'
 import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
@@ -711,6 +711,7 @@ function currentMedia(): HTMLMediaElement | null {
 
 async function togglePlay(ev: Event) {
   ev.stopPropagation()
+  selectCanvasNode(props.id)
   const v = currentMedia()
   if (!v) return
   if (v.paused) {

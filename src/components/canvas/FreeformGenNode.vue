@@ -403,6 +403,7 @@ function togglePlay() {
 
 function previewFull() {
   if (!mediaUrl.value) return
+  selectCanvasNode(props.id)
   openLightbox(mediaUrl.value, isVideo.value ? 'video' : 'image', title.value)
 }
 

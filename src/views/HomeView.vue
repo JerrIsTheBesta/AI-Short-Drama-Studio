@@ -756,7 +756,7 @@ async function moveSelectedLibrary() {
                   @change="toggleLibSelect(a.id)"
                 />
               </label>
-              <button type="button" class="lib-thumb" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
+              <button type="button" class="lib-thumb" :aria-label="`查看大图：${a.filename}`" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
                 <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
                 <span v-else><HomeIcon name="image" :size="30" /></span>
               </button>
@@ -2152,8 +2152,8 @@ async function moveSelectedLibrary() {
 }
 .lib-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 248px), 1fr));
+  gap: 16px;
   padding-bottom: 32px;
 }
 .lib-card {
@@ -2190,18 +2190,20 @@ async function moveSelectedLibrary() {
   cursor: pointer;
 }
 .lib-thumb {
+  display: grid;
+  place-items: center;
   width: 100%;
-  aspect-ratio: 1;
+  height: clamp(228px, 27vh, 320px);
   margin: 0;
   padding: 0;
   border: none;
   background: #171921;
-  cursor: pointer;
+  cursor: zoom-in;
 }
 .lib-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
 }
 .lib-meta {

@@ -6,7 +6,8 @@ export type { AIMode } from '@/stores/settings'
 export { getAIMode } from './runtime'
 
 import { desktop, isDesktop } from '@/services/desktop'
-import { extractJsonText, parseJsonRobust, stripReasoningLeak, stripThinkTags } from '@/utils/jsonRepair'
+import { parseJsonRobust } from '@/utils/jsonRepair'
+import { finalAnswerText } from './finalAnswer'
 import { mockLLM } from './mock'
 import { getAIMode, getLlmConfig, getVisionConfig } from './runtime'
 
@@ -54,23 +55,6 @@ export function messageText(content: LLMMessage['content']): string {
     .join('\n')
 }
 
-function flattenText(value: unknown): string {
-  if (value == null) return ''
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) {
-    return value
-      .map((part) =>
-        typeof part === 'string' ? part : flattenText((part as any)?.text ?? (part as any)?.content)
-      )
-      .filter(Boolean)
-      .join('\n')
-  }
-  if (typeof value === 'object') {
-    return flattenText((value as any).text ?? (value as any).content)
-  }
-  return String(value)
-}
-
 function isValidJsonOutput(text: string): boolean {
   if (!text.trim()) return false
   try {
@@ -79,47 +63,6 @@ function isValidJsonOutput(text: string): boolean {
   } catch {
     return false
   }
-}
-
-function looksLikeShotList(text: string) {
-  return /镜头\s*\d+\s*[：:]/.test(text) && /画面[：:]/.test(text)
-}
-
-/** 推理模型常把正文放进 reasoning_content。思考里只要出现花括号，也不能拿来覆盖真正的回答。 */
-function pickMessageContent(message: any): string {
-  const content = stripThinkTags(flattenText(message?.content)).trim()
-  const reasoning = stripThinkTags(
-    flattenText(message?.reasoning_content ?? message?.reasoning ?? message?.reasoningContent)
-  ).trim()
-  const cleaned = stripReasoningLeak(content)
-  if (isValidJsonOutput(content)) return content
-  if (cleaned && !isValidJsonOutput(reasoning)) return cleaned
-  if (cleaned && !isReasoningOnly(content)) return cleaned
-  if (isValidJsonOutput(reasoning)) {
-    try {
-      return extractJsonText(reasoning)
-    } catch {
-      /* 推理里的 JSON 抽不出来时，再看正文 */
-    }
-  }
-  if (looksLikeShotList(reasoning) && !looksLikeShotList(cleaned)) return reasoning
-  return cleaned || stripReasoningLeak(reasoning)
-}
-
-function isReasoningOnly(text: string): boolean {
-  const raw = text.trim()
-  const cleaned = stripReasoningLeak(text)
-  if (!cleaned) return true
-  if (cleaned.length < Math.min(80, raw.length * 0.4)) return true
-  const hasDeliverable =
-    /subject_definitions\s*:|integrated_multimodal_description\s*:|\[Shot\s*\d+\]|overall_soundscape\s*:/i.test(
-      raw
-    )
-  if (hasDeliverable) return false
-  const cues = [/思考/, /用户/, /提示词/, /改写/, /let me/i, /the user/i, /i need to/i].filter((re) =>
-    re.test(raw)
-  ).length
-  return cues >= 2
 }
 
 function hasImageParts(messages: LLMMessage[]): boolean {
@@ -316,13 +259,13 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
     }
     if (!ok) throw llmHttpError(status, errText, baseUrl, req.provider)
     let data = await json()
-    let content = pickMessageContent(data.choices?.[0]?.message)
+    let content = finalAnswerText(data.choices?.[0]?.message?.content)
     if (!content.trim() && body.response_format) {
       delete body.response_format
       ;({ ok, status, errText, json } = await post(body))
       if (!ok) throw llmHttpError(status, errText, baseUrl, req.provider)
       data = await json()
-      content = pickMessageContent(data.choices?.[0]?.message)
+      content = finalAnswerText(data.choices?.[0]?.message?.content)
     }
     if (req.jsonMode && !isValidJsonOutput(content)) {
       const followControl = controlledSignal(req.signal, timeoutMs)
@@ -330,10 +273,10 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
         const follow = {
           ...body,
           temperature: 0,
-          max_tokens: Math.min(
+          ...(!req.useProviderOutputLimit ? { max_tokens: Math.min(
             12_000,
             Math.max(Math.ceil((Number(body.max_tokens) || 4000) * 1.5), 6000)
-          ),
+          ) } : {}),
           messages: [
             ...req.messages,
             ...(content.trim() ? ([{ role: 'assistant', content }] as LLMMessage[]) : []),
@@ -347,13 +290,16 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
         ;({ ok, status, errText, json } = await post(follow, followControl.signal))
         if (ok) {
           data = await json()
-          const next = pickMessageContent(data.choices?.[0]?.message)
+          const next = finalAnswerText(data.choices?.[0]?.message?.content)
           if (next.trim()) content = next
         }
       } finally {
         followControl.cleanup()
       }
     }
+    if (!content) throw new Error(data.choices?.[0]?.finish_reason === 'length'
+      ? '模型用完了输出额度，但未返回正式答案。请提高网关的输出额度或换用模型。'
+      : '模型未返回正式答案；思考过程不会作为正文使用。请重试或切换模型。')
     return {
       content,
       model: data.model ?? model,

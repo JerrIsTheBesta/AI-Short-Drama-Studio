@@ -9,6 +9,7 @@ import ProfileLibrary from '@/components/settings/ProfileLibrary.vue'
 import type { AdapterConfig } from '@/services/ai/adapters'
 import { type VideoStillMode } from '@/types/canvas'
 import { syncH3ShotStillModes } from '@/services/canvas/videoModel'
+import { normalizeRouterBaseUrl } from '@/services/ai/openAiRouter'
 import {
   IMAGE_PROVIDERS,
   LLM_PROVIDERS,
@@ -28,6 +29,34 @@ const settings = useSettingsStore()
 const project = useProjectStore()
 const router = useRouter()
 const showVideoKey = ref(false)
+const llmRouterUrl = ref('')
+const llmRouterKey = ref('')
+const llmRouterModel = ref('')
+const llmRouterStatus = ref('')
+const llmRouterFailed = ref(false)
+
+function addLlmRouter() {
+  llmRouterStatus.value = ''
+  llmRouterFailed.value = false
+  try {
+    const baseUrl = normalizeRouterBaseUrl(llmRouterUrl.value)
+    const apiKey = llmRouterKey.value.trim().replace(/^Bearer\s+/i, '').trim()
+    if (!apiKey || /[^\x21-\x7e]/.test(apiKey)) throw new Error('请输入有效的 API Key，不要包含空格或换行')
+    const model = llmRouterModel.value.trim()
+    if (!model) throw new Error('请填写服务商提供的模型 ID')
+    const existing = settings.config.llms.find(p => p.baseUrl.replace(/\/+$/, '') === baseUrl && p.apiKey === apiKey)
+    if (existing) {
+      settings.selectLlmModel(existing.id, model)
+    } else {
+      settings.addLlm({ name: uniqueProfileName(settings.config.llms.map(p => p.name), new URL(baseUrl).host), baseUrl, apiKey, model, models: [model], provider: 'custom' })
+    }
+    llmRouterKey.value = ''
+    llmRouterStatus.value = `已设为当前模型：${model}。请点右下角保存到本机。`
+  } catch (error) {
+    llmRouterFailed.value = true
+    llmRouterStatus.value = error instanceof Error ? error.message : '配置失败，请检查填写的信息。'
+  }
+}
 const zealmanImage = computed(
   () =>
     settings.config.image.provider === 'zealman' ||
@@ -152,6 +181,22 @@ function patchAdapter(
 <template>
   <div class="mods">
     <template v-if="module === 'llm'">
+      <form class="llm-router" @submit.prevent="addLlmRouter">
+        <h2>OpenAI 兼容网关</h2>
+        <p>填写服务商提供的接口地址、密钥和模型 ID，不会自动查询模型列表。</p>
+        <label>Base URL<input v-model.trim="llmRouterUrl" type="url" required placeholder="https://api.example.com/v1" /></label>
+        <label>API Key<input v-model="llmRouterKey" type="password" required autocomplete="off" /></label>
+        <label>模型 ID<input v-model.trim="llmRouterModel" type="text" required placeholder="按服务商文档填写模型名" /></label>
+        <button type="submit">添加并设为当前</button>
+        <p v-if="llmRouterStatus" :role="llmRouterFailed ? 'alert' : 'status'" :class="{ 'router-error': llmRouterFailed }">{{ llmRouterStatus }}</p>
+        <label v-if="settings.config.llm.models?.length">当前模型
+          <select :value="settings.config.llm.model" @change="settings.selectLlmModel(settings.config.activeLlmId, ($event.target as HTMLSelectElement).value)">
+            <option v-for="model in settings.config.llm.models" :key="model" :value="model">{{ model }}</option>
+          </select>
+        </label>
+      </form>
+      <details class="llm-advanced">
+        <summary>高级配置 · 已保存的接入 / 手动填写模型名</summary>
       <ProfileLibrary
         title="已保存的语言模型"
         hint="每种接入保存成一项。同一项下面可加多个模型名，智能体和写剧本时就能切换。"
@@ -186,6 +231,7 @@ function patchAdapter(
         :adapter="settings.config.llm.adapter"
         @patch="patchAdapter('llm', $event)"
       />
+      </details>
     </template>
 
     <template v-else-if="module === 'vision'">
@@ -442,6 +488,15 @@ function patchAdapter(
 </template>
 
 <style scoped>
+.llm-router, .llm-advanced { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--color-border); border-radius: 12px; }
+.llm-router h2, .llm-router p { margin: 0; }
+.llm-router p { color: var(--color-text-3); font-size: 13px; overflow-wrap: anywhere; }
+.llm-router label { display: grid; gap: 5px; font-size: 13px; }
+.llm-router input, .llm-router select { min-width: 0; padding: 8px 10px; color: inherit; background: var(--color-bg-2); border: 1px solid var(--color-border); border-radius: 8px; }
+.llm-router button { justify-self: start; padding: 8px 12px; border-radius: 8px; background: var(--color-accent); color: #0c0b14; }
+.llm-router .router-error { color: var(--color-error); }
+.llm-advanced > summary { cursor: pointer; color: var(--color-text-2); }
+.llm-advanced[open] > summary { margin-bottom: 12px; }
 .mods {
   display: flex;
   flex-direction: column;

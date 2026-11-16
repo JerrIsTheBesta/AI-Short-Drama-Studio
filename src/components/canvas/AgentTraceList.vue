@@ -94,10 +94,10 @@ defineProps<{ rows: TraceRow[] }>()
   align-self: flex-start;
   gap: 5px;
   padding: 3px 10px 3px 7px;
-  border-radius: 99px;
-  border: 1px solid rgba(167, 139, 250, 0.32);
-  background: rgba(167, 139, 250, 0.1);
-  color: #c4b5fd;
+  border-radius: 4px;
+  border: none;
+  background: #26262b;
+  color: #b7b7bc;
   font-size: 10px;
   letter-spacing: 0.03em;
 }
@@ -114,15 +114,15 @@ defineProps<{ rows: TraceRow[] }>()
 }
 .intent-tag b {
   font-weight: 650;
-  color: #ddd6fe;
+  color: #d4d4d8;
 }
 
 /* ── 计划卡片 ── */
 .plan-card {
   padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-0);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c20;
 }
 .plan-head {
   display: flex;
@@ -159,7 +159,7 @@ defineProps<{ rows: TraceRow[] }>()
   list-style: none;
   margin: 9px 0 0;
   padding: 8px 0 0;
-  border-top: 1px dashed var(--color-border);
+  border-top: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -271,12 +271,11 @@ defineProps<{ rows: TraceRow[] }>()
 .row-detail {
   margin-top: 4px;
   padding: 6px 9px;
-  border-left: 2px solid var(--color-border);
-  border-radius: 0 7px 7px 0;
-  background: rgba(255, 255, 255, 0.028);
+  border-left: none;
+  border-radius: 4px;
+  background: #18181b;
 }
 .row.fail .row-detail {
-  border-left-color: rgba(239, 68, 68, 0.5);
-  background: rgba(239, 68, 68, 0.07);
+  background: #2a2222;
 }
 </style>

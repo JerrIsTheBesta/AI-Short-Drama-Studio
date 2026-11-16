@@ -482,7 +482,7 @@ function navReady(id: SettingsSection) {
               <i>{{ llmReady ? '✓' : '1' }}</i>
               <span>
                 <b>填语言模型</b>
-                <small>填接口地址、API Key 和模型名，然后点保存</small>
+                <small>填接口地址、API Key 和模型 ID，然后点保存</small>
               </span>
             </button>
             <div class="onboarding-arrow">→</div>
@@ -675,17 +675,23 @@ function navReady(id: SettingsSection) {
 
 <style scoped>
 .settings {
-  --color-bg-0: #0c0b14;
-  --color-bg-1: #151323;
-  --color-bg-2: #201d30;
-  --color-bg-card: #1b192b;
-  --color-border: rgba(196, 180, 255, 0.12);
-  --color-accent: #a28bff;
+  --color-bg-0: #121214;
+  --color-bg-1: #161618;
+  --color-bg-2: #1c1c1f;
+  --color-bg-card: #18181b;
+  --color-border: transparent;
+  --color-border-strong: transparent;
+  --color-accent: #9a9aa3;
+  --color-text-1: #c8c8ce;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
   height: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: radial-gradient(750px 420px at 90% 0%, rgba(98, 54, 196, .14), transparent 65%), var(--color-bg-0);
+  background: #121214;
+  color: #c8c8ce;
 }
 .top {
   display: flex;
@@ -693,25 +699,24 @@ function navReady(id: SettingsSection) {
   gap: 14px;
   min-height: 60px;
   padding: 0 20px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-1);
+  border-bottom: none;
+  background: transparent;
   flex-shrink: 0;
 }
 .back {
   flex-shrink: 0;
   margin: 0;
   padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border: none;
+  border-radius: 4px;
   background: transparent;
-  color: var(--color-text-3);
+  color: #9a9aa3;
   font-size: 12px;
   cursor: pointer;
 }
 .back:hover {
-  color: var(--color-text-1);
-  border-color: var(--color-border-strong);
-  background: rgba(255, 255, 255, 0.03);
+  color: #d4d4d8;
+  background: #1c1c20;
 }
 .brand {
   display: flex;
@@ -739,11 +744,11 @@ function navReady(id: SettingsSection) {
   display: flex;
 }
 .side {
-  width: 244px;
+  width: 220px;
   flex-shrink: 0;
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-1);
-  padding: 14px 10px;
+  border-right: none;
+  background: transparent;
+  padding: 8px 8px 14px 4px;
   overflow-y: auto;
 }
 .group {
@@ -763,54 +768,38 @@ function navReady(id: SettingsSection) {
   justify-content: space-between;
   gap: 8px;
   margin: 0 0 2px;
-  padding: 9px 12px;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 4px;
   background: transparent;
-  color: var(--color-text-3);
+  color: #a3a3a8;
   font-size: 13px;
   text-align: left;
   text-decoration: none;
-  transition: background var(--duration-fast), color var(--duration-fast);
-}
-.side a::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 3px;
-  height: 0;
-  border-radius: 99px;
-  background: var(--color-accent);
-  transform: translateY(-50%);
-  transition: height var(--duration-fast);
-}
-.side a.on::before {
-  height: 18px;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 .side a:hover {
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--color-text-1);
+  background: #1c1c20;
+  color: #d4d4d8;
 }
 .side a.on {
-  background: rgba(109, 77, 255, 0.22);
-  color: var(--color-text-1);
+  background: #26262b;
+  color: #d4d4d8;
   font-weight: 600;
 }
 .state {
   flex-shrink: 0;
-  padding: 2px 7px;
-  border-radius: 99px;
-  border: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--color-text-4);
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: none;
+  background: #222226;
+  color: #8d8d93;
   font-size: 10px;
   font-weight: 500;
 }
 .state.ok {
-  border-color: rgba(52, 211, 153, 0.35);
-  background: rgba(52, 211, 153, 0.1);
-  color: #6ee7b7;
+  background: #24302a;
+  color: #b7c9be;
 }
 .diag-row span i {
   display: block;
@@ -828,21 +817,20 @@ function navReady(id: SettingsSection) {
 .page-lead {
   max-width: 720px;
   margin: 0 0 18px;
-  padding: 11px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
+  padding: 0;
+  border: none;
+  background: transparent;
   font-size: 12.5px;
   line-height: 1.65;
-  color: var(--color-text-3);
+  color: #8d8d93;
 }
 .onboarding {
   max-width: 900px;
   margin: 0 0 16px;
-  padding: 16px 18px;
-  border: 1px solid rgba(126, 180, 255, 0.28);
-  border-radius: 12px;
-  background: linear-gradient(135deg, rgba(126, 180, 255, 0.08), rgba(167, 139, 250, 0.05));
+  padding: 14px 16px;
+  border: none;
+  border-radius: 4px;
+  background: #18181b;
 }
 .onboarding-head {
   display: flex;
@@ -853,7 +841,7 @@ function navReady(id: SettingsSection) {
 }
 .onboarding-head > div > b { font-size: 15px; color: var(--color-text-1); }
 .onboarding-head p { margin: 4px 0 0; color: var(--color-text-3); font-size: 12px; }
-.onboarding-done { flex-shrink: 0; color: #34d399; font-size: 12px; }
+.onboarding-done { flex-shrink: 0; color: #b7c9be; font-size: 12px; }
 .onboarding-steps {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -867,14 +855,15 @@ function navReady(id: SettingsSection) {
   margin: 0;
   padding: 13px 14px;
   text-align: left;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-bg-1);
-  color: var(--color-text-2);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c1f;
+  color: #b7b7bc;
   cursor: pointer;
+  transition: background 0.18s ease;
 }
-.onboarding-step.active { border-color: rgba(126, 180, 255, 0.6); }
-.onboarding-step.done i { background: rgba(16, 185, 129, 0.16); color: #34d399; }
+.onboarding-step.active { background: #26262b; }
+.onboarding-step.done i { background: #24302a; color: #b7c9be; }
 .onboarding-step.locked { opacity: 0.5; cursor: not-allowed; }
 .onboarding-step i {
   display: grid;
@@ -882,9 +871,9 @@ function navReady(id: SettingsSection) {
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  border-radius: 50%;
-  background: rgba(126, 180, 255, 0.16);
-  color: #a8c4ff;
+  border-radius: 4px;
+  background: #2a2a2e;
+  color: #c8c8cc;
   font-style: normal;
   font-weight: 700;
 }
@@ -908,8 +897,8 @@ function navReady(id: SettingsSection) {
   justify-content: space-between;
   gap: 16px;
   padding: 13px 20px;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-bg-1);
+  border-top: none;
+  background: #161618;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
@@ -919,17 +908,18 @@ function navReady(id: SettingsSection) {
 }
 .save {
   margin: 0;
-  padding: 9px 20px;
-  border: 1px solid rgba(162, 139, 255, 0.6);
-  border-radius: 9px;
-  background: #6d4dff;
-  color: #fff;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  background: #3a3a40;
+  color: #e4e4e7;
   font-size: 12.5px;
   font-weight: 650;
   cursor: pointer;
+  transition: background 0.18s ease;
 }
 .save:hover:not(:disabled) {
-  background: #8065ff;
+  background: #48484f;
 }
 .save:disabled {
   opacity: 0.5;
@@ -942,10 +932,10 @@ function navReady(id: SettingsSection) {
   max-width: 940px;
 }
 .panel {
-  padding: 18px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-1);
+  padding: 16px;
+  border: none;
+  border-radius: 4px;
+  background: #18181b;
 }
 .panel h2 {
   margin: 0 0 6px;
@@ -975,9 +965,9 @@ function navReady(id: SettingsSection) {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  border: none;
+  border-radius: 4px;
+  background: #141416;
   margin-bottom: 10px;
 }
 .engine-name {
@@ -989,19 +979,19 @@ function navReady(id: SettingsSection) {
 .link {
   margin: 0;
   padding: 7px 12px;
-  border-radius: 8px;
+  border-radius: 4px;
   font-size: 12px;
   font-weight: 550;
   cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 .mini {
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
+  border: none;
+  background: #26262b;
+  color: #d0d0d4;
 }
 .mini:hover:not(:disabled) {
-  border-color: var(--color-border-strong);
-  background: rgba(255, 255, 255, 0.05);
+  background: #323238;
 }
 .mini:disabled {
   opacity: 0.5;
@@ -1012,12 +1002,12 @@ function navReady(id: SettingsSection) {
   background: transparent;
 }
 .danger {
-  border: 1px solid rgba(248, 113, 113, 0.35);
+  border: none;
   background: transparent;
-  color: #fca5a5;
+  color: #c4a0a0;
 }
 .danger:hover {
-  background: rgba(239, 68, 68, 0.1);
+  background: #2a2222;
 }
 .diag {
   margin-top: 10px;
@@ -1035,7 +1025,7 @@ function navReady(id: SettingsSection) {
   justify-content: space-between;
   gap: 10px;
   padding: 7px 0;
-  border-bottom: 1px dashed var(--color-border);
+  border-bottom: none;
   color: var(--color-text-2);
   font-size: 12px;
 }
@@ -1053,7 +1043,7 @@ function navReady(id: SettingsSection) {
 }
 .storage-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #6f8cff, #a78bfa);
+  background: #5a5a62;
 }
 .path {
   margin: 0 0 12px;
@@ -1062,9 +1052,9 @@ function navReady(id: SettingsSection) {
   line-height: 1.5;
   word-break: break-all;
   color: var(--color-text-2);
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: 9px;
+  background: #141416;
+  border: none;
+  border-radius: 4px;
 }
 .storage-info {
   display: flex;
@@ -1081,9 +1071,9 @@ function navReady(id: SettingsSection) {
 .ss div {
   text-align: center;
   padding: 10px 6px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  border: none;
+  border-radius: 4px;
+  background: #141416;
 }
 .ss b {
   display: block;
@@ -1098,7 +1088,7 @@ function navReady(id: SettingsSection) {
   display: flex;
   justify-content: space-between;
   padding: 8px 0;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: none;
   font-size: 12px;
   color: var(--color-text-3);
 }
@@ -1113,16 +1103,16 @@ function navReady(id: SettingsSection) {
   align-items: center;
   margin-top: 10px;
   padding: 12px 14px;
-  border: 1px solid rgba(59, 130, 246, 0.5);
-  border-radius: 8px;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.18), rgba(124, 58, 237, 0.13));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 6px 20px rgba(37, 99, 235, 0.08);
+  border: none;
+  border-radius: 4px;
+  background: #1c1c1f;
+  box-shadow: none;
 }
 .qq-group span {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #bfdbfe;
+  color: #b7b7bc;
   font-weight: 600;
 }
 .qq-group span i {
@@ -1130,20 +1120,45 @@ function navReady(id: SettingsSection) {
   place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: 7px;
-  background: #2563eb;
-  color: white;
+  border-radius: 4px;
+  background: #2a2a2e;
+  color: #d0d0d4;
   font-size: 10px;
   font-style: normal;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: -0.3px;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+  box-shadow: none;
 }
 .about-row.qq-group b {
-  color: #f8fafc;
+  color: #d4d4d8;
   font-size: 16px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 1.5px;
-  text-shadow: 0 0 14px rgba(96, 165, 250, 0.5);
+  text-shadow: none;
+}
+.settings :deep(input),
+.settings :deep(select),
+.settings :deep(textarea) {
+  border-color: transparent;
+  border-radius: 4px;
+  color: #c8c8ce;
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: outline-color 0.2s ease, background-color 0.2s ease;
+}
+.settings :deep(input:focus),
+.settings :deep(select:focus),
+.settings :deep(textarea:focus) {
+  border-color: transparent;
+  outline-color: rgba(255, 255, 255, 0.12);
+}
+.settings :deep(button),
+.settings :deep(.panel),
+.settings :deep(article) {
+  border-radius: 4px;
+}
+.settings :deep(.panel),
+.settings :deep(article) {
+  border-color: transparent;
 }
 </style>

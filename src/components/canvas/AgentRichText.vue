@@ -292,7 +292,7 @@ async function onClick(ev: MouseEvent) {
 .rich :deep(a) {
   color: var(--color-accent);
   text-decoration: none;
-  border-bottom: 1px dashed rgba(126, 180, 255, 0.45);
+  border-bottom: none;
 }
 .rich :deep(h1),
 .rich :deep(h2),
@@ -331,9 +331,9 @@ async function onClick(ev: MouseEvent) {
 .rich :deep(blockquote) {
   margin: 8px 0;
   padding: 6px 10px;
-  border-left: 2px solid rgba(126, 180, 255, 0.5);
-  border-radius: 0 6px 6px 0;
-  background: rgba(126, 180, 255, 0.07);
+  border-left: none;
+  border-radius: 4px;
+  background: #1c1c20;
   color: var(--color-text-3);
   font-size: 12.5px;
 }
@@ -378,7 +378,7 @@ async function onClick(ev: MouseEvent) {
   padding: 1px 5px;
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.07);
-  border: 1px solid var(--color-border);
+  border: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.88em;
   color: #cbd5ff;
@@ -388,8 +388,8 @@ async function onClick(ev: MouseEvent) {
 .rich :deep(.tb-wrap) {
   margin: 8px 0 10px;
   overflow-x: auto;
-  border: 1px solid var(--color-border);
-  border-radius: 9px;
+  border: none;
+  border-radius: 4px;
 }
 .rich :deep(table) {
   width: 100%;
@@ -415,8 +415,8 @@ async function onClick(ev: MouseEvent) {
 /* ── 代码块 / 提示词卡片 ── */
 .rich :deep(.code-card) {
   margin: 8px 0 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border: none;
+  border-radius: 4px;
   background: var(--color-bg-0);
   overflow: hidden;
 }
@@ -425,8 +425,8 @@ async function onClick(ev: MouseEvent) {
   align-items: center;
   gap: 8px;
   padding: 5px 8px 5px 10px;
-  border-bottom: 1px solid var(--color-border);
-  background: rgba(255, 255, 255, 0.028);
+  border-bottom: none;
+  background: #18181b;
 }
 .rich :deep(.code-lang) {
   font-size: 10.5px;
@@ -443,8 +443,8 @@ async function onClick(ev: MouseEvent) {
 .rich :deep(.code-act) {
   margin: 0 0 0 auto;
   padding: 2px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border: none;
+  border-radius: 4px;
   background: transparent;
   color: var(--color-text-3);
   font-size: 10.5px;
@@ -456,9 +456,8 @@ async function onClick(ev: MouseEvent) {
   margin-left: 4px;
 }
 .rich :deep(.code-act:hover) {
-  border-color: rgba(126, 180, 255, 0.5);
-  background: rgba(126, 180, 255, 0.1);
-  color: var(--color-text-1);
+  background: #2c2c32;
+  color: #d4d4d8;
 }
 .rich :deep(.code-body) {
   margin: 0;
