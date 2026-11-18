@@ -61,7 +61,7 @@ function defaultSettings(): ProjectSettings {
       position: 'bottom',
       bold: true
     },
-    defaultTransition: 'fade',
+    defaultTransition: 'none',
     bgmVolume: 0.22,
     originalVolume: 0.55,
     keepAmbientAudio: true,

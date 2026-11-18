@@ -443,6 +443,14 @@ function createWindow() {
     }
   })
 
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === 'https://www.bilibili.com/video/BV1o6n66fE5p/') {
+      void shell.openExternal(url).catch(() => undefined)
+      return { action: 'deny' }
+    }
+    return { action: 'allow' }
+  })
+
   const sendMax = () => {
     win.webContents.send('window:maximized', win.isMaximized())
   }

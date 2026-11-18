@@ -10,6 +10,8 @@ import GradientButton from '@/components/common/GradientButton.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import { openLightbox } from '@/composables/useLightbox'
+import GalleryTemplates from '@/components/common/GalleryTemplates.vue'
+import { galleryTemplates } from '@/utils/galleryTemplates'
 
 const props = defineProps<{
   open: boolean
@@ -35,7 +37,9 @@ const project = useProjectStore()
 const picked = ref<Set<ID>>(new Set())
 const urls = ref<Record<string, string>>({})
 const loading = ref(false)
-const tab = ref<'page' | 'library'>('page')
+const importing = ref(false)
+const importError = ref('')
+const tab = ref<'page' | 'library' | 'templates'>('page')
 const libraryFolder = ref(LIBRARY_PUBLIC_ID)
 
 const kind = computed(() => props.kind ?? 'image')
@@ -102,6 +106,7 @@ watch(
   () => props.open,
   async (open) => {
     if (!open) return
+    importError.value = ''
     picked.value = new Set(props.selectedIds ?? [])
     tab.value =
       props.defaultTab ?? (props.pageIds?.length || !showTabs.value ? 'page' : 'library')
@@ -122,6 +127,7 @@ watch([tab, libraryFolder], () => {
 })
 
 async function loadUrls() {
+  if (tab.value === 'templates') return
   const next: Record<string, string> = { ...urls.value }
   for (const a of list.value) {
     if (next[a.id]) continue
@@ -147,9 +153,32 @@ function toggle(id: ID) {
   }
 }
 
-function confirm() {
-  emit('confirm', [...picked.value])
-  emit('close')
+async function confirm() {
+  if (importing.value) return
+  importing.value = true
+  importError.value = ''
+  try {
+    const ids: ID[] = []
+    for (const id of picked.value) {
+      const template = galleryTemplates.find(item => item.id === id)
+      if (!template) { ids.push(id); continue }
+      const filename = `图库模板-${template.title}.jpg`
+      const existing = assets.all.find(asset => asset.kind === 'image' && asset.filename === filename && asset.prompt === template.id && asset.projectId === project.current?.id)
+      if (existing) { ids.push(existing.id); continue }
+      const response = await fetch(template.url)
+      if (!response.ok) throw new Error(`无法读取「${template.title}」，请重试。`)
+      const blob = await response.blob()
+      if (!blob.type.startsWith('image/')) throw new Error(`「${template.title}」不是有效图片。`)
+      const asset = await assets.add(blob, 'image', 'uploaded', { filename, prompt: template.id, projectId: project.current?.id })
+      ids.push(asset.id)
+    }
+    emit('confirm', ids)
+    emit('close')
+  } catch (error) {
+    importError.value = error instanceof Error ? error.message : '图库模板导入失败，请重试。'
+  } finally {
+    importing.value = false
+  }
 }
 
 function fmtSize(bytes: number) {
@@ -184,6 +213,7 @@ function labelOf(a: Asset) {
           <div v-if="showTabs" class="tabs">
             <button type="button" :class="{ on: tab === 'page' }" @click="tab = 'page'">{{ pageTabLabel }}</button>
             <button type="button" :class="{ on: tab === 'library' }" @click="tab = 'library'">资产库</button>
+            <button v-if="kind === 'image' || kind === 'all'" type="button" :class="{ on: tab === 'templates' }" @click="tab = 'templates'">图库模板</button>
           </div>
           <div v-if="showTabs && tab === 'library'" class="folder-rail">
             <button
@@ -207,6 +237,7 @@ function labelOf(a: Asset) {
           </div>
 
           <div v-if="loading" class="loading">加载资源库...</div>
+          <GalleryTemplates v-else-if="tab === 'templates'" selectable :selected="picked" @pick="toggle" />
           <EmptyState
             v-else-if="list.length === 0"
             icon="📦"
@@ -251,9 +282,10 @@ function labelOf(a: Asset) {
 
           <footer class="foot">
             <span class="count">已选 {{ picked.size }} 项</span>
-            <GradientButton type="ghost" @click="emit('close')">取消</GradientButton>
-            <GradientButton :disabled="picked.size === 0" @click="confirm">
-              选用
+            <span v-if="importError" role="alert">{{ importError }}</span>
+            <GradientButton type="ghost" :disabled="importing" @click="emit('close')">取消</GradientButton>
+            <GradientButton :disabled="picked.size === 0 || importing" @click="confirm">
+              {{ importing ? '正在导入…' : '选用' }}
             </GradientButton>
           </footer>
         </div>

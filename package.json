@@ -1,7 +1,7 @@
 {
   "name": "ai-cut",
   "private": true,
-  "version": "0.1.32",
+  "version": "0.1.33",
   "type": "module",
   "main": "dist-electron/main.js",
   "description": "剧流 Studio：开源 AI短剧生成、AI短剧工作台与 AI video workflow studio",
@@ -30,6 +30,7 @@
     "type-check": "vue-tsc --noEmit",
     "test:agent": "node scripts/test-agent-redo.mjs",
     "test:comfy": "node scripts/test-comfy-reference-slots.mjs",
+    "test:continuous": "node scripts/test-continuous-capture.mjs",
     "diagnose:storyboard": "node scripts/diagnose-storyboard-llm.mjs"
   },
   "build": {

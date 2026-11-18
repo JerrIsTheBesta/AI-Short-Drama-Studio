@@ -126,6 +126,13 @@ export function buildProjectContext(userText: string) {
         missingVideos: p.shots.filter((s) => !s.videoAssetId).length,
         missingAudio: p.shots.filter((s) => needsExternalTts(s, p) && !s.audioAssetId).length
       },
+      canvasRoster: (p.canvas?.nodes ?? []).slice(0, 80).map((node) => ({
+        id: node.id,
+        type: node.type,
+        label: node.data.label || node.type,
+        status: node.status ?? 'idle',
+        hasOutput: Boolean(node.data.outputAssetId)
+      })),
       ...(sections.includes('script') && p.script
         ? {
             script: {

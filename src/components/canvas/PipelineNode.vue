@@ -274,6 +274,10 @@ const assetId = computed(() => {
 })
 
 const mediaAspect = computed(() => {
+  const meta = assetId.value ? assets.getMeta(assetId.value) : undefined
+  if (type.value !== 'shotFrames' && meta && (meta.kind === 'image' || meta.kind === 'video') && meta.width > 0 && meta.height > 0) {
+    return `${meta.width} / ${meta.height}`
+  }
   if (type.value === 'subject' || type.value === 'prop' || type.value === 'sceneProps' || type.value === 'scene') {
     return cssAspectRatio('16:9')
   }
@@ -1114,7 +1118,9 @@ const cropStyle = computed(() => ({
       <template v-else-if="isVideoNode && videoUrl">
         <video
           ref="videoEl"
-          class="nodrag nowheel"
+          class="nowheel"
+          :draggable="false"
+          @dragstart.prevent
           :src="videoUrl"
           :poster="mediaUrl && mediaUrl !== videoUrl ? mediaUrl : undefined"
           playsinline
@@ -1124,15 +1130,14 @@ const cropStyle = computed(() => ({
           @play="onVideoPlay"
           @pause="onVideoPause"
           @ended="onVideoEnded"
-          @click.stop="togglePlay"
         />
-        <button v-if="!playing" class="play-btn nodrag" type="button" title="播放" @click.stop="togglePlay" @mousedown.stop>
-          ▶
+        <button class="play-btn nodrag" :class="{ playing }" type="button" :title="playing ? '暂停' : '播放'" @click.stop="togglePlay" @mousedown.stop>
+          {{ playing ? 'Ⅱ' : '▶' }}
         </button>
       </template>
       <div v-else-if="type === 'shotFrames'" class="frame-pair">
         <div class="fp-cell">
-          <img v-if="frameUrls.start" :src="frameUrls.start" alt="起始帧" />
+          <img v-if="frameUrls.start" :src="frameUrls.start" alt="起始帧" :draggable="false" @dragstart.prevent />
           <div v-else class="fp-ph">＋</div>
           <span class="fp-tag">起</span>
           <button
@@ -1144,7 +1149,7 @@ const cropStyle = computed(() => ({
         </div>
         <span class="fp-arrow">→</span>
         <div class="fp-cell">
-          <img v-if="frameUrls.end" :src="frameUrls.end" alt="结束帧" />
+          <img v-if="frameUrls.end" :src="frameUrls.end" alt="结束帧" :draggable="false" @dragstart.prevent />
           <div v-else class="fp-ph">＋</div>
           <span class="fp-tag">末</span>
           <button
@@ -1155,7 +1160,7 @@ const cropStyle = computed(() => ({
           >↺</button>
         </div>
       </div>
-      <img v-else-if="mediaUrl" :src="mediaUrl" alt="" />
+      <img v-else-if="mediaUrl" :src="mediaUrl" alt="" :draggable="false" @dragstart.prevent />
       <div
         v-else
         class="ph"
@@ -1526,7 +1531,7 @@ const cropStyle = computed(() => ({
   width: 100%;
   background: var(--color-node-well);
   overflow: hidden;
-  border-radius: 6px 6px 0 0;
+  border-radius: inherit;
 }
 .pnode-media img,
 .pnode-media video {
@@ -1540,8 +1545,12 @@ const cropStyle = computed(() => ({
   background: var(--color-node-well);
 }
 .pnode-media video {
-  cursor: pointer;
+  cursor: grab;
 }
+.pnode-media img { user-select: none; -webkit-user-drag: none; cursor: grab; }
+.pnode-media img:active, .pnode-media video:active { cursor: grabbing; }
+.pnode-media .play-btn.playing { opacity: 0; }
+.pnode-media:hover .play-btn.playing, .pnode-media .play-btn.playing:focus-visible { opacity: 1; }
 .play-btn {
   position: absolute;
   left: 50%;

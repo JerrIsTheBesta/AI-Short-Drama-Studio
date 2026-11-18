@@ -194,8 +194,35 @@ export function rescueStrandedFreeformNodes(nodes: CanvasNode[]): CanvasNode[] |
   })
 }
 
+const FIXED_PIPELINE_TYPES = new Set<CanvasNode['type']>([
+  'script',
+  'groupFrame',
+  'subject',
+  'subjectProps',
+  'prop',
+  'scene',
+  'sceneProps',
+  'shotBoard',
+  'shotImage',
+  'shotFrames',
+  'shotVideo',
+  'audio',
+  'export',
+  'final'
+])
+
 export function rebuildCanvasGraph(project: Project, preservePositions = true): CanvasGraph {
   const prevList = project.canvas?.nodes ?? []
+  if (project.continuousCaptureEnabled) {
+    const nodes = prevList.filter((node) => !FIXED_PIPELINE_TYPES.has(node.type))
+    const ids = new Set(nodes.map((node) => node.id))
+    return {
+      nodes,
+      edges: (project.canvas?.edges ?? []).filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+      groups: [],
+      viewport: project.canvas?.viewport ?? emptyCanvas().viewport
+    }
+  }
   const subjects = project.subjects ?? []
   const storyProps = project.props ?? []
   const scenes = project.scenes ?? []
@@ -609,7 +636,7 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
 
   // 固定流程是模板层；用户追加的自由生图/视频节点属于创作层，重整布局时不能覆盖。
   const freeNodes = prevList.filter(
-    (node) => node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen' || node.type === 'compose'
+    (node) => Boolean(node.data.captureId) || node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen' || node.type === 'compose'
   )
   const freeIds = new Set(freeNodes.map((node) => node.id))
   for (const node of freeNodes) {
@@ -623,6 +650,10 @@ export function rebuildCanvasGraph(project: Project, preservePositions = true): 
   }
 
   const viewport = project.canvas?.viewport ?? emptyCanvas().viewport
+  for (const node of nodes) {
+    const scale = prevAny.get(node.id)?.data.canvasScale
+    if (scale !== undefined) node.data.canvasScale = scale
+  }
   return { nodes, edges, groups, viewport }
 }
 

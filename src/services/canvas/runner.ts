@@ -1207,7 +1207,9 @@ export async function grabVideoLastFrameNode(
   if (!node) throw new Error('找不到这个视频节点')
   const shot = node.data.shotId ? p.shots.find((s) => s.id === node.data.shotId) : undefined
   const videoId =
-    node.type === 'final' || node.type === 'export' ? p.finalVideoAssetId : shot?.videoAssetId
+    node.type === 'final' || node.type === 'export'
+      ? p.finalVideoAssetId
+      : node.data.outputAssetId || shot?.videoAssetId
   if (!videoId) throw new Error('这个节点还没有视频，先生成视频再截取尾帧')
   const blob = await assets.getBlob(videoId)
   if (!blob) throw new Error('视频读取失败')
@@ -1220,7 +1222,7 @@ export async function grabVideoLastFrameNode(
   })
 
   const frameNodeId = `lastFrame:${node.id}`
-  const label = shot ? `第 ${shot.index + 1} 镜 · 尾帧` : '成片尾帧'
+  const label = shot ? `第 ${shot.index + 1} 镜 · 尾帧` : `${node.data.label || '视频'} · 尾帧`
   const existing = p.canvas.nodes.find((n) => n.id === frameNodeId)
   if (existing) {
     const old = existing.data.outputAssetId
@@ -2884,6 +2886,10 @@ export async function runCanvasNode(
   signal?: AbortSignal,
   opts?: NodeRunOpts
 ) {
+  if (useProjectStore().current?.canvas?.nodes.find(n => n.id === nodeId)?.data.captureId) {
+    const { runCaptureNode } = await import('@/services/continuous/capture')
+    return runCaptureNode(nodeId, msg => onProgress?.(nodeId, msg), signal, { manual: true })
+  }
   return withNodeJob(nodeId, async () => {
     pendingRun = { hd: Boolean(opts?.hd) }
     ensureNotCancelled(signal)

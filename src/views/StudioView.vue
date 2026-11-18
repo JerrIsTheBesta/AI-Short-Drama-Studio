@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, markRaw, nextTick, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { useRouter } from 'vue-router'
-import { VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
+import { SelectionMode, VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
-import { rebuildCanvasGraph, NODE_W, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
+import { rebuildCanvasGraph, NODE_W, pipelineNodeHeight, nextFreeformPosition, rescueStrandedFreeformNodes } from '@/services/canvas/layout'
 import { setCanvasReveal, setCanvasInspect, setCanvasSelect, setCanvasLinkMenu } from '@/services/canvas/canvasBridge'
 import { rebindShotScenes, optimizeShotVideoPrompt, optimizeFreeformVideoPrompt } from '@/services/canvas/runner'
 import {
   appendCanvasReferenceSource,
+  canvasNodeOutputAssetId,
   canvasNodeProducesImage,
   carryTextFromNode,
   nextCanvasLinks,
@@ -21,6 +22,9 @@ import {
 } from '@/services/canvas/references'
 import { isDesktop, desktop } from '@/services/desktop'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
+import CaptureTextNode from '@/components/canvas/CaptureTextNode.vue'
+import ResizableNode from '@/components/canvas/ResizableNode.vue'
+import { normalizeNodeScale } from '@/utils/nodeResize'
 import AudioNode from '@/components/canvas/AudioNode.vue'
 import ScriptDocNode from '@/components/canvas/ScriptDocNode.vue'
 import GroupFrame from '@/components/canvas/GroupFrame.vue'
@@ -138,7 +142,8 @@ function clampAgentToViewport() {
 
 watch(rightOpen, clampAgentToViewport)
 
-const nodeTypes = {
+const rawNodeTypes = {
+  captureText: CaptureTextNode,
   script: ScriptDocNode,
   subject: PipelineNode,
   prop: PipelineNode,
@@ -157,8 +162,12 @@ const nodeTypes = {
   audioGen: AudioGenNode,
   compose: ComposeNode
 }
+const nodeTypes = Object.fromEntries(Object.entries(rawNodeTypes).map(([type, renderer]) => [type, type === 'groupFrame' ? markRaw(renderer) : markRaw(defineComponent({
+  inheritAttrs: false,
+  setup(_, { attrs }) { return () => h(ResizableNode, { ...attrs, id: String(attrs.id), data: attrs.data as any, renderer: markRaw(renderer as Component) }) }
+}))]))
 
-const { onConnect, onNodeDragStop, onMoveEnd, fitView, screenToFlowCoordinate } = useVueFlow()
+const { onConnect, onNodeDragStop, onMoveEnd, fitView, screenToFlowCoordinate, getSelectedNodes, removeSelectedNodes } = useVueFlow()
 
 const ctxMenu = ref<{
   x: number
@@ -170,6 +179,36 @@ const ctxMenu = ref<{
   linkSide?: 'prev' | 'next'
   links?: LinkCanvasKind[]
 } | null>(null)
+
+// Expand rendered rows for taller images without rewriting saved canvas coordinates.
+const imageRowLayout = computed(() => {
+  const offsets = new Map<string, number>()
+  const growth = new Map<string, number>()
+  const p = project.current
+  const nodes = p?.canvas?.nodes
+  if (!p || !nodes) return { offsets, growth }
+  const byGroup = new Map<string, CanvasNode[]>()
+  for (const n of nodes) {
+    if (!n.parentGroupId) continue
+    const children = byGroup.get(n.parentGroupId) ?? []
+    children.push(n)
+    byGroup.set(n.parentGroupId, children)
+  }
+  for (const [group, children] of byGroup) {
+    let extra = 0
+    for (const n of children.sort((a, b) => a.position.y - b.position.y)) {
+      offsets.set(n.id, extra)
+      if ((!canvasNodeProducesImage(n) && n.type !== 'shotVideo') || n.type === 'shotFrames') continue
+      const id = canvasNodeOutputAssetId(p, n)
+      const asset = id ? assets.getMeta(id) : undefined
+      const defaultAspect = n.type === 'shotImage' || n.type === 'shotBoard' || n.type === 'shotVideo' ? p.settings.aspectRatio : '16:9'
+      const imageAspect = asset?.kind === 'image' && asset.width > 0 && asset.height > 0 ? `${asset.width}:${asset.height}` : defaultAspect
+      extra += Math.max(0, pipelineNodeHeight(imageAspect) * normalizeNodeScale(n.data.canvasScale) - pipelineNodeHeight(defaultAspect))
+    }
+    growth.set(group, extra)
+  }
+  return { offsets, growth }
+})
 
 const flowNodes = computed<Node[]>(() => {
   const graph = project.current?.canvas
@@ -183,7 +222,7 @@ const flowNodes = computed<Node[]>(() => {
         data: { ...n.data, nodeType: n.type },
         style: {
           width: `${n.data.width ?? 280}px`,
-          height: `${n.data.height ?? 240}px`
+          height: `${(n.data.height ?? 240) + (imageRowLayout.value.growth.get(n.id) ?? 0)}px`
         },
         draggable: true,
         selectable: false,
@@ -197,8 +236,8 @@ const flowNodes = computed<Node[]>(() => {
         position: n.position,
         data: { ...n.data, nodeType: n.type },
         style: {
-          width: `${n.data.width ?? 460}px`,
-          height: `${n.data.height ?? 720}px`
+          width: `${(n.data.width ?? 460) * normalizeNodeScale(n.data.canvasScale)}px`,
+          height: `${(n.data.height ?? 720) * normalizeNodeScale(n.data.canvasScale)}px`
         },
         draggable: true,
         zIndex: 2
@@ -207,7 +246,7 @@ const flowNodes = computed<Node[]>(() => {
     const mapped: Node = {
       id: n.id,
       type: n.type,
-      position: n.position,
+      position: { x: n.position.x, y: n.position.y + (imageRowLayout.value.offsets.get(n.id) ?? 0) },
       data: { ...n.data, nodeType: n.type },
       draggable: true,
       zIndex: n.type === 'imageGen' || n.type === 'videoGen' || n.type === 'audioGen' || n.type === 'compose' ? 12 : 1
@@ -242,6 +281,206 @@ const selected = computed<CanvasNode | null>(() => {
   return project.current.canvas.nodes.find((n) => n.id === id) ?? null
 })
 const selectedId = ref<string | null>(null)
+const selectionIds = ref<string[]>([])
+const selectionMenu = ref<{ x: number; y: number; actions: Array<{ id: string; label: string }> } | null>(null)
+const REF_LIMIT = 9
+
+function flowSelection(): CanvasNode[] {
+  const nodes = project.current?.canvas?.nodes || []
+  return getSelectedNodes.value
+    .map((item) => nodes.find((node) => node.id === item.id))
+    .filter((node): node is CanvasNode => Boolean(node))
+}
+
+function isPickText(node: CanvasNode) {
+  return node.type === 'script' || node.type === 'captureText'
+}
+
+function isPickVideo(node: CanvasNode) {
+  return node.type === 'videoGen' || node.type === 'shotVideo' || node.type === 'compose'
+}
+
+function byReadingOrder(nodes: CanvasNode[]) {
+  return [...nodes].sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
+}
+
+function placeSelectionMenu(event: Event | undefined, actions: Array<{ id: string; label: string }>) {
+  const point = event && 'clientX' in event ? (event as MouseEvent) : undefined
+  selectionMenu.value = {
+    x: point ? Math.max(8, Math.min(point.clientX, window.innerWidth - 216)) : 24,
+    y: point ? Math.max(8, Math.min(point.clientY, window.innerHeight - 240)) : 24,
+    actions
+  }
+}
+
+function onBoxSelect(event?: MouseEvent) {
+  const picked = flowSelection()
+  if (picked.length < 2) {
+    selectionIds.value = []
+    selectionMenu.value = null
+    return
+  }
+  const texts = picked.filter(isPickText)
+  if (texts.length > 1) toast.info('文字一次只带第一段，删除会带上全部选中的节点')
+  selectionIds.value = picked.map((node) => node.id)
+  const nodes = texts.length > 1
+    ? picked.filter((node) => !texts.slice(1).some((text) => text.id === node.id))
+    : picked
+  const videos = byReadingOrder(nodes.filter(isPickVideo))
+  const images = byReadingOrder(nodes.filter((node) => canvasNodeProducesImage(node)))
+  const text = texts[0]
+  const actions: Array<{ id: string; label: string }> = []
+  if (videos.length >= 2 && !images.length) {
+    actions.push({ id: 'compose', label: '合成视频' }, { id: 'download', label: '批量下载' })
+  } else if (images.length && videos.length === 1) {
+    actions.push({ id: 'attach', label: '加入参考图' })
+  } else if (images.length && !videos.length) {
+    actions.push({ id: 'video', label: '添加视频节点' }, { id: 'image', label: '生图节点' })
+  } else if (videos.length === 1 && text && !images.length) {
+    actions.push({ id: 'attach', label: '加入文字' })
+  } else if (videos.length >= 2) {
+    actions.push({ id: 'compose', label: '合成视频' }, { id: 'download', label: '批量下载' })
+  }
+  placeSelectionMenu(event, actions)
+}
+
+function selectionNodes() {
+  const all = project.current?.canvas?.nodes || []
+  const nodes = selectionIds.value
+    .map((id) => all.find((node) => node.id === id))
+    .filter((node): node is CanvasNode => Boolean(node))
+  return {
+    videos: byReadingOrder(nodes.filter(isPickVideo)),
+    images: byReadingOrder(nodes.filter((node) => canvasNodeProducesImage(node))).slice(0, REF_LIMIT),
+    text: nodes.find(isPickText)
+  }
+}
+
+function connectNodes(pairs: Array<[string, string]>) {
+  const canvas = project.current?.canvas
+  if (!canvas || !pairs.length) return
+  const edges = [...canvas.edges]
+  for (const [source, target] of pairs) {
+    const id = `e-${source}-${target}-in`
+    if (!edges.some((edge) => edge.id === id || (edge.source === source && edge.target === target))) {
+      edges.push({ id, source, target, sourceHandle: 'out', targetHandle: 'in' })
+    }
+  }
+  project.setCanvas({ ...canvas, edges })
+}
+
+function composeSelection() {
+  const { videos } = selectionNodes()
+  if (videos.length < 2 || !project.current) return
+  const last = videos[videos.length - 1]
+  const id = `compose_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+  project.addCanvasNode({
+    id,
+    type: 'compose',
+    position: { x: last.position.x + 280, y: last.position.y },
+    data: { label: '合成' },
+    status: 'idle'
+  })
+  connectNodes(videos.map((node) => [node.id, id]))
+  selectedId.value = id
+  selectionMenu.value = null
+  selectionIds.value = []
+  toast.success(`已把 ${videos.length} 段视频接到合成节点`)
+}
+
+async function downloadSelection() {
+  const { videos } = selectionNodes()
+  let saved = 0
+  for (const node of videos) {
+    const assetId = project.current ? canvasNodeOutputAssetId(project.current, node) : undefined
+    const blob = assetId ? await assets.getBlob(assetId) : undefined
+    if (!blob) continue
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${(node.data.label || '视频').replace(/[\\/:*?"<>|]/g, ' ')}.mp4`
+    link.click()
+    URL.revokeObjectURL(url)
+    saved += 1
+    await new Promise((resolve) => setTimeout(resolve, 180))
+  }
+  toast[saved ? 'success' : 'warn'](saved ? `开始下载 ${saved} 个视频` : '这些视频还没有成片')
+}
+
+function addFromSelection(type: 'imageGen' | 'videoGen') {
+  if (!project.current) return
+  const { images, text } = selectionNodes()
+  if (!images.length) return
+  const count = (project.current.canvas?.nodes ?? []).filter((node) => node.type === type).length + 1
+  const id = `${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+  const anchor = images[images.length - 1]
+  project.addCanvasNode({
+    id,
+    type,
+    position: nextFreeformPosition(project.current.canvas?.nodes ?? [], { source: anchor, place: 'after' }),
+    status: 'idle',
+    data: {
+      label: type === 'videoGen' ? `视频 ${count}` : `图片 ${count}`,
+      prompt: text ? carryTextFromNode(project.current, text) : '',
+      referenceAssetIds: [],
+      referenceSourceNodeIds: images.map((node) => node.id),
+      aspectRatio: project.current.settings.aspectRatio,
+      ...(type === 'videoGen'
+        ? { duration: 8, videoModel: 'h3' as const, videoResolution: project.current.settings.defaultVideoResolution || '768p' }
+        : {})
+    }
+  })
+  connectNodes([
+    ...images.map((node) => [node.id, id] as [string, string]),
+    ...(text ? [[text.id, id] as [string, string]] : [])
+  ])
+  selectedId.value = id
+  selectionMenu.value = null
+  selectionIds.value = []
+  toast.success(type === 'videoGen' ? `已添加视频节点，带上 ${images.length} 张参考图` : `已添加生图节点，带上 ${images.length} 张参考图`)
+}
+
+function attachSelection() {
+  if (!project.current) return
+  const { videos, images, text } = selectionNodes()
+  const video = videos[0]
+  if (!video || (!images.length && !text)) return
+  const before = new Set(video.data.referenceSourceNodeIds || [])
+  let added = 0
+  for (const image of images) {
+    if (appendCanvasReferenceSource(project.current, video.id, image.id) && !before.has(image.id)) added += 1
+  }
+  const prompt = text ? carryTextFromNode(project.current, text) : ''
+  if (prompt) {
+    const existing = video.data.prompt || ''
+    project.setCanvasNodePrompt(video.id, existing.includes(prompt) ? existing : `${existing}\n${prompt}`.trim())
+  }
+  connectNodes([
+    ...images.map((node) => [node.id, video.id] as [string, string]),
+    ...(text ? [[text.id, video.id] as [string, string]] : [])
+  ])
+  project.patchCanvasNode(video.id, { referenceSourceNodeIds: [...(video.data.referenceSourceNodeIds || [])] })
+  selectedId.value = video.id
+  selectionMenu.value = null
+  selectionIds.value = []
+  toast.success(
+    added && prompt
+      ? `已把 ${added} 张图和文字加入这个视频`
+      : added
+        ? `已把 ${added} 张图加入参考`
+        : prompt
+          ? '已把文字加入这个视频'
+          : '这些图已经在参考里了'
+  )
+}
+
+function runSelectionAction(id: string) {
+  if (id === 'compose') composeSelection()
+  else if (id === 'download') void downloadSelection()
+  else if (id === 'video') addFromSelection('videoGen')
+  else if (id === 'image') addFromSelection('imageGen')
+  else if (id === 'attach') attachSelection()
+}
 
 onMounted(async () => {
   if (!project.current) {
@@ -281,12 +520,14 @@ onMounted(async () => {
   setCanvasLinkMenu((nodeId, x, y, side) => openNodeLinkMenu(nodeId, x, y, side))
   setTimeout(() => fitView({ padding: 0.2 }), 80)
   window.addEventListener('keydown', onDupKey)
+  window.addEventListener('keydown', keepSpaceForSelection)
   window.addEventListener('resize', clampAgentToViewport)
 })
 
 onUnmounted(() => {
   stopAgentResize()
   window.removeEventListener('keydown', onDupKey)
+  window.removeEventListener('keydown', keepSpaceForSelection)
   window.removeEventListener('resize', clampAgentToViewport)
   setCanvasReveal(null)
   setCanvasInspect(null)
@@ -338,8 +579,8 @@ onNodeDragStop(({ node }) => {
   if (parentId) {
     const parent = project.current.canvas.nodes.find((n) => n.id === parentId)
     const pw = Number(parent?.data.width) || 0
-    const ph = Number(parent?.data.height) || 0
-    const cx = node.position.x + NODE_W / 2
+    const ph = (Number(parent?.data.height) || 0) + (imageRowLayout.value.growth.get(parentId) ?? 0)
+    const cx = node.position.x + (node.dimensions?.width || NODE_W) / 2
     const cy = node.position.y + 48
     const inside = cx >= 0 && cy >= 0 && cx <= pw && cy <= ph
     if (!inside && parent) {
@@ -348,6 +589,8 @@ onNodeDragStop(({ node }) => {
         y: parent.position.y + node.position.y
       }
       parentGroupId = undefined
+    } else {
+      position.y -= imageRowLayout.value.offsets.get(node.id) ?? 0
     }
   }
   const nodes = project.current.canvas.nodes.map((n) =>
@@ -501,14 +744,26 @@ function duplicateNode(id: string | null | undefined) {
   })
 }
 
-function deleteCtxNode(id: string | null | undefined) {
+function deleteSelection() {
+  const ids = selectionIds.value.filter((id) => canDeleteNode(id))
+  if (!ids.length || !project.current) return
+  if (!confirm(`删除选中的 ${ids.length} 个节点？`)) return
+  for (const id of ids) deleteCtxNode(id, { skipConfirm: true, quiet: true })
+  if (selectedId.value && ids.includes(selectedId.value)) selectedId.value = null
+  selectionMenu.value = null
+  selectionIds.value = []
+  removeSelectedNodes(getSelectedNodes.value.filter((node) => ids.includes(node.id)))
+  toast.success(`已删除 ${ids.length} 个节点`)
+}
+
+function deleteCtxNode(id: string | null | undefined, options?: { skipConfirm?: boolean; quiet?: boolean }) {
   if (!id || !project.current) return
   const n = project.current.canvas?.nodes.find((x) => x.id === id)
   if (!n || !canDeleteNode(id)) {
     closeCtxMenu()
     return
   }
-  if (!confirm('删除这个节点？')) {
+  if (!options?.skipConfirm && !confirm('删除这个节点？')) {
     closeCtxMenu()
     return
   }
@@ -557,7 +812,14 @@ function deleteCtxNode(id: string | null | undefined) {
   }
   if (selectedId.value === id) selectedId.value = null
   closeCtxMenu()
-  toast.success('已删除节点')
+  if (!options?.quiet) toast.success('已删除节点')
+}
+
+function keepSpaceForSelection(e: KeyboardEvent) {
+  if (e.code !== 'Space' || e.repeat) return
+  const target = e.target as HTMLElement | null
+  if (!target || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+  e.preventDefault()
 }
 
 function onDupKey(e: KeyboardEvent) {
@@ -884,6 +1146,22 @@ function addPipelineEntity(kind: 'subject' | 'scene' | 'shot' | 'prop') {
 }
 
 const creatingCanvas = ref(false)
+const renaming = ref(false)
+const nameInput = ref('')
+
+function startRename() {
+  renaming.value = true
+  nameInput.value = project.current?.name || ''
+}
+function commitRename() {
+  const name = nameInput.value.trim()
+  if (project.current && name) {
+    project.current.name = name
+    project.current.updatedAt = Date.now()
+    project.save()
+  }
+  renaming.value = false
+}
 
 async function newCanvas() {
   if (creatingCanvas.value) return
@@ -932,7 +1210,18 @@ function goClassic() {
       <button class="icon-btn" title="返回项目" @click="router.push('/')">
         <CanvasToolbarIcon name="back" />
       </button>
-      <strong>{{ project.current?.name || '画布' }}</strong>
+      <input
+        v-if="renaming"
+        v-model="nameInput"
+        class="name-input nodrag"
+        @keydown.enter="commitRename"
+        @keydown.escape="renaming = false"
+        @blur="commitRename"
+        autofocus
+      />
+      <button v-else class="project-name nodrag" type="button" title="修改项目名" @click="startRename">
+        {{ project.current?.name || '画布' }}
+      </button>
       <span class="dim">{{
         `${project.current?.shots.length || 0} 个分镜 · ${project.current?.canvas?.nodes.length || 0} 个节点`
       }}</span>
@@ -1037,8 +1326,13 @@ function goClassic() {
           :default-viewport="project.current?.canvas?.viewport"
           :min-zoom="0.2"
           :max-zoom="2"
+          selection-key-code="Space"
+          :selection-mode="SelectionMode.Partial"
+          :pan-activation-key-code="null"
           fit-view-on-init
           @node-click="onNodeClick"
+          @pane-click="selectionMenu = null; selectionIds = []"
+          @selection-end="onBoxSelect"
           @pane-context-menu="openCtxMenu"
           @node-context-menu="openCtxMenu"
         >
@@ -1050,6 +1344,29 @@ function goClassic() {
         </div>
       </div>
       <Teleport to="body">
+        <div
+          v-if="selectionMenu"
+          class="ctx-mask"
+          @click="selectionMenu = null"
+          @contextmenu.prevent="selectionMenu = null"
+        />
+        <div
+          v-if="selectionMenu"
+          class="ctx-menu"
+          :style="{ left: `${selectionMenu.x}px`, top: `${selectionMenu.y}px` }"
+          @mousedown.stop
+        >
+          <button
+            v-for="action in selectionMenu.actions"
+            :key="action.id"
+            type="button"
+            @mousedown.prevent.stop="runSelectionAction(action.id)"
+          >
+            {{ action.label }}
+          </button>
+          <div v-if="selectionMenu.actions.length" class="ctx-sep" />
+          <button type="button" class="danger" @mousedown.prevent.stop="deleteSelection">删除</button>
+        </div>
         <div
           v-if="ctxMenu"
           class="ctx-mask"
@@ -1191,6 +1508,26 @@ function goClassic() {
   -webkit-app-region: drag;
   app-region: drag;
 }
+.project-name, .name-input {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  max-width: 280px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-1);
+  font: inherit;
+  font-weight: 650;
+}
+.project-name {
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-name:hover { background: rgba(255, 255, 255, 0.06); }
+.name-input { width: 220px; padding: 4px 6px; border-radius: 4px; background: #1c1c20; outline: 1px solid rgba(255, 255, 255, 0.16); }
 .bar .dim {
   color: var(--color-text-4);
   font-size: 11px;
@@ -1550,6 +1887,14 @@ function goClassic() {
   border: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+.flow-wrap :deep(.vue-flow__pane.selection .vue-flow__node) {
+  pointer-events: none;
+}
+.flow-wrap:has(.vue-flow__node.selected ~ .vue-flow__node.selected) :deep(.vue-flow__node .toolbar-wrap),
+.flow-wrap:has(.vue-flow__node.selected ~ .vue-flow__node.selected) :deep(.vue-flow__node .prompt),
+.flow-wrap:has(.vue-flow__node.selected ~ .vue-flow__node.selected) :deep(.vue-flow__node .anode .panel) {
+  display: none;
 }
 .flow-wrap :deep(.vue-flow__node:hover:not(.vue-flow__node-groupFrame)) {
   z-index: 12 !important;

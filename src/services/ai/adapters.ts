@@ -793,6 +793,9 @@ export async function comfyPromptGenerate(opts: {
   signal?: AbortSignal
   kind?: 'image' | 'video'
   onProgress?: (msg: string) => void
+  /** Optional checkpoint: resume polling without uploading/submitting again. */
+  resumeTaskId?: string
+  onTaskSubmitted?: (id: string) => void | Promise<void>
 }): Promise<{ blob: Blob; mimeType: string }> {
   const base = trimSlash(opts.baseUrl).replace(/\/upload\/image$/i, '')
   const adapter = opts.adapter || {}
@@ -809,6 +812,8 @@ export async function comfyPromptGenerate(opts: {
     ...(adapter.headers || {})
   }
 
+  let promptId = opts.resumeTaskId?.trim() || ''
+  if (!promptId) {
   if (!adapter.workflowTemplate?.trim()) {
     throw new Error(
       '[comfyui] 缺少 adapter.workflowTemplate。请在设置页「适配器」粘贴 Comfy API 格式工作流 JSON，并让助手分析出输入映射。应用不会提供假装可用的默认工作流。'
@@ -962,10 +967,12 @@ export async function comfyPromptGenerate(opts: {
     )
   }
   const submitJson = await submit.json()
-  const promptId =
+  promptId =
     String(submitJson.prompt_id || submitJson.promptId || submitJson.task_id || getByJsonPath(submitJson, 'data.prompt_id') || '').trim()
   if (!promptId) {
     throw new Error(`[comfyui] 提交成功但没有 prompt_id：${JSON.stringify(submitJson).slice(0, 200)}`)
+  }
+  await opts.onTaskSubmitted?.(promptId)
   }
 
   const started = Date.now()

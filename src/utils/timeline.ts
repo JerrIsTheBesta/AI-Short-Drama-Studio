@@ -17,8 +17,8 @@ export function buildTimelineFromShots(project: Project): TimelineClip[] {
       startTime: 0,
       duration: s.duration,
       sourceIn: 0,
-      transitionIn: project.settings.defaultTransition,
-      transitionDuration: 0.5,
+      transitionIn: 'none',
+      transitionDuration: 0,
       speed: 1,
       volume: 1,
       enabled: true

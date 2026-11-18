@@ -26,8 +26,12 @@ const selectedClipId = ref<string | null>(null)
 const previewingUrl = ref<string | null>(null)
 const previewBlob = ref<Blob | null>(null)
 const previewing_ = ref(false)
+const previewTitle = ref('成片预览')
+const previewFilename = ref('成片.mp4')
 const merging = ref(false)
 const mergeProgress = ref('')
+const previewProgress = ref<number | null>(null)
+const progressLabel = ref('合成')
 const videoPickerOpen = ref(false)
 const audioPickerOpen = ref(false)
 const importingVideo = ref(false)
@@ -40,8 +44,19 @@ const sourcePlayer = ref<HTMLVideoElement | null>(null)
 const pendingSourceTime = ref<number | null>(null)
 const playhead = ref(0)
 
+function clearAutomaticFades() {
+  const current = project.current
+  if (!current || current.settings.defaultTransition !== 'fade') return
+  const timeline = current.timeline.map((clip) =>
+    clip.transitionIn === 'fade' ? { ...clip, transitionIn: 'none' as const, transitionDuration: 0 } : clip
+  )
+  project.setTimeline(timeline)
+  project.setSettings({ defaultTransition: 'none' })
+}
+
 onMounted(async () => {
   if (!project.current) return
+  clearAutomaticFades()
   // 第一次进入按分镜顺序铺满；之后保留用户顺序，只补上新生成的视频。
   if (project.current.timeline.length === 0 && project.current.shots.length > 0) {
     autoBuildTimeline()
@@ -190,8 +205,8 @@ function addShotToTimeline(shot: Shot) {
     startTime: lastEnd,
     duration: shot.duration,
     sourceIn: 0,
-    transitionIn: project.current.settings.defaultTransition,
-    transitionDuration: 0.5,
+    transitionIn: 'none',
+    transitionDuration: 0,
     speed: 1,
     volume: 1,
     enabled: true
@@ -222,8 +237,8 @@ function appendMissingShots() {
       startTime: cursor,
       duration: shot.duration,
       sourceIn: 0,
-      transitionIn: project.current!.settings.defaultTransition,
-      transitionDuration: 0.5,
+      transitionIn: 'none',
+      transitionDuration: 0,
       speed: 1,
       volume: 1,
       enabled: true
@@ -252,8 +267,8 @@ function addVideoAssets(ids: string[]) {
       startTime: cursor,
       duration,
       sourceIn: 0,
-      transitionIn: project.current.settings.defaultTransition,
-      transitionDuration: 0.5,
+      transitionIn: 'none',
+      transitionDuration: 0,
       speed: 1,
       volume: 1,
       enabled: true
@@ -452,6 +467,12 @@ const totalDuration = computed(() =>
     .toFixed(1)
 )
 
+function noteComposeProgress(msg: string) {
+  const matched = /处理中\s+(\d+(?:\.\d+)?)%/.exec(msg)
+  if (!matched) return
+  previewProgress.value = Math.min(100, Math.round(Number(matched[1])))
+}
+
 /** 预览：用 FFmpeg 把当前时间线快速拼一下 */
 async function preview() {
   if (!project.current) return
@@ -461,8 +482,9 @@ async function preview() {
     return
   }
   merging.value = true
+  progressLabel.value = '预览合成'
+  previewProgress.value = 0
   try {
-    toast.info('开始预览合成（用 FFmpeg 拼接）...')
     const segments = await buildSegments()
     if (segments.length === 0) {
       toast.error('没有可用的视频片段')
@@ -474,17 +496,15 @@ async function preview() {
       fps: project.current.settings.fps,
       format: 'webm',
       mimeType: 'video/webm',
-      onProgress: (msg) => toast.info(msg, 1500)
+      onProgress: noteComposeProgress
     })
-    previewBlob.value = blob
-    if (previewingUrl.value) URL.revokeObjectURL(previewingUrl.value)
-    previewingUrl.value = URL.createObjectURL(blob)
-    previewing_.value = true
-    toast.success('预览就绪')
+    previewProgress.value = 100
+    showFinishedPreview(blob, '预览就绪', `${safeName()}.webm`)
   } catch (e: any) {
     toast.error('预览失败：' + e.message)
   } finally {
     merging.value = false
+    previewProgress.value = null
   }
 }
 
@@ -496,29 +516,29 @@ async function confirmMerge() {
   }
   const node = project.current.canvas?.nodes.find((item) => item.type === 'export' || item.type === 'final')
   merging.value = true
-  mergeProgress.value = '准备正式合成…'
+  progressLabel.value = '正式合成'
+  previewProgress.value = 0
+  mergeProgress.value = '合成中…'
   try {
     if (node) {
-      await runCanvasNode(node.id, (_id, message) => {
-        mergeProgress.value = message
-      })
+      await runCanvasNode(node.id, (_id, message) => noteComposeProgress(message))
     } else {
-      await generateFinalCut((message) => {
-        mergeProgress.value = message
-      })
+      await generateFinalCut(noteComposeProgress)
     }
     const assetId = project.current?.finalVideoAssetId
-    if (assetId) {
-      if (previewingUrl.value) URL.revokeObjectURL(previewingUrl.value)
-      previewingUrl.value = (await assets.getUrl(assetId)) || null
-      previewing_.value = Boolean(previewingUrl.value)
+    const blob = assetId ? await assets.getBlob(assetId) : undefined
+    if (!blob) {
+      toast.warn('合成结束了，但没有拿到成片文件')
+      return
     }
-    toast.success('正式视频已合成，可以预览或返回画布查看')
+    previewProgress.value = 100
+    showFinishedPreview(blob, '合成完成', `${safeName()}.mp4`)
   } catch (e: any) {
     toast.error(`合成失败：${e?.message || String(e)}`)
   } finally {
     merging.value = false
     mergeProgress.value = ''
+    previewProgress.value = null
   }
 }
 
@@ -540,6 +560,27 @@ async function buildSegments() {
     })
   }
   return segs
+}
+
+function safeName() {
+  return (project.current?.name || '成片').replace(/[\\/:*?"<>|]/g, ' ').trim() || '成片'
+}
+
+function showFinishedPreview(blob: Blob, title: string, filename: string) {
+  previewBlob.value = blob
+  if (previewingUrl.value?.startsWith('blob:')) URL.revokeObjectURL(previewingUrl.value)
+  previewingUrl.value = URL.createObjectURL(blob)
+  previewTitle.value = title
+  previewFilename.value = filename
+  previewing_.value = true
+}
+
+function downloadFinished() {
+  if (!previewingUrl.value) return
+  const a = document.createElement('a')
+  a.href = previewingUrl.value
+  a.download = previewFilename.value
+  a.click()
 }
 
 function next() {
@@ -580,12 +621,29 @@ function goBack() {
           预览
         </GradientButton>
         <GradientButton type="secondary" @click="next"><template #icon><EditIcon name="next" /></template>字幕设置</GradientButton>
+        <GradientButton v-if="previewingUrl && !previewing_" type="secondary" @click="previewing_ = true">
+          <template #icon><EditIcon name="play" /></template>
+          查看成片
+        </GradientButton>
         <GradientButton :loading="merging" :disabled="merging" @click="confirmMerge">
           <template #icon><EditIcon name="check" /></template>
           {{ merging ? (mergeProgress || '合成中…') : '确认并正式合成' }}
         </GradientButton>
       </div>
     </header>
+
+    <div
+      v-if="previewProgress !== null"
+      class="preview-progress"
+      role="progressbar"
+      aria-label="预览合成进度"
+      :aria-valuenow="previewProgress"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    >
+      <div class="preview-progress-fill" :style="{ width: `${previewProgress}%` }"></div>
+      <span>{{ progressLabel }} {{ previewProgress }}%</span>
+    </div>
 
     <div class="edit-layout">
       <aside class="left-panel">
@@ -733,22 +791,6 @@ function goBack() {
           </div>
         </GlassCard>
 
-        <transition name="fade">
-          <div v-if="previewing_ && previewingUrl" class="preview-wrap">
-            <GlassCard padding="md">
-              <div class="preview-head">
-                <h3><EditIcon name="play" :size="16" />预览</h3>
-                <button @click="previewing_ = false"><EditIcon name="close" :size="15" />关闭</button>
-              </div>
-              <video
-                :src="previewingUrl"
-                controls
-                autoplay
-                class="preview-video"
-              />
-            </GlassCard>
-          </div>
-        </transition>
       </main>
 
       <aside class="right-panel">
@@ -962,6 +1004,21 @@ function goBack() {
       @close="audioPickerOpen = false"
       @confirm="chooseBgm"
     />
+    <Teleport to="body">
+      <div v-if="previewing_ && previewingUrl" class="finish-mask" @click.self="previewing_ = false">
+        <section class="finish-dialog" role="dialog" aria-modal="true" aria-labelledby="finish-title">
+          <header>
+            <h2 id="finish-title">{{ previewTitle }}</h2>
+            <button type="button" @click="previewing_ = false">关闭</button>
+          </header>
+          <video :src="previewingUrl" controls autoplay class="finish-video" />
+          <footer>
+            <button type="button" class="ghost" @click="previewing_ = false">再改一改</button>
+            <button type="button" class="download" @click="downloadFinished">下载</button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1019,6 +1076,28 @@ function goBack() {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+.preview-progress {
+  position: relative;
+  height: 28px;
+  overflow: hidden;
+  background: #181b22;
+}
+.preview-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #3a3a40;
+  transition: width 0.2s ease;
+}
+.preview-progress span {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 12px;
+  color: #c8c8ce;
 }
 
 .edit-layout {
@@ -1381,9 +1460,63 @@ function goBack() {
   color: white;
 }
 
-.preview-wrap {
-  flex: 1;
-  min-height: 0;
+.finish-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.72);
+}
+.finish-dialog {
+  width: min(920px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #16181d;
+  color: #e8e8ec;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+.finish-dialog header,
+.finish-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.finish-dialog h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+.finish-dialog header button,
+.finish-dialog .ghost,
+.finish-dialog .download {
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.finish-dialog header button,
+.finish-dialog .ghost {
+  padding: 8px 12px;
+  background: transparent;
+  color: #b7b7bc;
+}
+.finish-dialog .download {
+  padding: 8px 18px;
+  background: #f4f4f5;
+  color: #18181b;
+}
+.finish-video {
+  width: 100%;
+  max-height: 68vh;
+  background: #000;
+  border-radius: 6px;
 }
 .preview-head {
   display: flex;

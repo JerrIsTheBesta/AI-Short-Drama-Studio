@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { runAgentTurn, type AgentEvent, type AgentMessage } from '@/services/canvas/agent'
+import { runContinuousTurn } from '@/services/continuous/capture'
+import { editSelectedCanvasText, isSelectedTextEdit } from '@/services/canvas/selectedText'
+import { rebuildCanvasGraph } from '@/services/canvas/layout'
 import { friendlyAiError, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
 import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/canvas/taskStore'
 import { estimateRequestText } from '@/services/canvas/toolRegistry'
@@ -66,6 +69,17 @@ const autonomy = ref<AgentAutonomy>('gated')
 const canvasLive = ref(false)
 const canvasTrace = ref<TraceRow[]>([])
 const project = useProjectStore()
+const continuousEnabled = computed(() => Boolean(project.current?.continuousCaptureEnabled))
+async function toggleContinuous() {
+  if (busy.value || !project.current) return
+  project.current.continuousCaptureEnabled = !continuousEnabled.value
+  project.current.updatedAt = Date.now()
+  project.setCanvas(rebuildCanvasGraph(project.current, true))
+  await project.save()
+  chips.value = continuousEnabled.value
+    ? [{ label: project.current.continuousCapture ? '查看连续拍计划' : '分析已有剧本', text: '查看连续拍计划' }]
+    : [{ label: '看看进度', text: '现在画布什么情况' }]
+}
 let offActivity: (() => void) | undefined
 const settings = useSettingsStore()
 const toast = useToastStore()
@@ -260,6 +274,8 @@ const currentAspectRatio = computed<AspectRatio>(
 )
 const imageProfiles = computed(() => settings.config.images ?? [])
 const videoProfiles = computed(() => settings.config.videos ?? [])
+const comfyImages = computed(() => imageProfiles.value.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate))
+const comfyVideos = computed(() => videoProfiles.value.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate))
 const activeImage = computed(
   () =>
     imageProfiles.value.find((p) => p.id === settings.config.activeImageId) ||
@@ -586,12 +602,21 @@ async function sendText(text: string) {
   controller = turnController
   await scrollToEnd()
   try {
-    const result = await runAgentTurn(messages.value, t, onProgress, {
+    const options = {
       signal: turnController.signal,
       autonomy: autonomy.value,
       selectedNodeId: props.selectedNode?.id,
       attachments: attachOptions
-    })
+    }
+    const result = isSelectedTextEdit(t, props.selectedNode) && props.selectedNode
+      ? {
+          reply: await editSelectedCanvasText(t, props.selectedNode, turnController.signal),
+          results: [],
+          chips: []
+        }
+      : continuousEnabled.value
+        ? await runContinuousTurn(t, onProgress, options)
+        : await runAgentTurn(messages.value, t, onProgress, options)
     thinking.value = false
     const think = trace.value.find((s) => s.kind === 'think' && s.status === 'running')
     if (think) think.status = 'done'
@@ -722,13 +747,20 @@ function visibleRows(rows: TraceRow[]) {
     </div>
 
     <div v-if="chips.length && !busy && !canvasLive" class="chips">
-      <button v-for="c in chips" :key="c.text + c.label" type="button" @click="sendText(c.text)">
+      <button
+        v-for="c in chips"
+        :key="c.text + c.label"
+        type="button"
+        :class="{ go: c.text === '继续' || c.label.startsWith('继续') }"
+        @click="sendText(c.text)"
+      >
         {{ c.label }}
       </button>
     </div>
 
     <form class="composer" @submit.prevent="send">
-      <p v-if="input.trim() && estimate.calls" class="estimate">
+      <p v-if="continuousEnabled" class="capture-hint">连续拍会判断你这句话是要接着拍、改文字，还是只是问问。</p>
+      <p v-if="!continuousEnabled && input.trim() && estimate.calls" class="estimate">
         预计 {{ estimate.calls }} 次调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
       </p>
       <div class="box" :class="{ busy }">
@@ -742,7 +774,7 @@ function visibleRows(rows: TraceRow[]) {
           v-model="input"
           rows="5"
           :disabled="busy"
-          placeholder="说一句话就行，例如：写一个修仙短剧并出 8 个分镜 / 画一张黄昏的海边 / 把第 3 镜改成手持跟拍"
+          :placeholder="continuousEnabled ? '粘贴完整剧本或附加剧本文件；已有剧本可直接说「分析剧本」。确认计划后回复「继续」。' : '说一句话就行，例如：写一个修仙短剧并出 8 个分镜 / 画一张黄昏的海边 / 把第 3 镜改成手持跟拍'"
           @keydown.enter.exact.prevent="send"
         />
         <div class="bar">
@@ -803,9 +835,20 @@ function visibleRows(rows: TraceRow[]) {
                 <button type="button" :class="{ on: prefTab === 'knowledge' }" @click="prefTab = 'knowledge'">写作知识库</button>
                 <button type="button" :class="{ on: prefTab === 'comfyui' }" @click="prefTab = 'comfyui'">ComfyUI</button>
               </div>
-              <div v-if="prefTab === 'comfyui'" class="pref-body">
-                <label>图片工作流<select :value="settings.config.activeImageId" @change="pickImage(($event.target as HTMLSelectElement).value)"><option value="" disabled>选择 ComfyUI 图片工作流</option><option v-for="p in imageProfiles.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate)" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
-                <label>视频工作流<select :value="videoDefault ? '' : settings.config.activeVideoId" @change="pickVideo(($event.target as HTMLSelectElement).value)"><option value="" disabled>选择 ComfyUI 视频工作流</option><option v-for="p in videoProfiles.filter(p => p.adapter?.type === 'comfyui-prompt' && p.adapter.workflowTemplate)" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+              <div v-if="prefTab === 'comfyui'" class="pref-comfy">
+                <label>图片工作流
+                  <select class="pref-select" :disabled="!comfyImages.length" :value="comfyImages.some(p => p.id === settings.config.activeImageId) ? settings.config.activeImageId : ''" @change="pickImage(($event.target as HTMLSelectElement).value)">
+                    <option value="" disabled>{{ comfyImages.length ? '选择 ComfyUI 图片工作流' : '暂无图片工作流' }}</option>
+                    <option v-for="p in comfyImages" :key="p.id" :value="p.id">{{ p.name }}</option>
+                  </select>
+                </label>
+                <label>视频工作流
+                  <select class="pref-select" :disabled="!comfyVideos.length" :value="!videoDefault && comfyVideos.some(p => p.id === settings.config.activeVideoId) ? settings.config.activeVideoId : ''" @change="pickVideo(($event.target as HTMLSelectElement).value)">
+                    <option value="" disabled>{{ comfyVideos.length ? '选择 ComfyUI 视频工作流' : '暂无视频工作流' }}</option>
+                    <option v-for="p in comfyVideos" :key="p.id" :value="p.id">{{ p.name }}</option>
+                  </select>
+                </label>
+                <p v-if="!comfyImages.length || !comfyVideos.length" class="pref-hint">可在「设置 → ComfyUI」导入工作流。</p>
               </div>
               <div v-else-if="prefTab !== 'knowledge'" class="pref-body">
                 <div class="pref-models">
@@ -980,6 +1023,9 @@ function visibleRows(rows: TraceRow[]) {
               </div>
             </Teleport>
           </div>
+          <button type="button" class="bar-btn capture-switch" role="switch" :aria-checked="continuousEnabled" :class="{ on: continuousEnabled }" :disabled="busy" title="开启后将进行连续拍摄：先分析已有剧本、确认场景资产，再按模型时长拆分，同场使用真实末帧接续。关闭后恢复原模式。" @click="toggleContinuous">
+            <span class="capture-switch-track" aria-hidden="true"><span /></span><span>连续拍</span>
+          </button>
           <button
             v-if="busy"
             type="button"
@@ -1241,6 +1287,17 @@ function visibleRows(rows: TraceRow[]) {
   background: var(--color-fill-hover);
   color: var(--color-text-1);
 }
+.chips button.go {
+  background: #e6e6ea;
+  color: #17171a;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+}
+.chips button.go:hover {
+  background: #f4f4f6;
+  color: #111114;
+}
 
 /* ── 输入区 ── */
 .composer {
@@ -1248,6 +1305,12 @@ function visibleRows(rows: TraceRow[]) {
   border-top: none;
   min-width: 0;
 }
+.capture-hint { margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; background: rgba(139, 111, 245, .1); color: #bba8ff; font-size: 11px; line-height: 1.5; }
+.capture-switch { gap: 5px; white-space: nowrap; }
+.capture-switch-track { display: inline-flex; flex: 0 0 24px; align-items: center; width: 24px; height: 14px; padding: 2px; border-radius: 12px; background: #4d4a58; box-sizing: border-box; }
+.capture-switch-track > span { width: 10px; height: 10px; border-radius: 50%; background: #dedbe9; transition: transform .15s; }
+.capture-switch.on .capture-switch-track { background: #8060e8; }
+.capture-switch.on .capture-switch-track > span { transform: translateX(10px); background: white; }
 .estimate {
   margin: 0 0 6px;
   font-size: 11px;
@@ -1283,6 +1346,7 @@ textarea {
 }
 .bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: 32px;
@@ -1462,6 +1526,7 @@ textarea {
 }
 .pref-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 8px 10px 0;
 }
@@ -1504,6 +1569,10 @@ textarea {
   color: #c8c8ce;
   font-size: 12px;
 }
+.pref-comfy { display: grid; gap: 12px; padding: 14px; min-width: 0; }
+.pref-comfy label { display: grid; gap: 6px; min-width: 0; font-size: 12px; color: var(--color-text-2); }
+.pref-comfy .pref-select { min-width: 0; max-width: 100%; box-sizing: border-box; text-overflow: ellipsis; }
+.pref-comfy .pref-hint { margin: 0; }
 .knowledge-preference { padding: 14px; }
 .knowledge-preference .pref-hint { margin: 4px 0 14px; }
 .knowledge-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }

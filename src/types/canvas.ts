@@ -2,6 +2,7 @@ import type { TaskStatus } from './pipeline'
 // VideoStillMode is declared below and used on CanvasNode.data
 
 export type CanvasNodeType =
+  | 'captureText'
   | 'script'
   | 'subject'
   | 'prop'
@@ -121,8 +122,16 @@ export interface CanvasNode {
     label?: string
     width?: number
     height?: number
+    /** 画布展示的等比尺寸倍率，与模型分辨率无关。 */
+    canvasScale?: number
     kind?: string
     prompt?: string
+    /** 连续拍专用节点：使用独立调度，不进入普通生成流程。 */
+    captureId?: string
+    /** 连续拍计划的执行用 JSON，不在节点上直接展示。 */
+    captureJson?: string
+    /** 提交后未取得任务ID时保守停止，避免网络异常造成重复付费。 */
+    captureSubmissionPending?: boolean
     referenceAssetIds?: string[]
     /** 通过画布连线继承参考图的上游节点，顺序即图1、图2…… */
     referenceSourceNodeIds?: string[]

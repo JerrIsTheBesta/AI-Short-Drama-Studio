@@ -544,6 +544,9 @@ export interface Project {
   playApproved?: boolean
   /** 智能体会话、运行记录与用户自主度偏好，随项目持久化 */
   agentState?: AgentWorkspaceState
+  /** 独立连续拍模式，不写入普通分镜流水线。 */
+  continuousCaptureEnabled?: boolean
+  continuousCapture?: import('@/services/continuous/model').CaptureState
   /**
    * standard：主题/文案创作
    * remake：上传参考视频复刻镜头，产品必须换成用户图

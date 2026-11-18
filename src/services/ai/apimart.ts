@@ -124,8 +124,9 @@ function videoSize(aspectRatio?: string, width?: number, height?: number): strin
   return height && width && height > width ? '9:16' : '16:9'
 }
 
-function videoSeconds(model: string, raw?: number): number {
+function videoSeconds(model: string, raw?: number, limit?: number): number {
   const seconds = Math.round(Number(raw) || 0)
+  if (limit === 30 && /seedance[\s._-]*2[._-]5|wan[\s._-]*3[._-]0/i.test(model)) return Math.min(30, Math.max(6, seconds || 6))
   if (/grok-imagine-1\.5/i.test(model)) return Math.min(15, Math.max(6, seconds || 6))
   return Math.min(15, Math.max(1, seconds || 6))
 }
@@ -575,6 +576,7 @@ export async function apimartGenerateVideo(opts: {
   width?: number
   height?: number
   duration?: number
+  durationLimit?: number
   resolution?: string
   generateAudio?: boolean
   audioField?: string
@@ -587,7 +589,7 @@ export async function apimartGenerateVideo(opts: {
   const root = apimartRoot(opts.baseUrl)
   const authorization = bearer(opts.apiKey)
   const model = pickModel(opts.model, APIMART_VIDEO_MODEL)
-  const duration = videoSeconds(model, opts.duration)
+  const duration = videoSeconds(model, opts.duration, opts.durationLimit)
   let taskId = String(opts.resumeTaskId || '').trim()
   if (!taskId) {
     const imageUrls = await referenceImageUrls(

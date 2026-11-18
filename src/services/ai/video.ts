@@ -75,6 +75,8 @@ export interface VideoGenInput {
   imageSlots?: H3ImageSlot[]
   onScreenNames?: string[]
   duration: number
+  /** 独立连续拍计划已验证的时长上限；未传时保持原有接入行为。 */
+  durationLimit?: number
   width: number
   height: number
   /** 比例标签（写到 prompt 最前面 [16:9] 这种） */
@@ -1094,6 +1096,7 @@ async function realApimartVideo(
     height: input.height,
     duration: input.duration,
     resolution: input.videoResolution,
+    durationLimit: input.durationLimit,
     generateAudio: input.generateAudio,
     audioField: cfg.options?.audioField,
     images,
@@ -1287,7 +1290,9 @@ async function realComfyNativeVideo(
     height: input.height,
     signal: input.signal,
     kind: 'video',
-    onProgress
+    onProgress,
+    resumeTaskId: input.resumeTaskId,
+    onTaskSubmitted: input.onTaskSubmitted
   })
   return { blob, mimeType, prompt, duration: input.duration }
 }

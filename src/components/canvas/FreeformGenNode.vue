@@ -58,6 +58,7 @@ const library = useLibraryStore()
 const toast = useToastStore()
 const mediaUrl = ref('')
 const posterUrl = ref('')
+const frameRatio = ref('')
 const pickerOpen = ref(false)
 const pickerMode = ref<'ref' | 'output'>('ref')
 const panelOpen = ref(false)
@@ -71,6 +72,7 @@ const { updateNodeData } = useVueFlow()
 const type = computed(() => (props.data.nodeType === 'videoGen' ? 'videoGen' : 'imageGen'))
 const isVideo = computed(() => type.value === 'videoGen')
 const node = computed(() => project.current?.canvas?.nodes.find((n) => n.id === props.id))
+const isCapture = computed(() => Boolean(node.value?.data.captureId))
 const boundRefs = computed(() => {
   const p = project.current
   const n = node.value
@@ -86,11 +88,32 @@ const refs = computed(() => {
 const outputId = computed(() => node.value?.data.outputAssetId || props.data.outputAssetId)
 const hasAsset = computed(() => Boolean(outputId.value))
 const generating = computed(() => isNodeRunning(props.id))
-const title = computed(() => node.value?.data.label || (isVideo.value ? '视频' : '图片'))
+const title = computed(() => {
+  const shotId = node.value?.data.shotId
+  const shot = shotId ? project.current?.shots.find((item) => item.id === shotId) : undefined
+  if (isVideo.value && shot?.title) return shot.title
+  return node.value?.data.label || (isVideo.value ? '视频' : '图片')
+})
 const prompt = computed({
   get: () => node.value?.data.prompt ?? '',
   set: (v: string) => project.setCanvasNodePrompt(props.id, v)
 })
+function rememberFrame(width?: number, height?: number) {
+  if (!width || !height || width < 16 || height < 16) return
+  frameRatio.value = `${Math.round(width)} / ${Math.round(height)}`
+}
+
+const mediaBoxRatio = computed(() => {
+  if (!isVideo.value && mediaUrl.value) return undefined
+  if (isVideo.value && frameRatio.value) return frameRatio.value
+  return cssAspectRatio(aspectRatio.value)
+})
+
+function onFrameLoad(event: Event) {
+  const img = event.target as HTMLImageElement
+  rememberFrame(img.naturalWidth, img.naturalHeight)
+}
+
 const aspectRatio = computed({
   get: () => node.value?.data.aspectRatio ?? project.current?.settings.aspectRatio ?? '16:9',
   set: (v: AspectRatio) => project.patchCanvasNode(props.id, { aspectRatio: v, outputAssetId: undefined, videoTaskId: undefined })
@@ -154,36 +177,13 @@ const generateAudio = computed({
   get: () => Boolean(node.value?.data.generateAudio),
   set: (v: boolean) => project.patchCanvasNode(props.id, { generateAudio: v })
 })
-function profileIsAutodl(p?: { provider?: string; baseUrl?: string; adapter?: { type?: string } }) {
-  if (!p) return false
-  const zealman = p.provider === 'zealman' || p.adapter?.type === 'zealman-workflow'
-  if (zealman) return false
-  return p.provider === 'autodl' || /autodl\.art/i.test(p.baseUrl || '')
-}
-function profileDisplayName(p?: { name?: string; provider?: string; adapter?: { type?: string } }) {
-  if (!p) return ''
-  const zealman = p.provider === 'zealman' || p.adapter?.type === 'zealman-workflow'
-  return zealman ? `Zealman · ${p.name}` : p.name || ''
-}
-/** 节点副标题：跟着实际用的那条线路走，别再一律写 H3 */
-const videoKindLabel = computed(() => {
-  if (!isVideo.value) return '图片生成'
-  if (videoModel.value === 'wan-prime') return `图生视频 · 万相 ${duration.value}s`
-  const p = effectiveVideoProfile.value
-  // 非 AutoDL 接入（Zealman、自建 ComfyUI 等）跑的不是 H3，直接显示接入名
-  if (p && !profileIsAutodl(p)) {
-    return `图生视频 · ${profileDisplayName(p) || '自定义接入'}`
-  }
-  // 只有 AutoDL 线路才是 H3，时长跟随节点的实际设置，不再写死 15s
-  return videoModel.value === 'h3-v5'
-    ? `图生视频 · H3 v5 ${duration.value}s${videoResolution.value === '1080p' ? ' 1080p' : ''}`
-    : `图生视频 · H3 v5 ${duration.value}s`
-})
+const videoKindLabel = computed(() => (isVideo.value ? '' : '图片生成'))
 const isH3Fl2va = computed(() => isH3Video.value && h3GenMode.value === 'fl2va')
 const durationOptions = computed(() => videoDurationOptions(videoModel.value))
 const duration = computed({
   get() {
     const raw = Math.round(Number(node.value?.data.duration) || 8)
+    if (isCapture.value) return raw
     const opts = durationOptions.value
     if (opts.includes(raw)) return raw
     const min = opts[0] ?? 1
@@ -226,11 +226,14 @@ const refUrls = ref<Record<string, string>>({})
 async function loadMedia() {
   const id = outputId.value
   const seq = ++mediaSeq
+  frameRatio.value = ''
   if (!id) {
     mediaUrl.value = ''
     posterUrl.value = ''
     return
   }
+  const meta = assets.getMeta(id)
+  if (meta && 'width' in meta) rememberFrame(meta.width, meta.height)
   const url = (await assets.getUrl(id)) || (await library.getUrl(id)) || ''
   if (seq !== mediaSeq) return
   mediaUrl.value = url
@@ -413,7 +416,7 @@ async function generate() {
     toast.warn('请先写提示词')
     return
   }
-  if (isVideo.value) {
+  if (isVideo.value && !isCapture.value) {
     if (isH3Fl2va.value) {
       if (!firstFrameId.value && !refs.value[0]) {
         toast.warn('请先选首帧')
@@ -593,13 +596,16 @@ function removeSelf() {
       </div>
     </transition>
 
-    <div class="media" :style="{ aspectRatio: cssAspectRatio(aspectRatio) }">
+    <div class="media" :class="{ 'natural-image': !isVideo && mediaUrl }" :style="{ aspectRatio: mediaBoxRatio }">
       <template v-if="isVideo && mediaUrl">
         <img
           v-if="posterUrl"
-          class="nodrag nowheel frame"
+          class="nowheel frame"
+          :draggable="false"
+          @dragstart.prevent
           :src="posterUrl"
           alt=""
+          @load="onFrameLoad"
         />
         <div v-else class="ready">视频已生成</div>
         <button
@@ -614,7 +620,9 @@ function removeSelf() {
       </template>
       <img
         v-else-if="mediaUrl"
-        class="nodrag nowheel"
+        class="nowheel"
+        :draggable="false"
+        @dragstart.prevent
         :src="mediaUrl"
         alt=""
       />
@@ -632,7 +640,7 @@ function removeSelf() {
     </div>
 
     <div class="name">
-      <span class="kind">{{ videoKindLabel }}</span>
+      <span v-if="videoKindLabel" class="kind">{{ videoKindLabel }}</span>
       <span class="title">{{ title }}</span>
     </div>
 
@@ -862,7 +870,7 @@ function removeSelf() {
   width: 100%;
   background: var(--color-node-well);
   overflow: hidden;
-  border-radius: 6px 6px 0 0;
+  border-radius: inherit;
 }
 .media img,
 .media video,
@@ -872,6 +880,12 @@ function removeSelf() {
   object-fit: contain;
   display: block;
 }
+.media .frame {
+  object-fit: cover;
+}
+.media.natural-image > img { height: auto; }
+.media img { user-select: none; -webkit-user-drag: none; cursor: grab; }
+.media img:active { cursor: grabbing; }
 .ready {
   position: absolute;
   inset: 0;
@@ -1061,6 +1075,10 @@ function removeSelf() {
   line-height: 1.55;
   font-family: inherit;
 }
+.capture-panel > strong { font-size: 13px; color: var(--color-text-1); }
+.capture-panel > p { margin: 8px 0; font-size: 11px; line-height: 1.6; color: var(--color-text-3); }
+.capture-panel .prompt-foot button { border: 1px solid var(--color-border); border-radius: 7px; padding: 6px 10px; background: var(--color-bg-2); color: var(--color-text-1); font-size: 12px; cursor: pointer; }
+.capture-panel .prompt-foot button:disabled { opacity: .5; cursor: default; }
 .prompt-tools {
   display: flex;
   justify-content: flex-end;

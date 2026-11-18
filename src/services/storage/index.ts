@@ -130,14 +130,29 @@ function firstImg2VideoCoverId(p: Project): string | undefined {
   return nodes.find((n) => n.data.outputAssetId)?.data.outputAssetId
 }
 
-/** 封面：一图生视频用第一个节点的第一张参考图；否则场景底板 → 人设 → 分镜配图 */
+function canvasCoverId(p: Project): string | undefined {
+  const nodes = p.canvas?.nodes ?? []
+  const capture = p.continuousCapture
+  if (capture) {
+    const output = (id?: string) => id ? nodes.find(n => n.id === id)?.data.outputAssetId : undefined
+    const scene = capture.plan.assets.find(asset => asset.kind === 'scene' && output(capture.assetNodes[asset.id]))
+    if (scene) return output(capture.assetNodes[scene.id])
+    const character = capture.plan.assets.find(asset => asset.kind === 'character' && output(capture.assetNodes[asset.id]))
+    if (character) return output(capture.assetNodes[character.id])
+    const opening = Object.values(capture.openingNodes).map(id => output(id)).find(Boolean)
+    if (opening) return opening
+  }
+  return nodes.find(n => (n.type === 'imageGen' || n.type === 'shotImage') && n.data.outputAssetId)?.data.outputAssetId
+}
+
+/** 封面：一图生视频用第一个节点的第一张参考图；否则场景底板 → 人设 → 分镜配图 → 画布上已生成的图 */
 export function pickCoverAssetId(p: Project): string | undefined {
   if (p.pipelineMode === 'img2video') return firstImg2VideoCoverId(p)
   const plate = (p.scenes ?? []).find((s) => s.plateAssetId)?.plateAssetId
   if (plate) return plate
   const sheet = (p.subjects ?? []).find((s) => s.designSheetAssetId)?.designSheetAssetId
   if (sheet) return sheet
-  return p.shots.find((s) => s.imageAssetId)?.imageAssetId
+  return p.shots.find((s) => s.imageAssetId)?.imageAssetId || canvasCoverId(p)
 }
 
 export async function projectCoverUrl(p: Project): Promise<string | undefined> {

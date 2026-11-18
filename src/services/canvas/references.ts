@@ -65,6 +65,7 @@ export function carryTextFromNode(project: Project, node: CanvasNode): string {
   if (node.type === 'script') {
     return clip(project.script?.content || project.script?.topic || '')
   }
+  if (node.type === 'captureText') return clip(node.data.prompt || '')
   if (node.type === 'imageGen' || node.type === 'videoGen' || node.type === 'audioGen') {
     return clip(node.data.prompt || '')
   }

@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useToastStore, useLibraryStore, LIBRARY_PUBLIC_ID } from '@/stores'
 import GlassCard from '@/components/common/GlassCard.vue'
+import GalleryTemplates from '@/components/common/GalleryTemplates.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import HomeIcon from '@/components/common/HomeIcon.vue'
@@ -18,7 +19,7 @@ const toast = useToastStore()
 const search = ref('')
 const searchEl = ref<HTMLInputElement | null>(null)
 const creating = ref(false)
-type HomeNav = 'home' | 'projects' | 'library' | 'tools'
+type HomeNav = 'home' | 'projects' | 'library' | 'tools' | 'templates'
 type ProjectFilter = 'all' | 'active' | 'done'
 const nav = ref<HomeNav>('home')
 const projectFilter = ref<ProjectFilter>('all')
@@ -113,7 +114,7 @@ const listedProjects = computed(() => {
 })
 
 function focusProjectSearch() {
-  if (nav.value === 'library' || nav.value === 'tools') nav.value = 'projects'
+  if (nav.value === 'library' || nav.value === 'tools' || nav.value === 'templates') nav.value = 'projects'
   nextTick(() => searchEl.value?.focus())
 }
 
@@ -437,12 +438,18 @@ async function moveSelectedLibrary() {
         <button type="button" :class="{ on: nav === 'library' }" @click="nav = 'library'">
           <HomeIcon name="library" :size="18" /> 素材库
         </button>
+        <button type="button" :class="{ on: nav === 'templates' }" @click="nav = 'templates'">
+          <HomeIcon name="image" :size="18" /> 图库模板
+        </button>
         <button type="button" :class="{ on: nav === 'tools' }" @click="nav = 'tools'">
           <HomeIcon name="wand" :size="18" /> 工具集
         </button>
         <button type="button" @click="router.push('/settings')">
           <HomeIcon name="settings" :size="18" /> 设置
         </button>
+        <a class="tutorial-link" href="https://www.bilibili.com/video/BV1o6n66fE5p/" target="_blank" rel="noopener noreferrer" title="配置、软件操作与短剧制作入门">
+          <HomeIcon name="script" :size="18" /> 视频教程 ↗
+        </a>
       </nav>
       <div class="side-foot">
         <div class="side-kicker">开源，免费</div>
@@ -649,6 +656,7 @@ async function moveSelectedLibrary() {
       </div>
       </section>
 
+      <GalleryTemplates v-if="nav === 'templates'" />
       <div v-if="nav === 'library'" class="lib-layout">
         <div class="lib-top">
           <h2>素材库</h2>
@@ -825,7 +833,8 @@ async function moveSelectedLibrary() {
   flex-direction: column;
   gap: 4px;
 }
-.side-links button {
+.side-links button,
+.side-links .tutorial-link {
   display: flex;
   align-items: center;
   gap: 10px;

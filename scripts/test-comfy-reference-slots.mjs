@@ -119,4 +119,11 @@ await test('图像工作流也按提供数量替换，保留剩余默认图',asy
   assert.ifError(r.error);assert.equal(r.uploads.length,1)
   assert.equal(r.submissions[0].prompt[f.ids[8]].inputs.image,'black-9.png')
 })
+await test('连续拍保存任务ID；恢复时只查询，不上传或重复提交',async()=>{
+  let saved=''
+  const first=await generate(fixture(),1,{onTaskSubmitted:id=>{saved=id}})
+  assert.ifError(first.error);assert.equal(saved,'test-job')
+  const resumed=await generate(fixture(),1,{resumeTaskId:saved,onTaskSubmitted:()=>{throw Error('must not resubmit')}})
+  assert.ifError(resumed.error);assert.equal(resumed.uploads.length,0);assert.equal(resumed.submissions.length,0)
+})
 console.log(`${tests} ComfyUI reference-slot regressions passed (offline; no network or generation charges).`)
