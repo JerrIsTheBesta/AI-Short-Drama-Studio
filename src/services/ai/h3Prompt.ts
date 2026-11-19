@@ -499,6 +499,10 @@ export function pictureIdentityBlock(input: H3PromptInput): string {
       )
       continue
     }
+    if (slot.name === 'start frame') {
+      lines.push(`<Picture ${slot.picture}> is the actual first frame at 0.00 seconds. Continue from this pose, wardrobe, light and set. Later pictures lock identity or location only and are not first frames.`)
+      continue
+    }
     lines.push(`<Picture ${slot.picture}> is additional reference ${who}. Match people, clothing, product, setting or style from this image.`)
   }
   if (speaker >= 2) {
@@ -868,6 +872,16 @@ function assembleOfficial(desc: string, sound: string, music = 'N/A', input?: H3
     const keyframe = input.mode === 'I2VA' || input.mode === 'FL2VA' || input.mode === 'L2VA'
     if (!keyframe) body = ensurePictureIdentity(body, input)
     body = ensureVoiceRoster(body, input.voiceRoster || '')
+  }
+  if (input?.mode === 'I2VA') {
+    const block = pictureIdentityBlock(input)
+    if (block) {
+      body = body
+        .replace(/Speaker lock \(these labels are the pictures\):[\s\S]*?(?=\n\s*\[Shot\s*\d+\]|\n\s*Camera language\s*:|\n\s*overall_soundscape\s*:|$)/i, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+      body = `${block}\n\n${body}`
+    }
   }
   const extraJobs = input
     ? slotsOf(input)
@@ -1683,7 +1697,7 @@ Rules:
 - English for action, camera, light, names, places and performance. Preserve the original language inside <d> dialogue and for exact visible diegetic text. Do not use Chinese names as subject labels in action prose. Write the actual blocking in English: who is left/right, what they hold, what a prop does over time.
 - In action prose, call people (S1), (S2) exactly as the speaker lock defines them. Do not invent a new S number per line. Do not anonymize a known character as “the man.” Recurring props keep the (P#) and <Picture N> written in the lock. When a hand touches that object, name that picture.
 - Spoken lines already extracted below are the ONLY dialogue. If the list is empty, do not write dialogue, speech, lips, mouths, voices, or the words "no dialogue". H3 treats those words as a cue to invent English lines. Describe only visible action and ambient sound. NEVER invent speech from 场记, timestamps, style, or the speaker lock. Never put 无 or director notes inside a d tag.
-- MUST COPY the speaker-lock block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder (S1)/(S2)/<Picture N>.
+- MUST COPY the speaker-lock block below verbatim at the start of integrated_multimodal_description. Do not invent, omit, or reorder (S1)/(S2)/<Picture N>. If that lock says Picture 1 is the first frame, keep it that way: (S1) is the first character sheet, not Picture 1, and the location plate stays the scene picture named in the lock.
 - overall_soundscape names the script's real sounds (chip crunch, cushion rustle, room tone). Do not write a generic sentence such as "close breath stay synchronized with the picture. Spoken words appear only inside the d tag."
 - Delivery format is chosen by the app, not by you. Write the shot body only. Multimodal reference (R2VA) is wrapped into six sections: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. First-frame (I2VA), first-and-last-frame (FL2VA), last-frame (L2VA) and text-only (T2VA) stay three fields, with the official alignment line added outside your JSON. Do not emit those headers yourself.
 - Do not show grids, four-view sheets, storyboards, collage, or added subtitles. Story-required HUD panels, system alerts and countdowns are diegetic text: place exact literals inside 【】 to preserve their original language and order. Describe when and where the panel appears, how long it remains, and keep it clear of the main action; never turn it into dialogue unless specified as audio.
@@ -1703,6 +1717,7 @@ Available character identity references. (S1) stays (S1) for the whole clip. Do 
 ${characterPeople(resolved).map((slot, i) => `(S${i + 1}) = ${identityLabel(slot)} = <Picture ${slot.picture}>`).join('\n') || onScreenEnglish(resolved).map((name, i) => `(S${i + 1}) = ${name}`).join('\n') || '(from director notes)'}
 MUST COPY this speaker lock verbatim (identity/location lock, not first frames):
 ${pictureRoster(resolved) || 'no extra pictures'}
+${slotsOf(resolved).some((slot) => slot.index === 1 && slot.name === 'start frame') ? 'Picture 1 is the first frame of this clip. Do not assign Picture 1 to a person. (S1) is the first character sheet, which is a later picture. The location plate is the scene picture named in the lock.' : ''}
 Voice mode: ${cueLines.length ? resolved.voiceMode || 'dialogue' : 'none — no trusted spoken lines; do NOT invent dialogue'}
 Character voice (this speaker's own timbre, kept verbatim as delivery inside each <d> bracket; do not reinterpret or translate it away): ${resolved.speakerVoice || '(not set — infer a natural timbre that fits the character)'}
 Spoken lines already extracted (quotes / 台词 / 口播栏 only; director notes are NOT speech):

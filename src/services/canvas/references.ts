@@ -97,13 +97,15 @@ export function canvasNodeProducesImage(node?: CanvasNode): boolean {
   )
 }
 
-/** 连线参考优先，其后是手工上传/资产库选择的参考图。 */
+/** 连线参考优先，其后是手工上传/资产库选择的参考图。节点已经按顺序写好全部参考图时，保持这个顺序。 */
 export function resolvedCanvasReferenceAssetIds(project: Project, node?: CanvasNode): ID[] {
   if (!node) return []
   const connected = (node.data.referenceSourceNodeIds ?? [])
     .map((id) => canvasNodeOutputAssetId(project, project.canvas?.nodes.find((item) => item.id === id)))
     .filter((id): id is ID => Boolean(id))
-  return [...new Set([...connected, ...(node.data.referenceAssetIds ?? [])])]
+  const listed = node.data.referenceAssetIds ?? []
+  if (listed.length && connected.every((id) => listed.includes(id))) return [...new Set(listed)]
+  return [...new Set([...connected, ...listed])]
 }
 
 /** 从自由节点拿掉一张参考图：手工添加的和连线带进来的都能删，连线一并断开。 */

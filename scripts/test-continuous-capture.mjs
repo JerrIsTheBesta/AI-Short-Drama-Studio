@@ -8,7 +8,10 @@ const mocks = {
     export const useSettingsStore=()=>({config:globalThis.h.config});
     export const useAssetsStore=()=>({getBlob:async id=>globalThis.h.blobs[id],add:async (blob,kind,source,meta)=>{const h=globalThis.h;const id='asset-'+(++h.assetCounter);h.blobs[id]=blob;h.saved.push({id,kind,source,meta});return {id}}});
     export const useLibraryStore=()=>({getBlob:async()=>null});`,
-  '@/services/ai/client': `export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const review=req.messages[0].content.includes('独立的短剧场记');return {content:JSON.stringify(review ? h.reviews?.shift() ?? {ok:true,reason:''} : h.responses.shift()||h.fixture)}};`,
+  '@/services/ai/client': `export const blobToChatImageUrl=async()=> 'data:image/png;base64,dGVzdA==';
+    export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const system=req.messages[0].content;const review=system.includes('独立的短剧场记');
+    if(system.includes('图几是什么')||system.includes('你看图确认参考图身份'))return {content:JSON.stringify({pictures:[{id:'a',role:'character',caption:'阿默'},{id:'b',role:'character',caption:'阿青'},{id:'room',role:'scene',caption:'室内'}]})};
+    return {content:JSON.stringify(review ? h.reviews?.shift() ?? {ok:true,reason:''} : h.responses.shift()||h.fixture)}};`,
   '@/services/ai/image': `export const generateImage=async req=>{globalThis.h.images.push(req);return {blob:new Blob(['image'],{type:'image/png'})}};`,
   '@/services/ai/video': `export const generateVideo=async req=>{const h=globalThis.h;h.videos.push(req);await req.onTaskSubmitted('task-'+h.videos.length);if(h.failVideo){h.failVideo=false;throw Error('polling interrupted')}return {blob:new Blob(['video-'+h.videos.length],{type:'video/mp4'})}};`,
   '@/services/ai/runtime': `export const autodlVideoProfileId=()=>globalThis.h.config.activeVideoId;`,
@@ -22,6 +25,7 @@ const mocks = {
   '@/services/canvas/jobs': `const running=new Set();export async function withNodeJob(id,fn){if(running.has(id))throw Error('already running');running.add(id);try{return await fn()}finally{running.delete(id)}}`,
   '@/services/canvas/videoPromptProfile': `export const resolveH3PromptProfile=async()=>globalThis.h.isH3;`,
   '@/services/ai/h3Prompt': `export const isOfficialH3Prompt=text=>/integrated_multimodal_description\\s*:/i.test(text||'')&&/overall_soundscape\\s*:/i.test(text||'');
+    export const buildH3ImageSlots=items=>items.map((item,i)=>({index:i+1,kind:item.kind,name:item.name,sourceName:item.name,job:'Picture '+(i+1)}));
     export const compileH3OfficialPrompt=async req=>{const h=globalThis.h;h.optimizations++;h.lastH3=req;if(h.failOptimize){h.failOptimize=false;throw Error('optimize failed')}return 'integrated_multimodal_description:\\n[Shot 1] compiled\\n\\noverall_soundscape:\\nroom tone\\n\\nnon_diegetic_music:\\nN/A'};`
 }
 const bundled = await build({
@@ -123,6 +127,11 @@ assert.equal(s.phase, 'videos')
 assert.equal(h.videos.length, 0, 'video needs its own approval')
 await turn('继续')
 assert.equal(h.videos.length, 3)
+assert.equal(h.videos[0].referenceImages.length, 3, 'first frame is followed by selected identity and scene sheets')
+assert.match(h.videos[0].prompt, /图1.*首帧/)
+assert.match(h.videos[0].prompt, /图2是阿默/)
+assert.match(h.videos[0].prompt, /图3是阿青/)
+assert.match(h.videos[0].prompt, /图4是室内/)
 assert.equal(h.tails, 1, 'only same-scene continuation extracts a tail')
 assert.equal(h.images.length, 7, 'same-scene tail is repaired once before the next shot')
 const repair = h.images[6]
