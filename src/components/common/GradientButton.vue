@@ -72,11 +72,11 @@ const emit = defineEmits<{
 
 .type-primary {
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
   box-shadow: var(--shadow-sm);
 }
 .type-primary:hover:not(:disabled) {
-  background: #9cc4ff;
+  background: #67e4fb;
 }
 .type-primary:active:not(:disabled) {
   transform: translateY(1px);

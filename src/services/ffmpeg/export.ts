@@ -145,10 +145,13 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
         /* ignore */
       }
 
-      const voBlob = input.voiceoverAudioMap?.get(clip.shotId)
+      const voBlob = input.voiceoverAudioMap?.get(clip.id) || input.voiceoverAudioMap?.get(clip.shotId)
       if (voBlob && voBlob.size > 200) {
         input.onProgress?.(`[${i + 1}/${enabled.length}] 叠口播人声...`)
         const mixedName = `clip_${i}_vo.mp4`
+        const voiceVolume = clip.voiceAssetId
+          ? Math.max(0, Math.min(2, clip.voiceVolume ?? input.voiceoverVolume ?? 1))
+          : input.voiceoverVolume ?? 1
         try {
           await mixVoiceover(
             ffmpeg,
@@ -158,7 +161,7 @@ export async function exportVideo(input: ExportInput): Promise<Blob> {
             duration,
             // 环境音已在转码阶段调过音量，这里按 1 原样保留再与口播混合
             keepAmbient ? 1 : 0,
-            input.voiceoverVolume ?? 1
+            voiceVolume
           )
           try {
             await ffmpeg.deleteFile(outName)

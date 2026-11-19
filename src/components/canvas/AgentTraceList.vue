@@ -96,8 +96,8 @@ defineProps<{ rows: TraceRow[] }>()
   padding: 3px 10px 3px 7px;
   border-radius: 4px;
   border: none;
-  background: #26262b;
-  color: #b7b7bc;
+  background: var(--nb-bg-4);
+  color: var(--nb-t2);
   font-size: 10px;
   letter-spacing: 0.03em;
 }
@@ -114,15 +114,15 @@ defineProps<{ rows: TraceRow[] }>()
 }
 .intent-tag b {
   font-weight: 650;
-  color: #d4d4d8;
+  color: var(--nb-t1);
 }
 
 /* ── 计划卡片 ── */
 .plan-card {
   padding: 10px 12px;
-  border: none;
+  border: 1px solid var(--nb-line-2);
   border-radius: 4px;
-  background: #1c1c20;
+  background: var(--nb-bg-3);
 }
 .plan-head {
   display: flex;
@@ -273,9 +273,11 @@ defineProps<{ rows: TraceRow[] }>()
   padding: 6px 9px;
   border-left: none;
   border-radius: 4px;
-  background: #18181b;
+  background: var(--nb-bg-inset);
+  color: var(--nb-t1);
 }
 .row.fail .row-detail {
-  background: #2a2222;
+  background: var(--nb-danger-soft);
+  color: var(--nb-t1);
 }
 </style>

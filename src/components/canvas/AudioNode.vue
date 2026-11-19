@@ -211,7 +211,7 @@ function openDetail() {
   width: 240px;
   min-height: 128px;
   padding: 10px 12px 8px;
-  background: var(--color-bg-1);
+  background: color-mix(in srgb, var(--nb-bg-2) 62%, transparent);
   border: 1px solid var(--color-node-border);
   border-radius: 6px;
   color: var(--color-text-1);

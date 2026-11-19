@@ -516,6 +516,20 @@ function navReady(id: SettingsSection) {
 
         <div v-else-if="section === 'system'" class="sys">
           <section class="panel">
+            <h2>外观</h2>
+            <p class="card-desc">两套配色来自同一套设计。深色是深空控制台，浅色是冷白工作台。选中后全应用一起换。</p>
+            <div class="theme-choices">
+              <button type="button" :class="{ on: settings.config.theme !== 'light' }" @click="settings.update({ theme: 'dark' })">
+                <strong>深色</strong>
+                <span>深空底，青蓝强调</span>
+              </button>
+              <button type="button" :class="{ on: settings.config.theme === 'light' }" @click="settings.update({ theme: 'light' })">
+                <strong>浅色</strong>
+                <span>冷白底，同一套强调色</span>
+              </button>
+            </div>
+          </section>
+          <section class="panel">
             <h2>导演手册</h2>
             <p class="card-desc">
               导入一份 SKILL.md 或 README.md。之后拆分镜头、写画面提示词和视频提示词都按这份手册来。没有导入时仍用内置分镜导演手册。
@@ -675,23 +689,12 @@ function navReady(id: SettingsSection) {
 
 <style scoped>
 .settings {
-  --color-bg-0: #121214;
-  --color-bg-1: #161618;
-  --color-bg-2: #1c1c1f;
-  --color-bg-card: #18181b;
-  --color-border: transparent;
-  --color-border-strong: transparent;
-  --color-accent: #9a9aa3;
-  --color-text-1: #c8c8ce;
-  --radius-sm: 4px;
-  --radius-md: 4px;
-  --radius-lg: 6px;
   height: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: #121214;
-  color: #c8c8ce;
+  background: var(--nb-bg-0);
+  color: var(--nb-t1);
 }
 .top {
   display: flex;
@@ -933,9 +936,38 @@ function navReady(id: SettingsSection) {
 }
 .panel {
   padding: 16px;
-  border: none;
-  border-radius: 4px;
-  background: #18181b;
+  border: 1px solid var(--nb-line-2);
+  border-radius: 10px;
+  background: var(--nb-bg-2);
+  color: var(--nb-t1);
+}
+.theme-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.theme-choices button {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--nb-line-2);
+  border-radius: 10px;
+  background: var(--nb-bg-3);
+  color: var(--nb-t2);
+  text-align: left;
+  cursor: pointer;
+}
+.theme-choices button strong {
+  color: var(--nb-t1);
+  font-size: 13px;
+}
+.theme-choices button span {
+  color: var(--nb-t3);
+  font-size: 11px;
+}
+.theme-choices button.on {
+  border-color: var(--nb-line-accent);
+  background: var(--nb-accent-soft);
 }
 .panel h2 {
   margin: 0 0 6px;

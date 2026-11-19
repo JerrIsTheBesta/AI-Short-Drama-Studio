@@ -18,6 +18,8 @@ import Tag from '@/components/common/Tag.vue'
 import { pickScriptFile } from '@/utils/pickPlayFile'
 import { markdownToHtml } from '@/utils/markdown'
 import { parseScriptDoc, serializeScriptDoc, toEpisodes, updateEpisode } from '@/utils/scriptEpisodes'
+import { paintScreenplay } from '@/utils/screenplayPaint'
+import { SCREENPLAY_FORMAT_RULES, normalizeScreenplayBody } from '@/utils/screenplayFormat'
 import { callLLM } from '@/services/ai/client'
 import { assertScriptCompletion } from '@/services/ai/scriptCompletion'
 import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference, scriptReferenceBrief } from '@/services/ai/scriptReference'
@@ -81,6 +83,51 @@ const activeEpisodeIndex = ref(0)
 const titleEditing = ref('')
 /** 当前展开那一集的编辑草稿（避免边打字边被 Markdown 规范化打断） */
 const draft = ref<{ index: number; title: string; content: string } | null>(null)
+const scriptPaintEl = ref<HTMLElement | null>(null)
+const scriptInputEl = ref<HTMLTextAreaElement | null>(null)
+const scriptPaint = computed(() => paintScreenplay(draft.value?.content || ''))
+const scriptMode = ref<'source' | 'preview'>('source')
+const caret = ref({ line: 1, col: 1 })
+const episodeChars = computed(() => (draft.value?.content || '').replace(/\s/g, '').length)
+const savedLabel = computed(() => {
+  if (saving.value) return '保存中'
+  if (dirty.value) return '未保存'
+  const ts = activeDoc.value?.updatedAt
+  if (!ts) return '已保存'
+  const d = new Date(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `已保存 ${pad(d.getHours())}:${pad(d.getMinutes())}`
+})
+const otherDocs = computed(() => scripts.docs.filter((doc) => doc.id !== activeId.value))
+
+function scenesIn(content: string) {
+  return content.split('\n').flatMap((line) => {
+    const trimmed = line.trim()
+    if (/^#{2,}\s+/.test(trimmed) || /^场景\s*[0-9０-９]/.test(trimmed)) {
+      return [trimmed.replace(/^#+\s*/, '')]
+    }
+    return []
+  })
+}
+
+function readCaret() {
+  const input = scriptInputEl.value
+  if (!input) return
+  const pos = input.selectionStart || 0
+  const before = input.value.slice(0, pos)
+  caret.value = { line: before.split('\n').length, col: pos - before.lastIndexOf('\n') }
+}
+
+function editCommand(command: 'undo' | 'redo') {
+  scriptInputEl.value?.focus()
+  document.execCommand(command)
+  readCaret()
+}
+
+function askWriter(text: string) {
+  episodeHint.value = text
+  void writeCurrentEpisode()
+}
 
 const activeDoc = computed(() => scripts.docs.find((d) => d.id === activeId.value) ?? null)
 
@@ -159,6 +206,15 @@ function scheduleFlush() {
   dirty.value = true
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(flushDraft, 800)
+  syncScriptScroll()
+}
+
+function syncScriptScroll() {
+  const input = scriptInputEl.value
+  const paint = scriptPaintEl.value
+  if (!input || !paint) return
+  paint.scrollTop = input.scrollTop
+  paint.scrollLeft = input.scrollLeft
 }
 
 function flushDraft() {
@@ -442,11 +498,11 @@ async function writePlannedEpisode() {
   try {
     const resp = await callLLM({ model: llmModel.value, disableThinking: true, temperature: 0.6, useProviderOutputLimit: true, timeoutMs: 300_000, signal: controller.signal,
       messages: [
-        { role: 'system', content: `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文，包含具体场次、行动与自然对白。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。场次使用三级标题，禁止输出一级或二级标题。只输出本集 Markdown 正文。\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
+        { role: 'system', content: `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是专业短剧编剧。只写指定这一集的完整正文，使用简体中文。忠实遵循已确认大纲和前文，承接人物关系、时间、地点、物件和未解冲突；不得重写已完成集或抢写下一集。\n${SCREENPLAY_FORMAT_RULES}\n${scriptReferenceBrief(settings.config.scriptReferenceType, plan.brief, plan.outline, episode.summary)}` },
         { role: 'user', content: `用户创作需求：${plan.brief}\n已确认大纲：${plan.outline}\n完整分集目录：${JSON.stringify(plan.episodes)}\n已完成前文${prior.length > 30000 ? '（仅显示最近部分，更早剧情请参考分集目录）' : ''}：\n${prior.slice(-30000) || '（第一集）'}\n当前要写：第 ${index + 1} 集 ${episode.title}\n本集任务：${episode.summary}\n${existing ? `需要替换的原正文：\n${existing}` : ''}` }
       ] })
     assertScriptCompletion(resp)
-    const body = String(resp.content || '').replace(/^```(?:markdown|md|text)?\s*/i, '').replace(/\s*```$/, '').trim().replace(/^#{1,2}\s+/gm, '### ')
+    const body = normalizeScreenplayBody(String(resp.content || ''))
     if (!body) throw new Error('模型没有返回正文')
     if (controller.signal.aborted || activeId.value !== id || markdown.value !== snapshot) throw new Error('剧本已切换或正文发生变化，结果未覆盖原文，请重试。')
     if (index === parsed.episodes.length) parsed.episodes.push({ title: episode.title, content: body })
@@ -657,7 +713,7 @@ async function writeCurrentEpisode() {
         {
           role: 'system',
           content:
-            `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是短剧编剧。只输出这一集的正文，用简体中文，可以写场次、动作和对白。不要解释，不要加开场白。\n${scriptReferenceBrief(settings.config.scriptReferenceType, activeDoc.value?.title, draft.value.title, existing, hint)}`
+            `${importedDirectorPrefix()}${SHORT_DRAMA_WRITING_RULES}\n你是短剧编剧。只输出这一集的正文，用简体中文。不要解释，不要加开场白。\n${SCREENPLAY_FORMAT_RULES}\n${scriptReferenceBrief(settings.config.scriptReferenceType, activeDoc.value?.title, draft.value.title, existing, hint)}`
         },
         {
           role: 'user',
@@ -666,7 +722,7 @@ async function writeCurrentEpisode() {
       ]
     })
     assertScriptCompletion(resp)
-    const text = String(resp.content || '').trim()
+    const text = normalizeScreenplayBody(String(resp.content || ''))
     if (!text) throw new Error('模型没有返回内容')
     if (episodeAbort.signal.aborted) throw new Error('已取消')
     if (activeDoc.value?.id !== targetDocId || draft.value !== targetDraft) {
@@ -821,7 +877,7 @@ onMounted(async () => {
 
 <template>
   <div class="page" :class="{ detail: detailOpen, resizing: resizingPane }">
-    <header class="page-head">
+    <header v-if="!detailOpen" class="page-head">
       <div>
         <div class="kicker">剧本创作</div>
         <h1>{{ detailOpen ? activeDoc?.title || '剧本' : '剧本项目' }}</h1>
@@ -869,80 +925,110 @@ onMounted(async () => {
       </button>
     </div>
 
-    <div v-else class="workspace">
-      <aside class="ep-side" :style="{ width: sideWidth + 'px' }">
-        <div class="side-head">
-          <strong>集数</strong>
-          <span class="count">{{ episodes.length }}</span>
+    <div v-else class="sc-page">
+      <header class="sc-head">
+        <div class="sc-head-copy">
+          <span class="sc-kicker">剧本 · 编剧工作台</span>
+          <input class="sc-h1" :value="draft?.title || ''" aria-label="本集标题" @input="draft && onTitleInput(draft.index, $event)" />
+          <p>正文按场景、动作、对白、旁白分层。场景写成「场景 1 · 地点 · 夜 · 外」，对白写成「角色（语气）：台词」，旁白写成「旁白：」。拆分镜和配音都用这一份。</p>
         </div>
-        <div class="list">
-          <button
-            v-for="(ep, i) in episodes"
-            :key="ep.id"
-            class="ep-item"
-            :class="{ active: activeEpisodeIndex === i }"
-            @click="openEpisode(i)"
-          >
-            <span class="ep-no">{{ i + 1 }}</span>
-            <span class="ep-item-title">{{ ep.title }}</span>
-            <span class="ep-words">{{ ep.wordCount }} 字</span>
+        <div class="sc-head-actions">
+          <button type="button" class="nb-btn ghost" @click="backToLibrary">返回剧本库</button>
+          <span class="savechip" :class="{ dirty }"><i />{{ savedLabel }}</span>
+          <button type="button" class="nb-btn" @click="downloadActive">
+            <svg viewBox="0 0 24 24"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            导出 Markdown
+          </button>
+          <button type="button" class="nb-btn primary" @click="applyToProject">
+            <svg viewBox="0 0 24 24"><path d="M12 3v5M12 16v5M3 12h5M16 12h5M6.3 6.3l3 3M14.7 14.7l3 3M17.7 6.3l-3 3M9.3 14.7l-3 3"/></svg>
+            交给 AI 拆分镜
           </button>
         </div>
-        <button class="side-foot" @click="addEpisode">＋ 新增一集</button>
-      </aside>
-      <div class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整集数栏宽度" @pointerdown="startPaneResize('side', $event)" />
-
-      <section class="ep-main">
-        <GlassCard v-if="activeDoc && draft" padding="none" class="editor-card">
-          <div class="ed-head">
-            <input
-              v-model="titleEditing"
-              class="title-input"
-              @change="commitTitle"
-              @keydown.enter.prevent="commitTitle"
-            />
-            <div class="ed-meta">
-              <span>{{ episodes.length }} 集</span>
-              <span>·</span>
-              <span>{{ totalWords }} 字</span>
-              <span>·</span>
-              <span v-if="saving">保存中…</span>
-              <span v-else-if="dirty" class="unsaved">未保存</span>
-              <span v-else>已保存</span>
-            </div>
-            <div class="ed-actions">
-              <button class="mini-btn" @click="downloadActive">⬇ 导出</button>
-              <button v-if="dirty" class="mini-btn primary" @click="saveNow">保存</button>
-              <button class="mini-btn danger" @click="removeActive">删除剧本</button>
-            </div>
+      </header>
+      <div class="sc-cols">
+      <aside class="sc-lib">
+        <div class="sc-lib-head">
+          <span class="sc-panel-title"><i />剧本库</span>
+          <button type="button" class="sc-icon" title="新建剧本" @click="createScript">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <div class="sc-lib-search">
+          <input v-model="titleEditing" aria-label="剧本名" @change="commitTitle" @keydown.enter.prevent="commitTitle" />
+        </div>
+        <div class="sc-lib-body">
+          <div class="sc-sec-t">本剧 · {{ activeDoc?.title }}</div>
+          <template v-for="(ep, i) in episodes" :key="ep.id">
+            <button type="button" class="sc-ep" :class="{ on: activeEpisodeIndex === i }" @click="openEpisode(i)">
+              <svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>
+              <span>{{ ep.title }}</span>
+              <b>{{ ep.wordCount }}</b>
+            </button>
+              <button
+              v-for="scene in activeEpisodeIndex === i ? scenesIn(draft && draft.index === i ? draft.content : ep.content) : []"
+              :key="scene"
+              type="button"
+              class="sc-kid"
+            >
+              <span>{{ scene }}</span>
+            </button>
+          </template>
+          <div v-if="otherDocs.length" class="sc-sec-t">其他剧本</div>
+          <button v-for="doc in otherDocs" :key="doc.id" type="button" class="sc-other" @click="openScript(doc.id)">
+            <span>{{ doc.title }}</span>
+            <b>{{ doc.episodeCount }} 集</b>
+          </button>
+        </div>
+        <div class="sc-lib-foot">
+          <button type="button" class="nb-btn block" @click="addEpisode">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            新建章节
+          </button>
+          <div class="sc-lib-meta">
+            <span>本剧 {{ episodes.length }} 集 / {{ totalWords }} 字</span>
+            <button type="button" class="sc-danger-text" @click="removeActive">删除剧本</button>
           </div>
-          <div class="episode-editor">
-            <div class="episode-tools">
-              <input
-                class="ep-title-input"
-                :value="draft.title"
-                @input="onTitleInput(draft.index, $event)"
+        </div>
+      </aside>
+      <section v-if="activeDoc && draft" class="sc-mid">
+        <div class="sc-toolbar">
+          <div class="sc-seg">
+            <button type="button" :class="{ on: scriptMode === 'source' }" @click="scriptMode = 'source'">源码</button>
+            <button type="button" :class="{ on: scriptMode === 'preview' }" @click="scriptMode = 'preview'">预览</button>
+          </div>
+          <i class="sc-vdiv" />
+          <button type="button" class="sc-icon" title="撤销" @click="editCommand('undo')">
+            <svg viewBox="0 0 24 24"><path d="M4 9h10a5 5 0 0 1 0 10h-3"/><path d="m4 9 4-4M4 9l4 4"/></svg>
+          </button>
+          <button type="button" class="sc-icon" title="重做" @click="editCommand('redo')">
+            <svg viewBox="0 0 24 24"><path d="M20 9H10a5 5 0 0 0 0 10h3"/><path d="m20 9-4-4M20 9l-4 4"/></svg>
+          </button>
+          <i class="sc-vdiv" />
+          <button type="button" class="nb-btn sm" @click="addEpisode">插入新集</button>
+          <button type="button" class="nb-btn sm" :disabled="draft.index === 0" @click="moveEpisode(draft.index, -1)">上移</button>
+          <button type="button" class="nb-btn sm" :disabled="draft.index === episodes.length - 1" @click="moveEpisode(draft.index, 1)">下移</button>
+          <button type="button" class="nb-btn sm danger" @click="removeEpisode(draft.index)">删除本集</button>
+          <span class="sc-toolbar-meta">{{ episodeChars }} 字 · {{ scenesIn(draft.content).length }} 场</span>
+        </div>
+        <div class="episode-editor">
+            <div class="episode-body-wrap" :class="{ preview: scriptMode === 'preview' }" :aria-busy="episodeWriting">
+              <pre
+                ref="scriptPaintEl"
+                class="script-paint"
+                :class="{ empty: !draft.content }"
+                aria-hidden="true"
+                v-html="draft.content ? scriptPaint : '写这一集。每一场用「场景 1 · 地点 · 夜 · 外」，动作单独成行，对白用「角色（语气）：台词」，旁白用「旁白：」，一场结束写「出场　人物　道具　环境音」。'"
               />
-              <div class="episode-move">
-                <button type="button" title="上移" :disabled="draft.index === 0" @click="moveEpisode(draft.index, -1)">↑</button>
-                <button
-                  type="button"
-                  title="下移"
-                  :disabled="draft.index === episodes.length - 1"
-                  @click="moveEpisode(draft.index, 1)"
-                >
-                  ↓
-                </button>
-                <button type="button" title="删除这一集" class="danger" @click="removeEpisode(draft.index)">删除</button>
-              </div>
-            </div>
-            <div class="episode-body-wrap" :aria-busy="episodeWriting">
               <textarea
+                ref="scriptInputEl"
                 v-model="draft.content"
                 class="episode-body"
-                placeholder="写这一集的正文，支持 Markdown"
-                :readonly="episodeWriting"
-                @input="scheduleFlush"
+                spellcheck="false"
+                :readonly="episodeWriting || scriptMode === 'preview'"
+                @input="scheduleFlush(); readCaret()"
+                @scroll="syncScriptScroll"
+                @click="readCaret"
+                @keyup="readCaret"
               />
               <div v-if="episodeWriting && writingPhase !== 'chat'" class="episode-writing-overlay" role="status" aria-live="polite">
                 <span class="episode-writing-spinner" aria-hidden="true" />
@@ -952,19 +1038,16 @@ onMounted(async () => {
               </div>
             </div>
           </div>
-          <div class="ed-foot">
-            <span class="foot-tip">文件：_scripts/{{ activeDoc.filename }}</span>
-            <GradientButton size="sm" type="primary" icon="→" @click="applyToProject">
-              送入当前项目
-            </GradientButton>
+          <div class="sc-status">
+            <span>行 {{ caret.line }} / 列 {{ caret.col }}</span>
+            <span>字符 {{ episodeChars }}</span>
+            <span>Markdown · {{ activeDoc.filename }}</span>
           </div>
-        </GlassCard>
       </section>
-      <div v-if="activeDoc && draft" class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="调整剧本助手宽度" @pointerdown="startPaneResize('agent', $event)" />
-      <aside v-if="activeDoc && draft" class="writing-agent" :style="{ width: agentWidth + 'px' }" aria-label="AI 剧本助手">
-        <header class="writing-agent-head">
-          <span class="writing-agent-icon" aria-hidden="true">✦</span>
-          <div><strong>剧本助手</strong><p>一起打磨人物、对白和故事</p></div>
+      <aside v-if="activeDoc && draft" class="sc-ai" aria-label="AI 编剧助手">
+        <header class="sc-ai-head">
+          <span class="sc-panel-title ai"><i />AI 编剧助手</span>
+          <span class="sc-badge">{{ llmModel || '未选模型' }}</span>
         </header>
         <div ref="writingList" class="writing-history" aria-live="polite">
           <div class="writing-message assistant"><span>剧本助手</span><p>可以直接聊天。只有你明确要写或修改时，我才会改左侧正文。</p></div>
@@ -992,6 +1075,12 @@ onMounted(async () => {
           </section>
         </div>
         <div class="writing-compose">
+          <div class="sc-acts">
+            <button type="button" :disabled="episodeWriting" @click="askWriter('接着当前正文续写下一场，保持人物、场景格式和对白颜色标记。')"><b>续写下一场</b><span>接当前场往下写</span></button>
+            <button type="button" :disabled="episodeWriting" @click="askWriter('改写当前这一场，保留信息，换一种写法。')"><b>改写本场</b><span>保留信息，换写法</span></button>
+            <button type="button" :disabled="episodeWriting" @click="askWriter('润色这一集的对白，去掉口水，保留每个角色原来的意思。')"><b>润色对白</b><span>台词去口水</span></button>
+            <button type="button" :disabled="episodeWriting" @click="askWriter('把这一集压短，节奏加快，不丢关键情节。')"><b>压缩时长</b><span>节奏收紧</span></button>
+          </div>
           <div class="writing-options">
             <label><span>语言模型</span><select v-model="genChoice" :disabled="episodeWriting" aria-label="语言模型">
               <option v-if="!llmGroups.some((g) => g.models.length)" value="">请先在设置里添加模型</option>
@@ -1006,6 +1095,7 @@ onMounted(async () => {
           <div class="writing-actions"><span>Ctrl + Enter 发送</span><button v-if="episodeWriting" class="writing-send cancel" type="button" @click="cancelEpisodeWrite">取消生成</button><button v-else class="writing-send" type="button" :disabled="writingHistoryLoading" @click="writeCurrentEpisode">发送 ✦</button></div>
         </div>
       </aside>
+      </div>
     </div>
 
   </div>
@@ -1013,16 +1103,6 @@ onMounted(async () => {
 
 <style scoped>
 .page {
-  --color-bg-0: #121214;
-  --color-bg-1: #161618;
-  --color-bg-2: #1c1c1f;
-  --color-bg-card: #18181b;
-  --color-border: rgba(255, 255, 255, 0.06);
-  --color-accent: #9a9aa3;
-  --color-text-1: #c8c8ce;
-  --radius-sm: 4px;
-  --radius-md: 4px;
-  --radius-lg: 6px;
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
@@ -1030,8 +1110,8 @@ onMounted(async () => {
   height: 100%;
   min-height: 0;
   overflow-y: auto;
-  background: #121214;
-  color: #c8c8ce;
+  background: var(--nb-bg-0);
+  color: var(--nb-t1);
 }
 .page-head {
   display: flex;
@@ -1077,11 +1157,11 @@ onMounted(async () => {
   font-weight: 550;
 }
 .head-actions :deep(.type-primary) {
-  background: #3a3a40;
-  color: #f2f2f3;
+  background: var(--nb-accent);
+  color: var(--nb-accent-ink);
 }
 .head-actions :deep(.type-primary:hover:not(:disabled)) {
-  background: #48484f;
+  background: #67e4fb;
 }
 .head-actions :deep(.type-secondary),
 .head-actions :deep(.type-ghost) {
@@ -1091,7 +1171,7 @@ onMounted(async () => {
 }
 .head-actions :deep(.type-secondary:hover:not(:disabled)),
 .head-actions :deep(.type-ghost:hover:not(:disabled)) {
-  background: #222226;
+  background: var(--nb-bg-4);
   color: #eee;
 }
 
@@ -1099,8 +1179,11 @@ onMounted(async () => {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: 10px 16px 14px;
-  gap: 10px;
+  padding: 0;
+  gap: 0;
+  background:
+    radial-gradient(900px 480px at 18% -8%, rgba(53, 214, 247, 0.07), transparent 62%),
+    var(--nb-bg-0);
 }
 .page.detail .page-head { align-items: center; gap: 8px; }
 .page.detail .page-head > div:first-child { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -1125,7 +1208,7 @@ onMounted(async () => {
   padding: 14px 14px 12px;
   border-radius: 4px;
   border: none;
-  background: #18181b;
+  background: var(--nb-bg-2);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1133,11 +1216,11 @@ onMounted(async () => {
   cursor: pointer;
 }
 .script-card:hover {
-  background: #202024;
+  background: var(--nb-bg-3);
 }
 .script-card :deep(.tag) {
   border-radius: 3px;
-  background: #26262b;
+  background: var(--nb-bg-4);
   color: #b7b7bc;
 }
 .workspace {
@@ -1197,10 +1280,10 @@ onMounted(async () => {
   color: #d8d8dc;
   cursor: pointer;
 }
-.ep-item:hover { background: #1c1c20; }
+.ep-item:hover { background: var(--nb-bg-3); color: var(--nb-t1); }
 .ep-item.active {
-  background: #26262b;
-  color: #d4d4d8;
+  background: var(--nb-accent-soft);
+  color: var(--nb-accent);
 }
 .writing-agent {
   flex: none;
@@ -1215,47 +1298,47 @@ onMounted(async () => {
   padding-left: 8px;
 }
 .writing-agent-head { display: flex; align-items: center; gap: 10px; padding: 4px 2px 12px; border-bottom: none; }
-.writing-agent-head strong { color: #ececee; font-size: 13px; font-weight: 600; }
-.writing-agent-head p { margin: 2px 0 0; color: #8d8d93; font-size: 11px; }
-.writing-agent-icon { display: grid; place-items: center; flex: 0 0 22px; height: 22px; border-radius: 4px; color: #d0d0d4; background: #2a2a2e; font-size: 13px; }
+.writing-agent-head strong { color: var(--nb-t1); font-size: 13px; font-weight: 600; }
+.writing-agent-head p { margin: 2px 0 0; color: var(--nb-t3); font-size: 11px; }
+.writing-agent-icon { display: grid; place-items: center; flex: 0 0 22px; height: 22px; border-radius: 4px; color: var(--nb-t2); background: var(--nb-bg-4); font-size: 13px; }
 .writing-history { flex: 1; min-height: 120px; overflow-y: auto; padding: 8px 2px 12px; display: flex; flex-direction: column; gap: 12px; }
 .writing-message { max-width: 96%; align-self: flex-start; min-width: 0; }
 .writing-message.user { align-self: flex-end; }
-.writing-message > span { display: block; margin: 0 2px 4px; color: #8a8a90; font-size: 11px; }
+.writing-message > span { display: block; margin: 0 2px 4px; color: var(--nb-t3); font-size: 11px; }
 .writing-message.user > span { text-align: right; }
-.writing-message p { margin: 0; padding: 8px 10px; border: none; border-radius: 4px; background: #1e1e22; color: #c4c4c8; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
-.writing-message.user p { border: none; border-radius: 4px; background: #2c2c32; color: #c8c8ce; }
-.writing-note { margin: 0; color: #8d8d93; font-size: 12px; }
+.writing-message p { margin: 0; padding: 8px 10px; border: 1px solid var(--nb-line-2); border-radius: 4px; background: var(--nb-bg-2); color: var(--nb-t1); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.writing-message.user p { border: 1px solid var(--nb-line-accent); border-radius: 4px; background: var(--nb-accent-soft); color: var(--nb-t1); }
+.writing-note { margin: 0; color: var(--nb-t3); font-size: 12px; }
 .writing-compose { padding: 10px 0 0; border-top: none; }
-.story-plan { padding: 10px; border: none; border-radius: 4px; background: #1c1c20; }
-.story-plan-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #ececee; font-size: 12px; }
-.story-plan-heading button { border: 0; background: transparent; color: #b0b0b6; cursor: pointer; font-size: 11px; }
-.story-plan-status { margin: 6px 0; color: #8d8d93; font-size: 11px; }
+.story-plan { padding: 10px; border: 1px solid var(--nb-line-2); border-radius: 4px; background: var(--nb-bg-3); }
+.story-plan-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--nb-t1); font-size: 12px; }
+.story-plan-heading button { border: 0; background: transparent; color: var(--nb-t2); cursor: pointer; font-size: 11px; }
+.story-plan-status { margin: 6px 0; color: var(--nb-t3); font-size: 11px; }
 .story-plan-content { display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow: auto; margin: 8px 0; }
-.story-plan-content label { display: flex; flex-direction: column; gap: 4px; color: #a3a3a8; font-size: 11px; }
-.story-plan-content textarea, .story-plan-content input, .writing-mode select { width: 100%; box-sizing: border-box; padding: 7px 8px; border: none; border-radius: 4px; background: #141416; color: #c8c8ce; font: inherit; line-height: 1.5; }
+.story-plan-content label { display: flex; flex-direction: column; gap: 4px; color: var(--nb-t2); font-size: 11px; }
+.story-plan-content textarea, .story-plan-content input, .writing-mode select { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid var(--nb-line-2); border-radius: 4px; background: var(--nb-bg-inset); color: var(--nb-t1); font: inherit; line-height: 1.5; }
 .story-plan-content textarea { resize: vertical; }
-.story-plan-content p { margin: 0; color: #8d8d93; font-size: 11px; line-height: 1.5; }
-.story-plan-confirm { width: 100%; padding: 8px; border: none; border-radius: 4px; background: #3a3a40; color: #f4f4f5; cursor: pointer; font-size: 12px; }
-.story-plan-confirm:hover:not(:disabled) { background: #48484f; }
+.story-plan-content p { margin: 0; color: var(--nb-t3); font-size: 11px; line-height: 1.5; }
+.story-plan-confirm { width: 100%; padding: 8px; border: none; border-radius: 6px; background: var(--nb-accent); color: var(--nb-accent-ink); cursor: pointer; font-size: 12px; font-weight: 650; }
+.story-plan-confirm:hover:not(:disabled) { background: #67e4fb; }
 .story-plan-confirm:disabled { opacity: .5; cursor: default; }
-.story-plan-save { align-self: flex-start; padding: 5px 8px; border: none; border-radius: 4px; background: #26262b; color: #d4d4d8; cursor: pointer; font-size: 11px; }
-.writing-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: #8d8d93; font-size: 11px; }
+.story-plan-save { align-self: flex-start; padding: 5px 8px; border: 1px solid var(--nb-line-2); border-radius: 4px; background: var(--nb-bg-2); color: var(--nb-t1); cursor: pointer; font-size: 11px; }
+.writing-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--nb-t2); font-size: 11px; }
 .writing-mode span { flex-shrink: 0; }
-.writing-mode select { height: 32px; padding: 0 8px; background: #1c1c20; }
+.writing-mode select { height: 32px; padding: 0 8px; background: var(--nb-bg-inset); color: var(--nb-t1); }
 .writing-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
-.writing-options label { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: #8d8d93; font-size: 11px; }
-.writing-options select { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: none; border-radius: 4px; background: #1c1c20; color: #e6e6e8; font-size: 11px; }
-.writing-input { display: block; width: 100%; min-height: 78px; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: none; border-radius: 4px; outline: none; background: #1c1c20; color: #c8c8ce; font: inherit; font-size: 12px; line-height: 1.6; }
-.writing-input:focus { background: #222226; }
-.writing-input::placeholder { color: #7c7c82; }
+.writing-options label { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: var(--nb-t2); font-size: 11px; }
+.writing-options select { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--nb-line-2); border-radius: 4px; background: var(--nb-bg-inset); color: var(--nb-t1); font-size: 11px; }
+.writing-input { display: block; width: 100%; min-height: 78px; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: 1px solid var(--nb-line-2); border-radius: 4px; outline: none; background: var(--nb-bg-inset); color: var(--nb-t1); font: inherit; font-size: 12px; line-height: 1.6; }
+.writing-input:focus { background: var(--nb-bg-2); }
+.writing-input::placeholder { color: var(--nb-t4); }
 .writing-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
-.writing-actions > span { color: #7c7c82; font-size: 10px; }
-.writing-send { padding: 7px 12px; border: 0; border-radius: 4px; background: #3a3a40; color: #f4f4f5; font-size: 12px; font-weight: 550; cursor: pointer; }
-.writing-send:hover { background: #48484f; }
+.writing-actions > span { color: var(--nb-t3); font-size: 10px; }
+.writing-send { padding: 7px 12px; border: 0; border-radius: 6px; background: var(--nb-accent); color: var(--nb-accent-ink); font-size: 12px; font-weight: 650; cursor: pointer; }
+.writing-send:hover { background: #67e4fb; }
 .writing-send:disabled { opacity: .5; cursor: default; }
-.writing-send.cancel { background: #2a2a2e; }
-.writing-pulse { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: #bdbdc2; animation: writing-pulse 1s ease-in-out infinite alternate; }
+.writing-send.cancel { background: var(--nb-bg-3); color: var(--nb-t1); border: 1px solid var(--nb-line-2); }
+.writing-pulse { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--nb-t2); animation: writing-pulse 1s ease-in-out infinite alternate; }
 @keyframes writing-pulse { to { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .writing-pulse { animation: none; } }
 .ep-item-title {
@@ -1276,7 +1359,7 @@ onMounted(async () => {
   border: none;
   border-radius: 4px;
   box-shadow: none;
-  background: #18181b;
+  background: var(--nb-bg-0);
 }
 .episode-editor {
   flex: 1;
@@ -1294,7 +1377,7 @@ onMounted(async () => {
 .ep-title-input {
   flex: 1;
   min-width: 0;
-  background: #141416;
+  background: var(--nb-void);
   border: none;
   border-radius: 4px;
   padding: 8px 10px;
@@ -1310,7 +1393,7 @@ onMounted(async () => {
   padding: 0 8px;
   border: none;
   border-radius: 4px;
-  background: #141416;
+  background: var(--nb-void);
   color: var(--color-text-2);
   cursor: pointer;
 }
@@ -1320,33 +1403,63 @@ onMounted(async () => {
 .episode-body-wrap {
   position: relative;
   flex: 1;
-  min-height: 240px;
+  min-height: 280px;
   display: flex;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--nb-void);
+  box-shadow: inset 0 0 0 1px var(--nb-line-2);
 }
+.script-paint,
 .episode-body {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  margin: 0;
   width: 100%;
-  min-height: 240px;
-  resize: none;
-  background: #141416;
-  border: none;
-  border-radius: 4px;
-  padding: 12px;
-  color: var(--color-text-1);
+  height: 100%;
+  padding: 18px 22px 48px;
+  border: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  background: transparent;
+  font-family: var(--font-sans);
   font-size: 14px;
-  line-height: 1.7;
-  outline: 1px solid transparent;
-  outline-offset: -1px;
-  transition: outline-color 0.2s ease, background-color 0.2s ease;
+  line-height: 26px;
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  tab-size: 2;
+}
+.script-paint {
+  color: var(--nb-t2);
+  pointer-events: none;
+  z-index: 0;
+}
+.script-paint.empty { color: var(--nb-t4); }
+.script-paint :deep(.sp-h1) { color: var(--nb-t1); font-weight: 650; }
+.script-paint :deep(.sp-h2) { color: var(--nb-accent); font-weight: 650; }
+.script-paint :deep(.sp-act) { color: var(--nb-t2); }
+.script-paint :deep(.sp-say) { color: var(--nb-t1); }
+.script-paint :deep(.sp-colon) { color: var(--nb-t3); }
+.script-paint :deep(.sp-paren) { color: var(--nb-t4); }
+.script-paint :deep(.sp-note),
+.script-paint :deep(.sp-cast) { color: var(--nb-t4); }
+.script-paint :deep(.sp-nar) { color: var(--nb-ai); font-style: italic; }
+.episode-body {
+  z-index: 1;
+  resize: none;
+  color: transparent;
+  caret-color: var(--nb-accent);
+  outline: none;
 }
 .episode-body:focus,
 .episode-body:focus-visible {
-  outline: 1px solid rgba(255, 255, 255, 0.16);
-  outline-offset: -1px;
+  outline: none;
 }
 .episode-body::selection {
-  background: rgba(255, 255, 255, 0.14);
-  color: #d4d4d8;
+  background: rgba(53, 214, 247, 0.28);
+  color: transparent;
 }
 .episode-writing-overlay {
   position: absolute;
@@ -1424,7 +1537,7 @@ onMounted(async () => {
 .search {
   flex: 1;
   min-width: 0;
-  background: #18181b;
+  background: var(--nb-bg-2);
   border: none;
   border-radius: 4px;
   padding: 8px 10px;
@@ -1433,7 +1546,7 @@ onMounted(async () => {
   outline: none;
 }
 .search:focus {
-  background: #202024;
+  background: var(--nb-bg-3);
 }
 .count {
   font-size: 11px;
@@ -1497,7 +1610,7 @@ onMounted(async () => {
 }
 .side-foot:hover {
   color: #eee;
-  background: #1c1c20;
+  background: var(--nb-bg-3);
 }
 
 .editor-card {
@@ -1534,7 +1647,7 @@ onMounted(async () => {
 }
 .title-input:focus {
   border-color: transparent;
-  background: #141416;
+  background: var(--nb-void);
 }
 .ed-meta {
   display: flex;
@@ -1560,14 +1673,14 @@ onMounted(async () => {
 }
 .mini-btn:hover:not(:disabled) {
   color: #f2f2f3;
-  background: #26262b;
+  background: var(--nb-bg-4);
 }
 .mini-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
 .mini-btn.primary {
-  background: #323238;
+  background: var(--nb-bg-4);
   color: #f2f2f3;
 }
 .mini-btn.danger:hover {
@@ -1632,7 +1745,7 @@ onMounted(async () => {
   height: 18px;
   flex-shrink: 0;
   border-radius: 3px;
-  background: #2a2a2e;
+  background: var(--nb-bg-4);
   color: #c8c8cc;
   font-size: 11px;
   font-weight: 600;
@@ -1871,6 +1984,107 @@ onMounted(async () => {
     position: static;
   }
 }
+.sc-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sc-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+  padding: 22px 28px 16px; border-bottom: 1px solid var(--nb-line-2);
+  background: linear-gradient(180deg, rgba(255,255,255,.02), transparent);
+}
+.sc-head-copy { flex: 1; min-width: 0; }
+.sc-kicker {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--nb-t3);
+}
+.sc-kicker::before { content: ""; width: 14px; height: 1px; background: var(--nb-line-accent); }
+.sc-h1 {
+  display: block; width: min(640px, 100%); margin: 8px 0 6px; padding: 0;
+  border: 0; background: transparent; color: var(--nb-t1);
+  font-size: 26px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.15;
+}
+.sc-head-copy p { margin: 0; max-width: 640px; color: var(--nb-t3); font-size: 12px; line-height: 1.6; }
+.sc-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.savechip { display: inline-flex; align-items: center; gap: 6px; color: var(--nb-t3); font-size: 11px; }
+.savechip i { width: 5px; height: 5px; border-radius: 50%; background: var(--nb-success); box-shadow: 0 0 6px rgba(61,217,160,.7); }
+.savechip.dirty i { background: var(--nb-warning); box-shadow: 0 0 6px rgba(255,180,84,.7); }
+.nb-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--nb-line-2);
+  background: var(--nb-bg-3); color: var(--nb-t1); font-size: 12px; cursor: pointer;
+}
+.nb-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.nb-btn:hover { background: var(--nb-bg-4); }
+.nb-btn.primary { background: var(--nb-accent); border-color: var(--nb-accent); color: var(--nb-accent-ink); font-weight: 650; }
+.nb-btn.primary:hover { background: #4ce0ff; box-shadow: 0 0 20px var(--nb-accent-glow); }
+.nb-btn.ghost { background: transparent; border-color: transparent; color: var(--nb-t2); }
+.nb-btn.sm { height: 26px; padding: 0 10px; border-radius: 6px; font-size: 11px; }
+.nb-btn.danger { background: var(--nb-danger-soft); border-color: rgba(255,92,108,.32); color: var(--nb-danger); }
+.nb-btn.block { width: 100%; }
+.nb-btn:disabled { opacity: .4; cursor: default; }
+.sc-cols { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(0, 1fr) 330px; }
+.sc-lib, .sc-ai { min-height: 0; display: flex; flex-direction: column; background: var(--nb-bg-1); }
+.sc-lib { border-right: 1px solid var(--nb-line-2); }
+.sc-ai { border-left: 1px solid var(--nb-line-2); }
+.sc-lib-head, .sc-ai-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--nb-line-1);
+}
+.sc-panel-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
+.sc-panel-title i { width: 3px; height: 13px; border-radius: 2px; background: var(--nb-accent); }
+.sc-panel-title.ai i { background: var(--nb-ai); }
+.sc-badge { height: 20px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--nb-ai-line); background: var(--nb-ai-soft); color: var(--nb-ai); font-size: 10px; display: inline-flex; align-items: center; }
+.sc-icon { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; color: var(--nb-t3); }
+.sc-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.sc-icon:hover { background: var(--nb-bg-3); color: var(--nb-t1); }
+.sc-lib-search { padding: 10px 12px 4px; }
+.sc-lib-search input, .writing-options select, .writing-mode select, .writing-input, .story-plan-content textarea, .story-plan-content input {
+  width: 100%; box-sizing: border-box; border: 1px solid var(--nb-line-2); border-radius: 10px;
+  background: var(--nb-bg-inset); color: var(--nb-t1);
+}
+.sc-lib-search input { height: 32px; padding: 0 12px; }
+.sc-lib-search input:focus, .writing-input:focus { outline: none; border-color: var(--nb-accent); box-shadow: 0 0 0 3px var(--nb-accent-soft); }
+.sc-lib-body { flex: 1; overflow: auto; padding: 8px; }
+.sc-sec-t { padding: 12px 8px 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--nb-t4); }
+.sc-ep, .sc-other, .sc-kid {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--nb-t2); cursor: pointer; border-radius: 6px;
+}
+.sc-ep, .sc-other { padding: 7px 8px; font-size: 12px; }
+.sc-ep svg { width: 12px; height: 12px; fill: none; stroke: var(--nb-t4); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sc-ep span, .sc-other span, .sc-kid span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-ep b, .sc-other b { font-weight: 500; font-family: var(--font-mono); font-size: 10px; color: var(--nb-t4); }
+.sc-ep:hover, .sc-other:hover, .sc-kid:hover { background: var(--nb-bg-2); color: var(--nb-t1); }
+.sc-ep.on { background: var(--nb-accent-soft); color: var(--nb-accent); }
+.sc-ep.on svg { stroke: var(--nb-accent); }
+.sc-kid { margin-left: 16px; width: calc(100% - 16px); padding: 6px 8px; border-left: 1px solid var(--nb-line-2); border-radius: 0 6px 6px 0; font-size: 11px; color: var(--nb-t3); }
+.sc-lib-foot { border-top: 1px solid var(--nb-line-1); padding: 12px; display: grid; gap: 8px; }
+.sc-lib-meta { display: flex; justify-content: space-between; color: var(--nb-t4); font-family: var(--font-mono); font-size: 10px; }
+.sc-danger-text { border: 0; background: transparent; color: var(--nb-danger); cursor: pointer; font-size: 10px; }
+.sc-mid { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--nb-bg-0); }
+.sc-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--nb-line-2); background: var(--nb-bg-1); }
+.sc-seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--nb-bg-inset); border: 1px solid var(--nb-line-2); border-radius: 10px; }
+.sc-seg button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--nb-t3); font-size: 11px; cursor: pointer; }
+.sc-seg button.on { background: var(--nb-accent-soft); color: var(--nb-accent); }
+.sc-vdiv { width: 1px; height: 16px; background: var(--nb-line-2); }
+.sc-toolbar-meta { margin-left: auto; color: var(--nb-t4); font-family: var(--font-mono); font-size: 11px; }
+.sc-mid .episode-editor { padding: 0; gap: 0; }
+.sc-mid .episode-body-wrap { border-radius: 0; box-shadow: none; background: transparent; }
+.sc-mid .episode-body-wrap.preview .episode-body { pointer-events: none; }
+.sc-status {
+  display: flex; gap: 18px; padding: 8px 16px; border-top: 1px solid var(--nb-line-2);
+  background: var(--nb-bg-1); color: var(--nb-t4); font-family: var(--font-mono); font-size: 11px;
+}
+.sc-ai .writing-history { padding: 14px; }
+.sc-ai .writing-compose { padding: 12px; border-top: 1px solid var(--nb-line-1); }
+.sc-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.sc-acts button {
+  display: grid; gap: 3px; justify-items: start; text-align: left; padding: 8px 10px;
+  border: 1px solid var(--nb-line-2); border-radius: 10px; background: var(--nb-bg-2); color: var(--nb-t1); cursor: pointer;
+}
+.sc-acts button:hover { border-color: var(--nb-ai-line); background: var(--nb-ai-soft); }
+.sc-acts b { font-size: 12px; }
+.sc-acts span { font-size: 10px; color: var(--nb-t4); }
+.sc-ai .writing-send { border-radius: 8px; }
+
 @media (max-width: 760px) {
   .page.detail { height: auto; overflow: visible; }
   .workspace { display: flex; flex-direction: column; }

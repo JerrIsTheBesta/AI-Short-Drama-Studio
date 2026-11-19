@@ -13,6 +13,7 @@ defineProps<{
     | 'trash'
     | 'edit'
     | 'upload'
+    | 'download'
     | 'library'
     | 'wand'
     | 'remake'
@@ -20,6 +21,7 @@ defineProps<{
     | 'home'
     | 'check'
     | 'script'
+    | 'play'
     | 'github'
   size?: number
 }>()
@@ -75,6 +77,9 @@ defineProps<{
     <template v-else-if="name === 'upload'">
       <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4" />
     </template>
+    <template v-else-if="name === 'download'">
+      <path d="M12 4v12M6.5 11 12 16.5 17.5 11M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </template>
     <template v-else-if="name === 'library'">
       <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H18a2 2 0 0 1 2 2v14H6.5A2.5 2.5 0 0 0 4 21.5zM4 5.5v16M8 7h8M8 11h6" />
     </template>
@@ -92,6 +97,9 @@ defineProps<{
     </template>
     <template v-else-if="name === 'script'">
       <path d="M6.5 3.5h7L18 8v12.5a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" /><path d="M13.5 3.5V8H18M9 13h6M9 17h4" />
+    </template>
+    <template v-else-if="name === 'play'">
+      <circle cx="12" cy="12" r="8.5" /><path d="m10 8.8 6 3.2-6 3.2z" />
     </template>
     <template v-else-if="name === 'github'">
       <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />

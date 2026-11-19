@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useProjectStore, useToastStore } from '@/stores'
 import GradientButton from '@/components/common/GradientButton.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -74,6 +75,7 @@ function newProject() {
     </div>
 
     <div class="right">
+      <ThemeToggle />
       <button class="text-btn accent" @click="router.push('/studio')" title="回到无限画布">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3" y="4" width="18" height="16" rx="2" />

@@ -124,6 +124,11 @@ export async function generateFinalCut(onProgress?: (msg: string) => void) {
     const blob = await assets.getBlob(shot.audioAssetId)
     if (blob) voiceoverAudioMap.set(clip.shotId, blob)
   }
+  for (const clip of working) {
+    if (!clip.voiceAssetId) continue
+    const blob = await assets.getBlob(clip.voiceAssetId)
+    if (blob) voiceoverAudioMap.set(clip.id, blob)
+  }
 
   let width = p.settings.width
   let height = p.settings.height

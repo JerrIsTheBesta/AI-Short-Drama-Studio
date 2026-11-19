@@ -96,11 +96,10 @@ export function nextEpisodeTitle(parsed: ParsedScriptDoc): string {
   return `第 ${n} 集`
 }
 
-export const NEW_EPISODE_BODY = `> 一句话概括本集发生的事
+export const NEW_EPISODE_BODY = `场景 1 · 地点 · 夜 · 外
+（本场 0 字 · 预计 0 秒 · 0 镜）
 
-**场景**：
-**人物**：
-**剧情**：
+出场　人物　道具　环境音
 `
 
 /** 追加一集，返回新的 Markdown 与这一集的下标 */

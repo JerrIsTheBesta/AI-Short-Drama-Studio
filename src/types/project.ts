@@ -392,6 +392,12 @@ export interface TimelineClip {
   speed: number
   /** 音量 0-1 */
   volume: number
+  /** 这段画面上的配音。有值时导出优先叠这段，不再只用分镜口播。 */
+  voiceAssetId?: ID
+  /** 配音从音频的哪一秒开始 */
+  voiceSourceIn?: number
+  /** 配音音量 0-1 */
+  voiceVolume?: number
   enabled: boolean
 }
 

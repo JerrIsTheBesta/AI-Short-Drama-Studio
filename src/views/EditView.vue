@@ -1,15 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore, useAssetsStore, useToastStore } from '@/stores'
 import { concatVideos } from '@/services/ffmpeg'
-import GlassCard from '@/components/common/GlassCard.vue'
-import GradientButton from '@/components/common/GradientButton.vue'
-import EmptyState from '@/components/common/EmptyState.vue'
-import Tag from '@/components/common/Tag.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
 import TimelineView from '@/components/timeline/TimelineView.vue'
 import EditIcon from '@/components/edit/EditIcon.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import type { AudioTimelineClip, Shot, TextOverlay, TimelineClip, TransitionType } from '@/types'
 import { buildTimelineFromShots, timelineClipAssetId } from '@/utils/timeline'
 import { isDigitalHumanSpeechProject } from '@/utils/shot'
@@ -34,15 +31,26 @@ const previewProgress = ref<number | null>(null)
 const progressLabel = ref('合成')
 const videoPickerOpen = ref(false)
 const audioPickerOpen = ref(false)
+const audioPickerMode = ref<'bgm' | 'voice'>('bgm')
+const importingVoice = ref(false)
+const voicePreviewUrl = ref('')
+const voicePlayer = ref<HTMLAudioElement | null>(null)
+const mediaTab = ref<'clip' | 'audio' | 'text'>('clip')
+const mediaQuery = ref('')
 const importingVideo = ref(false)
 const importingAudio = ref(false)
 const selectedTextId = ref<string | null>(null)
-const clipThumbs = ref<Record<string, string>>({})
 const sourcePreviewUrl = ref('')
 const sourcePreviewTitle = ref('')
+const previewAspect = ref<'16:9' | '9:16'>('9:16')
 const sourcePlayer = ref<HTMLVideoElement | null>(null)
 const pendingSourceTime = ref<number | null>(null)
 const playhead = ref(0)
+const playingTimeline = ref(false)
+const previewClipId = ref<string | null>(null)
+const previewLoadKey = ref(0)
+let previewRequest = 0
+let switching = false
 
 function clearAutomaticFades() {
   const current = project.current
@@ -54,8 +62,40 @@ function clearAutomaticFades() {
   project.setSettings({ defaultTransition: 'none' })
 }
 
+function fallbackAspect(): '16:9' | '9:16' {
+  const ratio = project.current?.settings.aspectRatio
+  return ratio === '16:9' || ratio === '4:3' || ratio === '21:9' ? '16:9' : '9:16'
+}
+
+function setAspectFromSize(width: number, height: number) {
+  if (!width || !height) return
+  previewAspect.value = width >= height ? '16:9' : '9:16'
+}
+
+function setAspectFromAsset(assetId?: string) {
+  if (!assetId) return
+  const meta = assets.getMeta(assetId)
+  if (!meta || !('width' in meta)) return
+  setAspectFromSize(Number(meta.width), Number(meta.height))
+}
+
+function onPreviewMetadata(event: Event) {
+  const player = event.currentTarget as HTMLVideoElement
+  setAspectFromSize(player.videoWidth, player.videoHeight)
+  applyPendingSeek(event)
+}
+
+async function focusClip(id: string) {
+  selectedTextId.value = null
+  const index = timeline.value.findIndex((clip) => clip.id === id)
+  const clip = timeline.value[index]
+  if (index < 0 || !clip) return
+  await playClip(clip, index, clip.startTime, false, true)
+}
+
 onMounted(async () => {
   if (!project.current) return
+  previewAspect.value = fallbackAspect()
   clearAutomaticFades()
   // 第一次进入按分镜顺序铺满；之后保留用户顺序，只补上新生成的视频。
   if (project.current.timeline.length === 0 && project.current.shots.length > 0) {
@@ -63,11 +103,12 @@ onMounted(async () => {
   } else {
     appendMissingShots()
   }
-  await loadClipThumbs()
-  if (timeline.value[0]) await playClip(timeline.value[0], 0)
+  await seekTimeline(0)
 })
 
 onUnmounted(() => {
+  previewRequest++
+  voicePlayer.value?.pause()
   if (previewingUrl.value) URL.revokeObjectURL(previewingUrl.value)
 })
 
@@ -76,6 +117,26 @@ const timeline = computed(() => project.current?.timeline ?? [])
 const selectedClip = computed(() =>
   timeline.value.find((c) => c.id === selectedClipId.value) ?? null
 )
+const canTrimSelected = computed(() => {
+  const clip = selectedClip.value
+  if (!clip) return false
+  const offset = playhead.value - clip.startTime
+  return offset >= 0.1 && clip.duration - offset >= 0.1
+})
+const voiceClips = computed(() =>
+  timeline.value
+    .filter((clip) => clip.voiceAssetId)
+    .map((clip) => ({
+      id: clip.id,
+      name: assets.getMeta(clip.voiceAssetId || '')?.filename || '配音',
+      startTime: clip.startTime,
+      duration: clip.duration
+    }))
+)
+const selectedVoiceName = computed(() => {
+  const id = selectedClip.value?.voiceAssetId
+  return id ? assets.getMeta(id)?.filename || '已配音' : ''
+})
 const selectedShot = computed(() => {
   if (!selectedClip.value) return null
   return shots.value.find((s) => s.id === selectedClip.value!.shotId) ?? null
@@ -105,82 +166,170 @@ function clipTitle(clip: TimelineClip, index: number) {
   return shot?.title || clip.label || `视频片段 ${index + 1}`
 }
 
-async function loadClipThumbs() {
-  if (!project.current) return
-  const next = { ...clipThumbs.value }
-  for (const clip of timeline.value) {
-    if (next[clip.id]) continue
-    const assetId = timelineClipAssetId(project.current, clip)
-    if (!assetId) continue
-    const thumb = await assets.ensureThumb(assetId)
-    if (thumb) next[clip.id] = thumb
-  }
-  clipThumbs.value = next
-}
-
-async function playClip(clip: TimelineClip, index: number) {
-  if (!project.current) return
-  const assetId = timelineClipAssetId(project.current, clip)
-  if (!assetId) {
-    toast.warn('这个片段没有可播放的视频素材')
-    return
-  }
-  const url = await assets.getUrl(assetId)
+async function playClip(clip: TimelineClip, index: number, seconds = clip.startTime, play = true, select = true) {
+  const current = project.current
+  if (!current) return
+  const request = ++previewRequest
+  switching = true
+  pendingSourceTime.value = null
+  playingTimeline.value = play
+  sourcePlayer.value?.pause()
+  playhead.value = seconds
+  if (select) selectedClipId.value = clip.id
+  const same = previewClipId.value === clip.id && Boolean(sourcePreviewUrl.value)
+  const assetId = timelineClipAssetId(current, clip)
+  setAspectFromAsset(assetId)
+  let url = ''
+  let voiceUrl = ''
+  try {
+    url = same ? sourcePreviewUrl.value : assetId ? (await assets.getUrl(assetId)) || '' : ''
+    voiceUrl = clip.voiceAssetId ? (await assets.getUrl(clip.voiceAssetId)) || '' : ''
+  } catch {}
+  if (request !== previewRequest || project.current?.id !== current.id) return
   if (!url) {
-    toast.error('视频素材读取失败')
+    switching = false
+    playingTimeline.value = false
+    previewClipId.value = null
+    sourcePreviewUrl.value = ''
+    voicePreviewUrl.value = ''
+    voicePlayer.value?.pause()
+    toast.warn('这个片段没有可读取的视频素材')
     return
   }
-  selectedClipId.value = clip.id
+  previewClipId.value = clip.id
   sourcePreviewTitle.value = clipTitle(clip, index)
-  pendingSourceTime.value = clip.sourceIn
-  playhead.value = clip.startTime
+  const offset = Math.max(0, Math.min(clip.duration, seconds - clip.startTime))
+  pendingSourceTime.value = clip.sourceIn + offset * clip.speed
+  if (!same) previewLoadKey.value++
   sourcePreviewUrl.value = url
+  voicePreviewUrl.value = voiceUrl
+  if (!voiceUrl) voicePlayer.value?.pause()
+  await nextTick()
+  if (request === previewRequest) applyPendingSeek()
 }
 
-function applyPendingSeek() {
+function syncVoicePlayback(play: boolean) {
+  const audio = voicePlayer.value
+  const player = sourcePlayer.value
+  const clip = timeline.value.find((item) => item.id === previewClipId.value)
+  if (!audio || !player || !clip?.voiceAssetId || !voicePreviewUrl.value) {
+    audio?.pause()
+    return
+  }
+  const timelineOffset = Math.max(0, (player.currentTime - clip.sourceIn) / Math.max(0.01, clip.speed || 1))
+  audio.volume = Math.max(0, Math.min(1, clip.voiceVolume ?? 1))
+  if (audio.readyState >= 1) {
+    const target = Math.max(0, (clip.voiceSourceIn || 0) + timelineOffset)
+    const limit = Number.isFinite(audio.duration) ? audio.duration : target
+    if (Math.abs(audio.currentTime - target) > 0.3) audio.currentTime = Math.min(limit, target)
+  }
+  if (play) audio.play().catch(() => {})
+  else audio.pause()
+}
+
+function applyPendingSeek(event?: Event) {
   const player = sourcePlayer.value
   const target = pendingSourceTime.value
-  if (!player || target == null) return
-  const clip = timeline.value.find((item) => item.id === selectedClipId.value)
+  if (!player || (event && event.currentTarget !== player) || player.readyState < 1 || target == null) return
+  const clip = timeline.value.find(item => item.id === previewClipId.value)
   player.playbackRate = Math.max(0.25, Math.min(3, clip?.speed || 1))
-  player.currentTime = Math.max(0, Math.min(Number.isFinite(player.duration) ? player.duration : target, target))
+  const nextTime = Math.max(0, Math.min(Number.isFinite(player.duration) ? player.duration : target, target))
   pendingSourceTime.value = null
-  player.play().catch(() => {})
+  switching = false
+  const shouldPlay = playingTimeline.value
+  const request = previewRequest
+  const start = () => {
+    if (request !== previewRequest || sourcePlayer.value !== player) return
+    syncVoicePlayback(shouldPlay && playingTimeline.value)
+    if (!shouldPlay || !playingTimeline.value) return
+    player.play().catch((error: unknown) => {
+      if (request !== previewRequest || sourcePlayer.value !== player) return
+      const name = error instanceof DOMException ? error.name : ''
+      if (name === 'AbortError') return
+      playingTimeline.value = false
+      toast.warn('这段视频无法播放')
+    })
+  }
+  if (Math.abs(player.currentTime - nextTime) > 0.08) {
+    const onSeeked = () => {
+      player.removeEventListener('seeked', onSeeked)
+      start()
+    }
+    player.addEventListener('seeked', onSeeked)
+    player.currentTime = nextTime
+    return
+  }
+  start()
+}
+
+function onFrameClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.player-text-overlay')) return
+  if (!timeline.value.some((clip) => clip.enabled)) return
+  void toggleTimelinePlayback()
 }
 
 async function seekTimeline(seconds: number) {
-  const enabled = timeline.value.filter((clip) => clip.enabled)
-  const clip =
-    enabled.find((item) => seconds >= item.startTime && seconds < item.startTime + item.duration) ||
-    enabled[enabled.length - 1]
+  const enabled = timeline.value.filter(item => item.enabled)
+  const clip = enabled.find(item => seconds < item.startTime + item.duration) || enabled.at(-1)
   if (!clip) return
-  const index = timeline.value.findIndex((item) => item.id === clip.id)
-  const offset = Math.max(0, Math.min(clip.duration, seconds - clip.startTime))
-  const sourceTime = clip.sourceIn + offset * clip.speed
-  playhead.value = seconds
-  await playClip(clip, index)
-  playhead.value = seconds
-  pendingSourceTime.value = sourceTime
-  if (sourcePlayer.value?.readyState && sourcePlayer.value.readyState >= 1) applyPendingSeek()
+  await playClip(clip, timeline.value.indexOf(clip), Math.max(clip.startTime, seconds), false, false)
 }
 
-function syncPlayheadFromPlayer() {
-  const player = sourcePlayer.value
-  const clip = timeline.value.find((item) => item.id === selectedClipId.value)
-  if (!player || !clip) return
-  const elapsed = Math.max(0, player.currentTime - clip.sourceIn) / Math.max(0.01, clip.speed)
-  playhead.value = Math.min(clip.startTime + clip.duration, clip.startTime + elapsed)
-  if (elapsed >= clip.duration) {
-    player.pause()
-    player.currentTime = Math.min(player.duration || Number.POSITIVE_INFINITY, clip.sourceIn + clip.duration * clip.speed)
+async function toggleTimelinePlayback() {
+  if (playingTimeline.value) {
+    playingTimeline.value = false
+    sourcePlayer.value?.pause()
+    voicePlayer.value?.pause()
+    return
+  }
+  const enabled = timeline.value.filter(item => item.enabled)
+  const first = enabled[0]
+  if (!first) return
+  const current = enabled.find(item => playhead.value < item.startTime + item.duration)
+  const clip = current || first
+  await playClip(clip, timeline.value.indexOf(clip), current ? Math.max(clip.startTime, playhead.value) : clip.startTime, true, false)
+}
+
+function playTimelineFromStart() {
+  const index = timeline.value.findIndex(item => item.enabled)
+  if (index >= 0) void playClip(timeline.value[index], index, timeline.value[index].startTime, true, false)
+}
+
+function advanceTimeline(event: Event) {
+  if (!playingTimeline.value || switching || event.currentTarget !== sourcePlayer.value) return
+  const index = timeline.value.findIndex(item => item.id === previewClipId.value)
+  if (index < 0) return
+  const clip = timeline.value[index]
+  playhead.value = clip.startTime + clip.duration
+  const next = timeline.value.findIndex((item, i) => i > index && item.enabled)
+  if (next >= 0) void playClip(timeline.value[next], next, timeline.value[next].startTime, true, false)
+  else {
+    playingTimeline.value = false
+    sourcePlayer.value?.pause()
   }
 }
 
-watch(
-  () => timeline.value.map((clip) => `${clip.id}:${clip.assetId || clip.shotId}`).join('|'),
-  () => loadClipThumbs(),
-  { immediate: true }
-)
+function syncPlayheadFromPlayer(event: Event) {
+  const player = sourcePlayer.value
+  const clip = timeline.value.find(item => item.id === previewClipId.value)
+  if (!playingTimeline.value || switching || !player || event.currentTarget !== player || !clip) return
+  const elapsed = Math.max(0, player.currentTime - clip.sourceIn) / Math.max(0.01, clip.speed)
+  playhead.value = Math.min(clip.startTime + clip.duration, clip.startTime + elapsed)
+  if (elapsed >= clip.duration) advanceTimeline(event)
+}
+
+function trimAtPlayhead(id: string, side: 'left' | 'right') {
+  const clip = timeline.value.find(item => item.id === id)
+  if (!clip) return
+  const offset = playhead.value - clip.startTime
+  if (offset < 0.1 || clip.duration - offset < 0.1) return
+  const seconds = side === 'left' ? clip.startTime : playhead.value
+  updateClip(id, side === 'left'
+    ? { sourceIn: clip.sourceIn + offset * clip.speed, duration: clip.duration - offset }
+    : { duration: offset })
+  void seekTimeline(seconds)
+}
 
 function autoBuildTimeline() {
   if (!project.current) return
@@ -189,10 +338,11 @@ function autoBuildTimeline() {
   toast.success(`已自动构建 ${clips.length} 个片段的时间线`)
 }
 
-function addShotToTimeline(shot: Shot) {
+function addShotToTimeline(shot: Shot, preview = true) {
   if (!project.current) return
-  if (timeline.value.find((c) => c.shotId === shot.id)) {
-    toast.warn('该分镜已在时间线上')
+  const existing = timeline.value.find((c) => c.shotId === shot.id)
+  if (existing) {
+    if (preview) void focusClip(existing.id)
     return
   }
   const lastEnd = timeline.value.reduce(
@@ -212,15 +362,23 @@ function addShotToTimeline(shot: Shot) {
     enabled: true
   }
   project.addClip(newClip)
-  toast.success(`已加入：${shot.title}`)
+  if (preview) {
+    toast.success(`已加入：${shot.title}`)
+    void focusClip(newClip.id)
+  }
 }
 
 function addAllShots() {
+  let added = 0
   for (const s of [...shots.value].sort((a, b) => a.index - b.index)) {
     if (!timeline.value.find((c) => c.shotId === s.id)) {
-      addShotToTimeline(s)
+      addShotToTimeline(s, false)
+      added++
     }
   }
+  const first = timeline.value[0]
+  if (first) void focusClip(first.id)
+  if (added) toast.success(`已加入 ${added} 个片段`)
 }
 
 function appendMissingShots() {
@@ -250,13 +408,20 @@ function appendMissingShots() {
   toast.info(`已补入 ${additions.length} 个新生成的视频片段`)
 }
 
-function addVideoAssets(ids: string[]) {
+async function addVideoAssets(ids: string[]) {
   if (!project.current || !ids.length) return
   let cursor = timeline.value.reduce((max, clip) => Math.max(max, clip.startTime + clip.duration), 0)
   const stamp = Date.now().toString(36)
   const additions: TimelineClip[] = []
   for (const assetId of ids) {
-    const meta = assets.getMeta(assetId)
+    let meta = assets.getMeta(assetId)
+    if (!meta || meta.kind !== 'video') {
+      try {
+        meta = await assets.adopt(assetId, 'video', { projectId: project.current.id })
+      } catch {
+        continue
+      }
+    }
     if (!meta || meta.kind !== 'video') continue
     const duration = Math.max(0.5, Number(meta.duration) || 5)
     additions.push({
@@ -275,10 +440,14 @@ function addVideoAssets(ids: string[]) {
     })
     cursor += duration
   }
-  if (!additions.length) return
+  if (!additions.length) {
+    toast.warn('没有可加入的视频')
+    return
+  }
   project.setTimeline([...timeline.value, ...additions])
   selectedClipId.value = additions[0].id
   toast.success(`已加入 ${additions.length} 个视频片段`)
+  void focusClip(additions[0].id)
 }
 
 async function importVideos() {
@@ -294,7 +463,7 @@ async function importVideos() {
       })
       ids.push(asset.id)
     }
-    addVideoAssets(ids)
+    await addVideoAssets(ids)
   } catch (e: any) {
     toast.error(`导入视频失败：${e?.message || String(e)}`)
   } finally {
@@ -328,13 +497,16 @@ function updateBgmClip(patch: Partial<AudioTimelineClip>) {
 
 function addTextOverlay() {
   if (!project.current) return
-  const start = Math.max(0, playhead.value)
-  const total = Number(totalDuration.value) || start + 3
+  const clip = selectedClip.value
+  const head = Math.max(0, playhead.value)
+  const inside = clip && head >= clip.startTime && head < clip.startTime + clip.duration
+  const start = inside ? head : clip?.startTime ?? head
+  const end = clip ? clip.startTime + clip.duration : start + 3
   const item: TextOverlay = {
     id: `txt_${Date.now().toString(36)}`,
     text: '输入文字',
     startTime: start,
-    duration: Math.max(0.5, Math.min(3, total - start || 3)),
+    duration: Math.max(0.5, end - start),
     fontFamily: project.current.settings.captionStyle.fontFamily || 'Microsoft YaHei',
     fontSizeRatio: project.current.settings.captionStyle.fontSizeRatio || 0.05,
     color: project.current.settings.captionStyle.color || '#ffffff',
@@ -345,6 +517,106 @@ function addTextOverlay() {
   }
   project.setTextOverlays([...textOverlays.value, item])
   selectedTextId.value = item.id
+  mediaTab.value = 'text'
+  toast.success('文字已加在当前片段上，可直接改内容')
+}
+
+function focusText(id: string) {
+  selectedTextId.value = id
+  mediaTab.value = 'text'
+}
+
+function trimSelected(side: 'left' | 'right') {
+  if (!selectedClip.value || !canTrimSelected.value) {
+    toast.warn('先把竖线移到片段内部，再裁前段或后段')
+    return
+  }
+  trimAtPlayhead(selectedClip.value.id, side)
+}
+
+function openBgmPicker() {
+  audioPickerMode.value = 'bgm'
+  audioPickerOpen.value = true
+}
+
+function openVoicePicker() {
+  if (!selectedClip.value) {
+    toast.warn('先选中一段视频，再给它配音')
+    return
+  }
+  audioPickerMode.value = 'voice'
+  audioPickerOpen.value = true
+}
+
+async function onAudioPicked(ids: string[]) {
+  if (audioPickerMode.value === 'voice') await assignVoice(ids[0])
+  else chooseBgm(ids)
+}
+
+async function assignVoice(assetId?: string) {
+  const clip = selectedClip.value
+  if (!project.current || !clip) {
+    toast.warn('先选中一段视频，再给它配音')
+    return
+  }
+  if (!assetId) return
+  let meta = assets.getMeta(assetId)
+  if (!meta || meta.kind !== 'audio') {
+    try {
+      meta = await assets.adopt(assetId, 'audio', { projectId: project.current.id })
+    } catch (error: any) {
+      toast.error(`配音读取失败：${error?.message || '素材无效'}`)
+      return
+    }
+  }
+  if (!meta || meta.kind !== 'audio') {
+    toast.warn('请选择音频作为配音')
+    return
+  }
+  updateClip(clip.id, {
+    voiceAssetId: meta.id,
+    voiceSourceIn: clip.voiceSourceIn ?? 0,
+    voiceVolume: clip.voiceVolume ?? 1
+  })
+  if (shots.value.some((shot) => shot.id === clip.shotId)) project.assignShotAudio(clip.shotId, meta.id)
+  toast.success('配音已加到这段视频')
+  if (previewClipId.value === clip.id) {
+    voicePreviewUrl.value = (await assets.getUrl(meta.id)) || ''
+    await nextTick()
+    syncVoicePlayback(playingTimeline.value)
+  }
+}
+
+function clearVoice() {
+  const id = selectedClip.value?.id
+  if (!id) return
+  updateClip(id, { voiceAssetId: undefined, voiceSourceIn: undefined, voiceVolume: undefined })
+  if (previewClipId.value === id) {
+    voicePreviewUrl.value = ''
+    voicePlayer.value?.pause()
+  }
+}
+
+async function importVoice() {
+  if (!project.current || importingVoice.value) return
+  if (!selectedClip.value) {
+    toast.warn('先选中一段视频，再导入配音')
+    return
+  }
+  importingVoice.value = true
+  try {
+    const [file] = await pickLocalFiles({ kind: 'audio', multiple: false })
+    if (!file) return
+    const asset = await assets.add(file, 'audio', 'uploaded', {
+      filename: file.name,
+      projectId: project.current.id
+    })
+    await assignVoice(asset.id)
+  } catch (error: any) {
+    toast.error(`导入配音失败：${error?.message || String(error)}`)
+  } finally {
+    importingVoice.value = false
+  }
 }
 
 function updateTextOverlay(patch: Partial<TextOverlay>) {
@@ -392,14 +664,6 @@ function setTextPositionPreset(position: TextOverlay['position']) {
 function removeTextOverlay(id: string) {
   project.setTextOverlays(textOverlays.value.filter((item) => item.id !== id))
   if (selectedTextId.value === id) selectedTextId.value = null
-}
-
-function trackStyle(start: number, duration: number) {
-  const total = Math.max(0.1, Number(totalDuration.value))
-  return {
-    left: `${Math.max(0, start) / total * 100}%`,
-    width: `${Math.max(0.8, duration / total * 100)}%`
-  }
 }
 
 async function importBgm() {
@@ -466,6 +730,37 @@ const totalDuration = computed(() =>
     .reduce((sum, c) => sum + c.duration, 0)
     .toFixed(1)
 )
+
+const timelineEnd = computed(() => {
+  const ends = timeline.value.map((clip) => clip.startTime + clip.duration)
+  if (project.current?.bgmClip) ends.push(project.current.bgmClip.startTime + project.current.bgmClip.duration)
+  for (const item of textOverlays.value) ends.push(item.startTime + item.duration)
+  return ends.length ? Math.max(...ends) : 0
+})
+
+function timecode(value: number) {
+  const safe = Math.max(0, Number(value) || 0)
+  const h = Math.floor(safe / 3600)
+  const m = Math.floor((safe % 3600) / 60)
+  const s = Math.floor(safe % 60)
+  const f = Math.floor((safe % 1) * 24)
+  return [h, m, s, f].map((n) => String(n).padStart(2, '0')).join(':')
+}
+
+const filteredShots = computed(() => {
+  const q = mediaQuery.value.trim().toLowerCase()
+  return shots.value.filter((shot) => !q || shot.title.toLowerCase().includes(q) || String(shot.index + 1).includes(q))
+})
+
+const importedClips = computed(() => {
+  const q = mediaQuery.value.trim().toLowerCase()
+  const shotIds = new Set(shots.value.map((shot) => shot.id))
+  return timeline.value.filter((clip) => {
+    if (!clip.assetId || shotIds.has(clip.shotId)) return false
+    const label = clip.label || '视频素材'
+    return !q || label.toLowerCase().includes(q)
+  })
+})
 
 function noteComposeProgress(msg: string) {
   const matched = /处理中\s+(\d+(?:\.\d+)?)%/.exec(msg)
@@ -593,399 +888,307 @@ function goBack() {
 </script>
 
 <template>
-  <div class="edit-page">
-    <header class="page-head">
-      <div class="page-title-area">
-        <button type="button" class="back-button" title="返回上一步" aria-label="返回上一步" @click="goBack">
-          <EditIcon name="back" :size="20" />
-        </button>
-        <div>
-        <h1>视频剪辑</h1>
-        <p v-if="isDigitalHuman">各段视频已经带声音，按顺序拼接即可。下一步去确认字幕和划重点，不必再配音。</p>
-        <p v-else>把分镜视频片段按顺序拼接，可调时长、加转场、变速</p>
+  <div class="editor">
+    <div class="edtool">
+      <button type="button" class="icon-btn" title="返回上一步" aria-label="返回上一步" @click="goBack">
+        <EditIcon name="back" :size="16" />
+      </button>
+      <span class="ed-name" :title="project.current?.name">{{ project.current?.name || '视频剪辑' }}</span>
+      <details class="edit-tools">
+        <summary>更多</summary>
+        <div class="edit-tools-menu" @click="($event.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')">
+          <button type="button" :disabled="merging" @click="autoBuildTimeline">重建时间线</button>
+          <button type="button" :disabled="merging" @click="preview">合成预览</button>
+          <button v-if="previewingUrl && !previewing_" type="button" @click="previewing_ = true">查看成片</button>
+          <button type="button" @click="next">字幕设置</button>
         </div>
+      </details>
+      <button type="button" class="icon-btn" title="删除选中片段" :disabled="!selectedClip" @click="selectedClip && removeClip(selectedClip.id)">
+        <EditIcon name="trash" :size="15" />
+      </button>
+      <div class="ed-right">
+        <ThemeToggle />
+        <span v-if="previewProgress === null" class="save-badge">时间线</span>
+        <span v-else class="save-badge">{{ progressLabel }} {{ previewProgress }}%</span>
+        <button class="export-btn" type="button" :disabled="merging" @click="confirmMerge">{{ merging ? '合成中…' : '导出成片' }}</button>
       </div>
-      <div class="head-actions">
-        <GradientButton
-          type="secondary"
-          @click="autoBuildTimeline"
-        >
-          <template #icon><EditIcon name="refresh" /></template>
-          重建时间线
-        </GradientButton>
-        <GradientButton
-          :loading="merging"
-          @click="preview"
-        >
-          <template #icon><EditIcon name="play" /></template>
-          预览
-        </GradientButton>
-        <GradientButton type="secondary" @click="next"><template #icon><EditIcon name="next" /></template>字幕设置</GradientButton>
-        <GradientButton v-if="previewingUrl && !previewing_" type="secondary" @click="previewing_ = true">
-          <template #icon><EditIcon name="play" /></template>
-          查看成片
-        </GradientButton>
-        <GradientButton :loading="merging" :disabled="merging" @click="confirmMerge">
-          <template #icon><EditIcon name="check" /></template>
-          {{ merging ? (mergeProgress || '合成中…') : '确认并正式合成' }}
-        </GradientButton>
-      </div>
-    </header>
-
-    <div
-      v-if="previewProgress !== null"
-      class="preview-progress"
-      role="progressbar"
-      aria-label="预览合成进度"
-      :aria-valuenow="previewProgress"
-      aria-valuemin="0"
-      aria-valuemax="100"
-    >
+    </div>
+    <div v-if="previewProgress !== null" class="preview-progress" role="progressbar" :aria-valuenow="previewProgress" aria-valuemin="0" aria-valuemax="100">
       <div class="preview-progress-fill" :style="{ width: `${previewProgress}%` }"></div>
-      <span>{{ progressLabel }} {{ previewProgress }}%</span>
     </div>
 
-    <div class="edit-layout">
-      <aside class="left-panel">
-        <GlassCard padding="md">
-          <div class="panel-head">
-            <h3>分镜库</h3>
-            <button class="add-all" @click="addAllShots">全部加入</button>
+    <div class="edmain">
+      <aside class="medialib">
+        <div class="ml-head">
+          <div class="ml-tabs" role="tablist">
+            <button type="button" role="tab" :class="{ on: mediaTab === 'clip' }" @click="mediaTab = 'clip'">片段</button>
+            <button type="button" role="tab" :class="{ on: mediaTab === 'audio' }" @click="mediaTab = 'audio'">音频</button>
+            <button type="button" role="tab" :class="{ on: mediaTab === 'text' }" @click="mediaTab = 'text'">字幕</button>
           </div>
-          <div class="media-add-row">
-            <button type="button" @click="videoPickerOpen = true"><EditIcon name="video" :size="15" />项目视频</button>
-            <button type="button" :disabled="importingVideo" @click="importVideos">
-              <EditIcon name="upload" :size="15" />{{ importingVideo ? '导入中…' : '本地视频' }}
-            </button>
+          <input v-model="mediaQuery" class="ml-search" placeholder="搜索素材" />
+        </div>
+        <div v-if="mediaTab === 'clip'" class="ml-body">
+          <div class="ml-actions">
+            <button type="button" @click="addAllShots">全部加入</button>
+            <button type="button" @click="videoPickerOpen = true">项目视频</button>
+            <button type="button" :disabled="importingVideo" @click="importVideos">{{ importingVideo ? '导入中…' : '本地视频' }}</button>
           </div>
-          <div class="shot-list">
-            <div
-              v-for="shot in shots"
-              :key="shot.id"
-              class="shot-item"
-              :class="{
-                on: timeline.find(c => c.shotId === shot.id),
-                off: !timeline.find(c => c.shotId === shot.id)
-              }"
-              @click="addShotToTimeline(shot)"
-            >
-              <div class="shot-item-num">{{ shot.index + 1 }}</div>
-              <div class="shot-item-info">
-                <div class="shot-item-title">{{ shot.title }}</div>
-                <div class="shot-item-meta">
-                  {{ shot.duration }}s
-                  <span v-if="!shot.videoAssetId && !shot.imageAssetId">· 无素材</span>
-                </div>
-              </div>
-              <div class="shot-item-add">
-                <EditIcon :name="timeline.find(c => c.shotId === shot.id) ? 'check' : 'plus'" :size="14" />
-              </div>
-            </div>
+          <button
+            v-for="shot in filteredShots"
+            :key="shot.id"
+            type="button"
+            class="mlrow"
+            :class="{ on: timeline.find(c => c.shotId === shot.id) }"
+            @click="addShotToTimeline(shot)"
+          >
+            <span class="th">{{ shot.index + 1 }}</span>
+            <span class="meta">
+              <span class="n">{{ shot.title }}</span>
+              <span class="d">{{ shot.duration }}s<span v-if="!shot.videoAssetId && !shot.imageAssetId"> · 无素材</span></span>
+            </span>
+          </button>
+          <button
+            v-for="clip in importedClips"
+            :key="clip.id"
+            type="button"
+            class="mlrow"
+            :class="{ on: selectedClipId === clip.id }"
+            @click="focusClip(clip.id)"
+          >
+            <span class="th">▶</span>
+            <span class="meta">
+              <span class="n">{{ clip.label || '视频素材' }}</span>
+              <span class="d">{{ clip.duration.toFixed(1) }}s</span>
+            </span>
+          </button>
+          <p v-if="!filteredShots.length && !importedClips.length" class="ml-empty">没有匹配的片段</p>
+        </div>
+        <div v-else-if="mediaTab === 'audio'" class="ml-body">
+          <div class="ml-actions">
+            <button type="button" @click="openBgmPicker">选择音乐</button>
+            <button type="button" :disabled="importingAudio" @click="importBgm">{{ importingAudio ? '导入中…' : '本地音乐' }}</button>
           </div>
-        </GlassCard>
+          <p class="hint">这里是整片背景音乐。配音请选中视频片段后，用时间线上的「配音」。</p>
+          <div class="audio-card">
+            <strong>{{ bgmName }}</strong>
+            <template v-if="project.current?.bgmClip">
+              <label>开始（秒）<input type="number" min="0" step="0.1" :value="project.current.bgmClip.startTime" @change="updateBgmClip({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <label>长度（秒）<input type="number" min="0.5" step="0.1" :value="project.current.bgmClip.duration" @change="updateBgmClip({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <label>音乐入点（秒）<input type="number" min="0" step="0.1" :value="project.current.bgmClip.sourceIn" @change="updateBgmClip({ sourceIn: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <label>音量 {{ Math.round(project.current.bgmClip.volume * 100) }}%<input type="range" min="0" max="1" step="0.05" :value="project.current.bgmClip.volume" @input="updateBgmClip({ volume: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <button type="button" class="danger" @click="project.setBgmClip(undefined)">移除音乐</button>
+            </template>
+          </div>
+        </div>
+        <div v-else class="ml-body">
+          <div class="ml-actions">
+            <button type="button" @click="addTextOverlay">添加文字</button>
+          </div>
+          <button
+            v-for="item in textOverlays.filter(t => !mediaQuery.trim() || t.text.toLowerCase().includes(mediaQuery.trim().toLowerCase()))"
+            :key="item.id"
+            type="button"
+            class="mlrow"
+            :class="{ on: selectedTextId === item.id }"
+            @click="focusText(item.id)"
+          >
+            <span class="th text">文</span>
+            <span class="meta"><span class="n">{{ item.text }}</span><span class="d">{{ item.startTime.toFixed(1) }}s · {{ item.duration.toFixed(1) }}s</span></span>
+          </button>
+          <div v-if="selectedText" class="audio-card">
+            <label>文字内容<textarea rows="3" :value="selectedText.text" @input="updateTextOverlay({ text: ($event.target as HTMLTextAreaElement).value })" /></label>
+            <label>字体
+              <select :value="selectedText.fontFamily" @change="updateTextOverlay({ fontFamily: ($event.target as HTMLSelectElement).value })">
+                <option value="Microsoft YaHei">微软雅黑</option><option value="SimHei">黑体</option><option value="SimSun">宋体</option><option value="KaiTi">楷体</option><option value="Arial">Arial</option>
+              </select>
+            </label>
+            <label>字号<input type="number" min="12" max="96" step="1" :value="Math.round(selectedText.fontSizeRatio * 720)" @input="updateTextOverlay({ fontSizeRatio: Number(($event.target as HTMLInputElement).value) / 720 })" /></label>
+            <label>颜色<input type="color" :value="selectedText.color" @input="updateTextOverlay({ color: ($event.target as HTMLInputElement).value })" /></label>
+            <label>开始（秒）<input type="number" min="0" step="0.1" :value="selectedText.startTime" @change="updateTextOverlay({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label>长度（秒）<input type="number" min="0.5" step="0.1" :value="selectedText.duration" @change="updateTextOverlay({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label>位置
+              <select :value="selectedText.position" @change="setTextPositionPreset(($event.target as HTMLSelectElement).value as TextOverlay['position'])">
+                <option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" :checked="selectedText.bold" @change="updateTextOverlay({ bold: ($event.target as HTMLInputElement).checked })" />加粗</label>
+            <button type="button" class="danger" @click="removeTextOverlay(selectedText.id)">删除这段文字</button>
+          </div>
+          <label class="check burn">
+            <input type="checkbox" :checked="project.current?.settings.burnCaptions !== false" @change="project.setSettings({ burnCaptions: ($event.target as HTMLInputElement).checked })" />
+            导出时把文字烧录到画面
+          </label>
+        </div>
       </aside>
 
-      <main class="main-panel">
-        <GlassCard padding="md" class="source-preview-card">
-          <div class="source-preview-head">
-            <div>
-              <h3>片段预览</h3>
-              <p>{{ sourcePreviewTitle || '点击下方任一视频片段即可播放' }}</p>
+      <div class="center">
+        <div class="monitor">
+          <div class="screen">
+            <div class="frame" :class="previewAspect === '16:9' ? 'wide' : 'tall'" @click="onFrameClick">
+              <video
+                v-show="sourcePreviewUrl"
+                ref="sourcePlayer"
+                :key="previewLoadKey"
+                :src="sourcePreviewUrl"
+                playsinline
+                preload="metadata"
+                @loadedmetadata="onPreviewMetadata"
+                @timeupdate="syncPlayheadFromPlayer"
+                @ended="advanceTimeline"
+              />
+              <div v-if="!sourcePreviewUrl" class="frame-empty"><EditIcon name="play" :size="22" /><span>选择一个片段开始预览</span></div>
+              <div
+                v-for="text in activeTexts"
+                :key="text.id"
+                class="player-text-overlay"
+                :class="{ selected: selectedTextId === text.id }"
+                :style="textOverlayStyle(text)"
+                @pointerdown.stop="startTextDrag($event, text)"
+                @click.stop
+              >{{ text.text }}</div>
+              <audio
+                v-if="voicePreviewUrl"
+                ref="voicePlayer"
+                class="voice-preview"
+                :src="voicePreviewUrl"
+                preload="auto"
+                @loadedmetadata="syncVoicePlayback(playingTimeline)"
+              />
+              <div v-if="playingTimeline" class="rec"><i></i>REC</div>
+              <div class="marks"></div>
             </div>
           </div>
-          <div class="source-player-wrap">
-            <video
-              v-show="sourcePreviewUrl"
-              ref="sourcePlayer"
-              :src="sourcePreviewUrl"
-              controls
-              autoplay
-              class="source-player"
-              @loadedmetadata="applyPendingSeek"
-              @timeupdate="syncPlayheadFromPlayer"
-            />
-            <div v-if="!sourcePreviewUrl" class="source-player-empty"><EditIcon name="play" :size="26" /><span>选择一个片段开始预览</span></div>
-            <div
-              v-for="text in activeTexts"
-              :key="text.id"
-              class="player-text-overlay"
-              :class="{ selected: selectedTextId === text.id }"
-              :style="textOverlayStyle(text)"
-              @pointerdown.stop="startTextDrag($event, text)"
-            >
-              {{ text.text }}
-            </div>
-          </div>
-
-          <div class="filmstrip" aria-label="按合成顺序排列的视频预览">
-            <button
-              v-for="(clip, index) in timeline"
-              :key="clip.id"
-              type="button"
-              class="filmstrip-item"
-              :class="{ on: selectedClipId === clip.id, disabled: !clip.enabled }"
-              @click="playClip(clip, index)"
-            >
-              <div class="filmstrip-thumb">
-                <img v-if="clipThumbs[clip.id]" :src="clipThumbs[clip.id]" alt="" />
-                <span v-else class="filmstrip-placeholder"><EditIcon name="video" :size="24" /></span>
-                <span class="filmstrip-play"><EditIcon name="play" :size="14" /></span>
-                <span class="filmstrip-index">{{ index + 1 }}</span>
-                <span class="filmstrip-duration">{{ clip.duration.toFixed(1) }}s</span>
-              </div>
-              <span class="filmstrip-title">{{ clipTitle(clip, index) }}</span>
+          <div class="transport">
+            <button type="button" class="icon-btn" title="从头播放" :disabled="!timeline.some(c => c.enabled)" @click="playTimelineFromStart">
+              <EditIcon name="refresh" :size="15" />
             </button>
-            <button type="button" class="filmstrip-add" @click="videoPickerOpen = true">
-              <strong><EditIcon name="plus" :size="22" /></strong>
-              <span>添加视频</span>
+            <button type="button" class="icon-btn play" :disabled="!timeline.some(c => c.enabled)" @click="toggleTimelinePlayback">
+              <EditIcon :name="playingTimeline ? 'close' : 'play'" :size="15" />
             </button>
+            <span class="tc">{{ timecode(playhead) }} <span>/ {{ timecode(timelineEnd) }}</span></span>
+            <span class="transport-title">{{ sourcePreviewTitle || '时间线预览' }}</span>
+            <span class="badge">{{ previewAspect }}</span>
           </div>
-        </GlassCard>
+        </div>
 
-        <GlassCard padding="md" class="timeline-card">
+        <div class="tlwrap">
+          <div class="tltool">
+            <span class="kicker">时间线</span>
+            <span class="badge">{{ timeline.length }} 段</span>
+            <span class="badge">{{ timecode(timelineEnd) }}</span>
+            <button type="button" class="tl-act" @click="addTextOverlay">文字</button>
+            <button type="button" class="tl-act" :disabled="!canTrimSelected" @click="trimSelected('left')">裁前段</button>
+            <button type="button" class="tl-act" :disabled="!canTrimSelected" @click="trimSelected('right')">裁后段</button>
+            <button type="button" class="tl-act" :disabled="!selectedClip" @click="openVoicePicker">配音</button>
+            <button type="button" class="tl-act" :disabled="!selectedClip || importingVoice" @click="importVoice">{{ importingVoice ? '导入中…' : '本地配音' }}</button>
+            <span class="tl-tip">竖线移进片段后可裁，文字和配音加在当前片段上</span>
+          </div>
           <TimelineView
             :clips="timeline"
             :shots="shots"
-            :total-duration="Number(totalDuration)"
+            :total-duration="timeline.at(-1) ? timeline.at(-1)!.startTime + timeline.at(-1)!.duration : 0"
             :selected-id="selectedClipId"
             :playhead="playhead"
             :source-durations="clipSourceDurations"
-            @select="selectedClipId = $event"
+            :texts="textOverlays"
+            :selected-text-id="selectedTextId"
+            :voices="voiceClips"
+            :bgm="project.current?.bgmClip ? { name: bgmName, startTime: project.current.bgmClip.startTime, duration: project.current.bgmClip.duration } : null"
+            @select="focusClip"
+            @select-text="focusText"
+            @focus-audio="mediaTab = 'audio'"
+            @add-voice="openVoicePicker"
             @update="updateClip"
             @remove="removeClip"
             @reorder="reorderClip"
             @seek="seekTimeline"
+            @trim="trimAtPlayhead"
           />
-          <div class="editor-tracks">
-            <div class="track-row">
-              <div class="track-name">音乐</div>
-              <div class="track-lane">
-                <button
-                  v-if="project.current?.bgmClip"
-                  type="button"
-                  class="track-block music-block"
-                  :style="trackStyle(project.current.bgmClip.startTime, project.current.bgmClip.duration)"
-                >
-                  <EditIcon name="music" :size="13" /> {{ bgmName }}
-                </button>
-                <button v-else type="button" class="track-empty-add" @click="audioPickerOpen = true"><EditIcon name="plus" :size="14" />投入音乐</button>
+        </div>
+      </div>
+
+      <aside class="edinsp">
+        <template v-if="selectedText">
+          <div class="insp-head">
+            <span class="badge">TEXT</span>
+            <span class="h4">画面文字</span>
+            <button v-if="selectedClip" type="button" class="tl-act" @click="selectedTextId = null">返回片段</button>
+          </div>
+          <div class="ib">
+            <div class="fgroup">
+              <label>文字内容<textarea rows="3" :value="selectedText.text" @input="updateTextOverlay({ text: ($event.target as HTMLTextAreaElement).value })" /></label>
+              <label>开始（秒）<input class="select" type="number" min="0" step="0.1" :value="selectedText.startTime" @change="updateTextOverlay({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <label>长度（秒）<input class="select" type="number" min="0.5" step="0.1" :value="selectedText.duration" @change="updateTextOverlay({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
+              <label>字号<input class="select" type="number" min="12" max="96" step="1" :value="Math.round(selectedText.fontSizeRatio * 720)" @input="updateTextOverlay({ fontSizeRatio: Number(($event.target as HTMLInputElement).value) / 720 })" /></label>
+              <label>颜色<input class="select" type="color" :value="selectedText.color" @input="updateTextOverlay({ color: ($event.target as HTMLInputElement).value })" /></label>
+              <p class="hint">拖动画布上的文字可改位置。导出时按「烧录到画面」写进成片。</p>
+              <button type="button" class="danger-btn" @click="removeTextOverlay(selectedText.id)">删除这段文字</button>
+            </div>
+          </div>
+        </template>
+        <template v-else-if="selectedClip">
+          <div class="insp-head">
+            <span class="badge warn">CLIP</span>
+            <span class="h4">{{ selectedShot?.title || selectedClip.label || '视频素材' }}</span>
+          </div>
+          <div class="ib">
+            <div class="fgroup">
+              <span class="kicker">基本信息</span>
+              <div class="kv">
+                <dt>时长</dt><dd>{{ selectedClip.duration.toFixed(1) }}s</dd>
+                <dt>入点</dt><dd>{{ selectedClip.sourceIn.toFixed(1) }}s</dd>
+                <dt>速度</dt><dd>{{ selectedClip.speed }}x</dd>
+                <dt>音量</dt><dd>{{ Math.round(selectedClip.volume * 100) }}%</dd>
               </div>
             </div>
-            <div class="track-row">
-              <div class="track-name">文字</div>
-              <div class="track-lane">
-                <button
-                  v-for="item in textOverlays"
-                  :key="item.id"
-                  type="button"
-                  class="track-block text-block"
-                  :class="{ on: selectedTextId === item.id }"
-                  :style="trackStyle(item.startTime, item.duration)"
-                  @click="selectedTextId = item.id"
-                >
-                  <EditIcon name="text" :size="13" /> {{ item.text }}
-                </button>
-                <button v-if="!textOverlays.length" type="button" class="track-empty-add" @click="addTextOverlay"><EditIcon name="plus" :size="14" />添加文字</button>
+            <div class="fgroup">
+              <span class="kicker">裁切</span>
+              <div class="ml-actions">
+                <button type="button" :disabled="!canTrimSelected" @click="trimSelected('left')">按竖线裁掉前段</button>
+                <button type="button" :disabled="!canTrimSelected" @click="trimSelected('right')">按竖线裁掉后段</button>
               </div>
+              <p v-if="!canTrimSelected" class="hint">把时间线竖线移到这段视频内部，才能按竖线裁。</p>
+              <label class="sliderrow"><span>时长</span><input type="range" min="0.5" max="30" step="0.5" :value="selectedClip.duration" @input="updateClip(selectedClip.id, { duration: Number(($event.target as HTMLInputElement).value) })" /><span class="v">{{ selectedClip.duration.toFixed(1) }}s</span></label>
+              <label class="sliderrow"><span>入点</span><input type="number" min="0" step="0.1" :value="selectedClip.sourceIn" @change="updateClip(selectedClip.id, { sourceIn: Number(($event.target as HTMLInputElement).value) })" /></label>
             </div>
-          </div>
-        </GlassCard>
-
-      </main>
-
-      <aside class="right-panel">
-        <GlassCard v-if="selectedClip" padding="md">
-          <h3>片段属性</h3>
-          <div class="clip-prop-head">
-            <div class="prop-num">#{{ selectedShot ? selectedShot.index + 1 : timeline.findIndex(c => c.id === selectedClip?.id) + 1 }}</div>
-            <div class="prop-title">{{ selectedShot?.title || selectedClip.label || '视频素材' }}</div>
-          </div>
-
-          <label class="prop-field">
-            <span>时长 (秒)</span>
-            <div class="row">
-              <input
-                type="range"
-                min="0.5"
-                max="30"
-                step="0.5"
-                :value="selectedClip.duration"
-                @input="updateClip(selectedClip.id, { duration: Number(($event.target as HTMLInputElement).value) })"
-                class="range"
-              />
-              <input
-                type="number"
-                min="0.5"
-                max="30"
-                step="0.5"
-                :value="selectedClip.duration"
-                @change="updateClip(selectedClip.id, { duration: Number(($event.target as HTMLInputElement).value) })"
-                class="num"
-              />
+            <div class="fgroup">
+              <span class="kicker">配音</span>
+              <p class="hint">{{ selectedVoiceName || '这段还没有配音。配音会跟着这段视频一起预览和导出。' }}</p>
+              <div class="ml-actions">
+                <button type="button" @click="openVoicePicker">项目配音</button>
+                <button type="button" :disabled="importingVoice" @click="importVoice">{{ importingVoice ? '导入中…' : '本地配音' }}</button>
+                <button v-if="selectedClip.voiceAssetId" type="button" class="danger" @click="clearVoice">移除配音</button>
+              </div>
+              <label v-if="selectedClip.voiceAssetId" class="sliderrow"><span>音量</span><input type="range" min="0" max="1" step="0.05" :value="selectedClip.voiceVolume ?? 1" @input="updateClip(selectedClip.id, { voiceVolume: Number(($event.target as HTMLInputElement).value) })" /><span class="v">{{ Math.round((selectedClip.voiceVolume ?? 1) * 100) }}%</span></label>
+              <button type="button" class="tl-act" @click="addTextOverlay">在这段上加文字</button>
             </div>
-          </label>
-
-          <label class="prop-field">
-            <span>素材入点 (秒)</span>
-            <input
-              type="number"
-              min="0"
-              :value="selectedClip.sourceIn"
-              @change="updateClip(selectedClip.id, { sourceIn: Number(($event.target as HTMLInputElement).value) })"
-              class="prop-input"
-            />
-          </label>
-
-          <label class="prop-field">
-            <span>播放速度</span>
-            <div class="row">
-              <input
-                type="range"
-                min="0.25"
-                max="3"
-                step="0.25"
-                :value="selectedClip.speed"
-                @input="updateClip(selectedClip.id, { speed: Number(($event.target as HTMLInputElement).value) })"
-                class="range"
-              />
-              <span class="num-text">{{ selectedClip.speed }}x</span>
+            <div class="fgroup">
+              <span class="kicker">速度与音量</span>
+              <label class="sliderrow"><span>速度</span><input type="range" min="0.25" max="3" step="0.25" :value="selectedClip.speed" @input="updateClip(selectedClip.id, { speed: Number(($event.target as HTMLInputElement).value) })" /><span class="v">{{ selectedClip.speed }}x</span></label>
+              <label class="sliderrow"><span>音量</span><input type="range" min="0" max="1" step="0.05" :value="selectedClip.volume" @input="updateClip(selectedClip.id, { volume: Number(($event.target as HTMLInputElement).value) })" /><span class="v">{{ Math.round(selectedClip.volume * 100) }}%</span></label>
             </div>
-          </label>
-
-          <label class="prop-field">
-            <span>音量</span>
-            <div class="row">
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                :value="selectedClip.volume"
-                @input="updateClip(selectedClip.id, { volume: Number(($event.target as HTMLInputElement).value) })"
-                class="range"
-              />
-              <span class="num-text">{{ Math.round(selectedClip.volume * 100) }}%</span>
-            </div>
-          </label>
-
-          <label class="prop-field">
-            <span>入镜转场</span>
-            <select
-              :value="selectedClip.transitionIn"
-              @change="updateClip(selectedClip.id, { transitionIn: ($event.target as HTMLSelectElement).value as TransitionType })"
-              class="prop-input"
-            >
-              <option value="none">无</option>
-              <option value="fade">淡入淡出</option>
-              <option value="fade-black">黑场淡入淡出</option>
-              <option value="zoom-in">放大</option>
-              <option value="zoom-out">缩小</option>
-            </select>
-          </label>
-
-          <label class="prop-field" v-if="selectedClip.transitionIn !== 'none'">
-            <span>转场时长 (秒)</span>
-            <input
-              type="number"
-              min="0"
-              max="3"
-              step="0.1"
-              :value="selectedClip.transitionDuration"
-              @change="updateClip(selectedClip.id, { transitionDuration: Number(($event.target as HTMLInputElement).value) })"
-              class="prop-input"
-            />
-          </label>
-
-          <div class="prop-actions">
-            <GradientButton
-              type="danger"
-              size="sm"
-              block
-              @click="removeClip(selectedClip.id)"
-            >
-              <template #icon><EditIcon name="trash" :size="16" /></template>
-              移除该片段
-            </GradientButton>
-          </div>
-        </GlassCard>
-
-        <GlassCard v-else padding="md">
-          <h3 class="section-title"><EditIcon name="info" :size="16" />提示</h3>
-          <p class="hint">点击时间线上的片段可以在这里编辑它的属性。</p>
-          <p class="hint">
-            <Tag size="sm" type="accent">时长</Tag> 决定该片段在最终视频里持续多久。
-          </p>
-          <p class="hint">
-            <Tag size="sm" type="accent">转场</Tag> 让片段之间更平滑。
-          </p>
-          <p class="hint">
-            <Tag size="sm" type="accent">速度</Tag> 0.5x = 慢动作，2x = 2 倍快进。
-          </p>
-        </GlassCard>
-
-        <GlassCard padding="md" class="media-settings">
-          <div class="property-title-row">
-            <h3>音乐轨</h3>
-            <button type="button" @click="audioPickerOpen = true"><EditIcon name="plus" :size="14" />投入音乐</button>
-          </div>
-          <p class="current-media" :title="bgmName">{{ bgmName }}</p>
-          <div class="media-add-row">
-            <button type="button" @click="audioPickerOpen = true">更换音乐</button>
-            <button type="button" :disabled="importingAudio" @click="importBgm">
-              {{ importingAudio ? '导入中…' : '本地音乐' }}
-            </button>
-            <button v-if="project.current?.bgmClip" type="button" class="danger-text" @click="project.setBgmClip(undefined)">移除</button>
-          </div>
-          <template v-if="project.current?.bgmClip">
-            <div class="inline-fields">
-              <label class="prop-field"><span>开始（秒）</span><input class="prop-input" type="number" min="0" step="0.1" :value="project.current.bgmClip.startTime" @change="updateBgmClip({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
-              <label class="prop-field"><span>长度（秒）</span><input class="prop-input" type="number" min="0.5" step="0.1" :value="project.current.bgmClip.duration" @change="updateBgmClip({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
-            </div>
-            <label class="prop-field"><span>音乐入点（秒）</span><input class="prop-input" type="number" min="0" step="0.1" :value="project.current.bgmClip.sourceIn" @change="updateBgmClip({ sourceIn: Number(($event.target as HTMLInputElement).value) })" /></label>
-            <label class="prop-field bgm-volume">
-              <span>音量 {{ Math.round(project.current.bgmClip.volume * 100) }}%</span>
-              <input class="range" type="range" min="0" max="1" step="0.05" :value="project.current.bgmClip.volume" @input="updateBgmClip({ volume: Number(($event.target as HTMLInputElement).value) })" />
-            </label>
-          </template>
-
-          <div class="property-title-row text-property-title">
-            <h3>文字轨</h3>
-            <button type="button" @click="addTextOverlay"><EditIcon name="plus" :size="14" />添加文字</button>
-          </div>
-          <template v-if="selectedText">
-            <label class="prop-field">
-              <span>文字内容</span>
-              <textarea class="text-content-editor" rows="3" :value="selectedText.text" @input="updateTextOverlay({ text: ($event.target as HTMLTextAreaElement).value })" />
-            </label>
-            <label class="prop-field">
-              <span>字体</span>
-              <select class="prop-input" :value="selectedText.fontFamily" @change="updateTextOverlay({ fontFamily: ($event.target as HTMLSelectElement).value })">
-                <option value="Microsoft YaHei">微软雅黑</option><option value="SimHei">黑体</option><option value="SimSun">宋体</option><option value="KaiTi">楷体</option><option value="Arial">Arial</option>
+            <div class="fgroup">
+              <span class="kicker">转场</span>
+              <select class="select" :value="selectedClip.transitionIn" @change="updateClip(selectedClip.id, { transitionIn: ($event.target as HTMLSelectElement).value as TransitionType })">
+                <option value="none">硬切</option>
+                <option value="fade">淡入淡出</option>
+                <option value="fade-black">黑场淡入淡出</option>
+                <option value="zoom-in">放大</option>
+                <option value="zoom-out">缩小</option>
               </select>
-            </label>
-            <div class="inline-fields">
-              <label class="prop-field"><span>字号</span><input class="prop-input" type="number" min="12" max="96" step="1" :value="Math.round(selectedText.fontSizeRatio * 720)" @input="updateTextOverlay({ fontSizeRatio: Number(($event.target as HTMLInputElement).value) / 720 })" /></label>
-              <label class="prop-field"><span>颜色</span><input class="color-input" type="color" :value="selectedText.color" @input="updateTextOverlay({ color: ($event.target as HTMLInputElement).value })" /></label>
+              <label v-if="selectedClip.transitionIn !== 'none'" class="sliderrow"><span>时长</span><input type="number" min="0" max="3" step="0.1" :value="selectedClip.transitionDuration" @change="updateClip(selectedClip.id, { transitionDuration: Number(($event.target as HTMLInputElement).value) })" /><span class="v">{{ selectedClip.transitionDuration }}s</span></label>
             </div>
-            <div class="inline-fields">
-              <label class="prop-field"><span>开始（秒）</span><input class="prop-input" type="number" min="0" step="0.1" :value="selectedText.startTime" @change="updateTextOverlay({ startTime: Number(($event.target as HTMLInputElement).value) })" /></label>
-              <label class="prop-field"><span>长度（秒）</span><input class="prop-input" type="number" min="0.5" step="0.1" :value="selectedText.duration" @change="updateTextOverlay({ duration: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <div class="fgroup">
+              <span class="kicker">操作</span>
+              <button type="button" class="danger-btn" @click="removeClip(selectedClip.id)">移除</button>
             </div>
-            <label class="prop-field"><span>位置预设（也可直接在画面拖动）</span><select class="prop-input" :value="selectedText.position" @change="setTextPositionPreset(($event.target as HTMLSelectElement).value as TextOverlay['position'])"><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label>
-            <label class="subtitle-toggle"><input type="checkbox" :checked="selectedText.bold" @change="updateTextOverlay({ bold: ($event.target as HTMLInputElement).checked })" />加粗</label>
-            <button type="button" class="remove-text-button" @click="removeTextOverlay(selectedText.id)">删除这段文字</button>
-          </template>
-          <p v-else class="property-empty">点击“添加文字”，或在时间轴选择一段文字后编辑。</p>
-
-          <label class="subtitle-toggle burn-toggle">
-            <input
-              type="checkbox"
-              :checked="project.current?.settings.burnCaptions !== false"
-              @change="project.setSettings({ burnCaptions: ($event.target as HTMLInputElement).checked })"
-            />
-            导出时把文字烧录到画面
-          </label>
-        </GlassCard>
+          </div>
+        </template>
+        <div v-else class="insp-empty">
+          <span class="kicker">检视器</span>
+          <p>点击时间线上的片段，可以裁切、加文字、配音。</p>
+          <p>先把竖线移进片段，再点裁前段或裁后段。右键片段也一样。</p>
+        </div>
       </aside>
     </div>
 
@@ -1000,9 +1203,9 @@ function goBack() {
     <AssetPicker
       :open="audioPickerOpen"
       kind="audio"
-      title="选择背景音乐"
+      :title="audioPickerMode === 'voice' ? '选择配音' : '选择背景音乐'"
       @close="audioPickerOpen = false"
-      @confirm="chooseBgm"
+      @confirm="onAudioPicked"
     />
     <Teleport to="body">
       <div v-if="previewing_ && previewingUrl" class="finish-mask" @click.self="previewing_ = false">
@@ -1023,739 +1226,114 @@ function goBack() {
 </template>
 
 <style scoped>
-.edit-page {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background: #0d0f14;
-}
-.page-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 14px 22px;
-  border-bottom: 1px solid var(--color-border);
-  gap: var(--space-4);
-  flex-wrap: wrap;
-  background: #11141a;
-}
-.page-title-area {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-.back-button {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  flex: 0 0 38px;
-  border: 1px solid var(--color-border);
-  border-radius: 9px;
-  background: #181b22;
-  color: var(--color-text-2);
-  transition: background .16s ease, border-color .16s ease, color .16s ease;
-}
-.back-button:hover {
-  border-color: rgba(126, 169, 255, .55);
-  background: #202631;
-  color: #fff;
-}
-.page-head h1 {
-  font-size: 19px;
-  font-weight: 700;
-  margin: 0 0 3px;
-}
-.page-head p {
-  font-size: 13px;
-  color: var(--color-text-3);
-  margin: 0;
-}
-.head-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.preview-progress {
-  position: relative;
-  height: 28px;
-  overflow: hidden;
-  background: #181b22;
-}
-.preview-progress-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: #3a3a40;
-  transition: width 0.2s ease;
-}
-.preview-progress span {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  font-size: 12px;
-  color: #c8c8ce;
-}
-
-.edit-layout {
-  display: grid;
-  grid-template-columns: 224px minmax(500px, 1fr) 300px;
-  gap: 12px;
-  padding: 12px 16px 16px;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.left-panel,
-.right-panel,
-.main-panel {
-  min-height: 0;
-  overflow-y: auto;
-}
-.left-panel :deep(.glass-card),
-.main-panel :deep(.glass-card),
-.right-panel :deep(.glass-card) {
-  border-radius: 10px;
-  border-color: rgba(255, 255, 255, .08);
-  background: #14171d;
-  box-shadow: none;
-}
-.main-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.source-preview-card {
-  flex-shrink: 0;
-}
-.source-preview-head h3 {
-  margin: 0;
-  font-size: 14px;
-}
-.source-preview-head p {
-  margin: 3px 0 var(--space-3);
-  color: var(--color-text-3);
-  font-size: 11px;
-}
-.source-player-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: clamp(220px, 42vh, 520px);
-  flex: 0 0 clamp(220px, 42vh, 520px);
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 8px;
-  background: #050505;
-}
-.player-text-overlay {
-  position: absolute;
-  width: 86%;
-  transform: translate(-50%, -50%);
-  z-index: 2;
-  text-align: center;
-  line-height: 1.25;
-  white-space: pre-wrap;
-  cursor: move;
-  user-select: none;
-  touch-action: none;
-  text-shadow: 0 2px 4px #000, 0 0 2px #000;
-}
-.player-text-overlay.selected {
-  outline: 1px dashed rgba(255, 255, 255, 0.85);
-  outline-offset: 5px;
+.editor { display: grid; grid-template-rows: 46px 1fr; height: 100%; min-height: 0; background: var(--nb-bg-0); color: var(--nb-t1); }
+.editor:has(.preview-progress) { grid-template-rows: 46px 4px 1fr; }
+.edtool { display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--nb-bg-1); border-bottom: 1px solid var(--nb-line-2); }
+.ed-name { min-width: 0; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--nb-t2); }
+.ed-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.icon-btn { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--nb-t2); cursor: pointer; }
+.icon-btn:hover:not(:disabled) { background: var(--nb-bg-3); color: var(--nb-t1); }
+.icon-btn:disabled { opacity: .4; cursor: default; }
+.icon-btn.play { background: var(--nb-bg-3); border-color: var(--nb-line-2); }
+.save-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--nb-line-accent); background: var(--nb-accent-soft); color: var(--nb-accent); font-size: 11px; }
+.export-btn { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--nb-accent); color: var(--nb-accent-ink); font-size: 12px; font-weight: 650; cursor: pointer; }
+.export-btn:disabled { opacity: .55; cursor: default; }
+.edit-tools { position: relative; }
+.edit-tools summary { list-style: none; height: 30px; padding: 0 10px; border-radius: 8px; color: var(--nb-t2); font-size: 12px; line-height: 30px; cursor: pointer; }
+.edit-tools summary:hover { background: var(--nb-bg-3); color: var(--nb-t1); }
+.edit-tools-menu { position: absolute; left: 0; top: calc(100% + 6px); z-index: 20; min-width: 140px; padding: 6px; border: 1px solid var(--nb-line-3); border-radius: 10px; background: var(--nb-bg-2); box-shadow: var(--nb-e3); }
+.edit-tools-menu button { display: block; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--nb-t1); text-align: left; font-size: 12px; cursor: pointer; }
+.edit-tools-menu button:hover:enabled { background: rgba(255,255,255,.05); }
+.edit-tools-menu button:disabled { opacity: .45; cursor: default; }
+.preview-progress { position: relative; overflow: hidden; background: var(--nb-bg-3); }
+.preview-progress-fill { position: absolute; inset: 0 auto 0 0; background: var(--nb-accent); }
+.edmain { display: grid; grid-template-columns: 268px minmax(0, 1fr) 296px; min-height: 0; }
+.medialib { display: flex; flex-direction: column; min-height: 0; background: var(--nb-bg-1); border-right: 1px solid var(--nb-line-2); }
+.ml-head { padding: 12px; border-bottom: 1px solid var(--nb-line-1); }
+.ml-tabs { display: flex; gap: 16px; margin-bottom: 10px; border-bottom: 1px solid var(--nb-line-2); }
+.ml-tabs button { position: relative; margin: 0; padding: 6px 0 8px; border: 0; background: transparent; color: var(--nb-t3); font-size: 12px; cursor: pointer; }
+.ml-tabs button.on { color: var(--nb-t1); }
+.ml-tabs button.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--nb-accent); }
+.ml-search { width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--nb-line-2); border-radius: 8px; background: var(--nb-bg-2); color: var(--nb-t1); font-size: 12px; outline: none; }
+.ml-search:focus { border-color: var(--nb-line-accent); }
+.ml-body { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ml-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ml-actions button, .danger, .danger-btn { height: 26px; padding: 0 8px; border: 1px solid var(--nb-line-2); border-radius: 7px; background: var(--nb-bg-2); color: var(--nb-t2); font-size: 11px; cursor: pointer; }
+.ml-actions button:hover, .danger:hover, .danger-btn:hover { color: var(--nb-t1); }
+.danger, .danger-btn { border-color: var(--nb-danger-line); color: var(--nb-danger); background: transparent; }
+.mlrow { display: flex; gap: 8px; width: 100%; padding: 6px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.mlrow:hover, .mlrow.on { background: var(--nb-bg-2); border-color: var(--nb-line-1); }
+.mlrow.on { border-color: var(--nb-line-accent); }
+.th { width: 52px; height: 34px; flex: 0 0 52px; display: grid; place-items: center; border-radius: 4px; background: var(--nb-bg-inset); color: var(--nb-t3); font-size: 12px; }
+.th.text { color: var(--nb-ai); }
+.meta { min-width: 0; display: grid; gap: 2px; }
+.meta .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--nb-t2); }
+.meta .d { font-family: var(--nb-font-mono, ui-monospace, monospace); font-size: 10px; color: var(--nb-t4); }
+.ml-empty { margin: 12px 4px; color: var(--nb-t4); font-size: 12px; }
+.audio-card { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--nb-line-2); border-radius: 10px; background: var(--nb-bg-2); }
+.audio-card strong { font-size: 12px; font-weight: 600; }
+.audio-card label, .check { display: grid; gap: 4px; color: var(--nb-t3); font-size: 11px; }
+.audio-card input, .audio-card select, .audio-card textarea, .select { width: 100%; box-sizing: border-box; border: 1px solid var(--nb-line-2); border-radius: 7px; background: var(--nb-bg-3); color: var(--nb-t1); font-size: 12px; padding: 6px 8px; }
+.audio-card input[type="range"], .sliderrow input[type="range"] { padding: 0; }
+.check { display: flex; align-items: center; gap: 6px; }
+.check.burn { margin: 4px; }
+.center { display: grid; grid-template-rows: minmax(180px, 1fr) 280px; min-height: 0; min-width: 0; }
+.monitor { display: grid; grid-template-rows: 1fr auto; min-height: 0; background: var(--nb-void); border-bottom: 1px solid var(--nb-line-2); }
+.screen { display: grid; place-items: center; height: 100%; min-height: 0; padding: 12px; container-type: size; }
+.frame { position: relative; max-width: 100%; max-height: 100%; overflow: hidden; border: 1px solid var(--nb-line-3); border-radius: 10px; background: var(--nb-screen, #05070a); box-shadow: var(--nb-e3); }
+.frame.tall { width: min(100cqw, calc(100cqh * 9 / 16)); aspect-ratio: 9 / 16; }
+.frame.wide { width: min(100cqw, calc(100cqh * 16 / 9)); aspect-ratio: 16 / 9; }
+.frame video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.frame-empty { position: absolute; inset: 0; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--nb-t4); font-size: 12px; }
+.rec { position: absolute; top: 10px; left: 10px; display: flex; align-items: center; gap: 5px; font-family: var(--nb-font-mono, ui-monospace, monospace); font-size: 10px; color: var(--nb-t2); }
+.rec i { width: 5px; height: 5px; border-radius: 50%; background: var(--nb-danger); box-shadow: 0 0 6px rgba(255,92,108,.8); }
+.marks { position: absolute; inset: 10px; pointer-events: none; }
+.marks::before, .marks::after { content: ""; position: absolute; width: 12px; height: 12px; border: 1px solid var(--nb-screen-mark, rgba(255,255,255,.45)); }
+.marks::before { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+.marks::after { right: 0; bottom: 0; border-left: 0; border-top: 0; }
+.player-text-overlay { position: absolute; z-index: 3; max-width: 86%; transform: translate(-50%, -50%); text-align: center; text-shadow: 0 1px 4px #000; cursor: move; }
+.player-text-overlay.selected { outline: 1px dashed rgba(255,255,255,.7); }
+.transport { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px solid var(--nb-line-1); background: var(--nb-bg-1); }
+.tc { font-family: var(--nb-font-mono, ui-monospace, monospace); font-size: 12px; color: var(--nb-t1); }
+.tc span, .transport-title { color: var(--nb-t4); font-size: 12px; }
+.transport-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlwrap { display: grid; grid-template-rows: 42px minmax(0, 1fr); min-height: 0; background: var(--nb-void); }
+.tltool { display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--nb-line-2); background: var(--nb-bg-1); }
+.kicker { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--nb-t4); }
+.badge { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid var(--nb-line-2); border-radius: 6px; background: var(--nb-bg-3); color: var(--nb-t2); font-size: 10px; }
+.badge.warn { border-color: var(--nb-warning-line); background: var(--nb-warning-soft); color: var(--nb-warning); }
+.tl-act { height: 26px; padding: 0 8px; border: 1px solid var(--nb-line-2); border-radius: 7px; background: var(--nb-bg-2); color: var(--nb-t2); font-size: 11px; cursor: pointer; }
+.tl-act:hover:not(:disabled) { color: var(--nb-t1); }
+.tl-act:disabled { opacity: .4; cursor: default; }
+.tl-tip { margin-left: auto; color: var(--nb-t4); font-size: 11px; }
+.hint { margin: 0; color: var(--nb-t4); font-size: 11px; line-height: 1.5; }
+.voice-preview { display: none; }
+.insp-head .tl-act { margin-left: auto; }
+.edinsp { display: flex; flex-direction: column; min-height: 0; background: var(--nb-bg-1); border-left: 1px solid var(--nb-line-2); }
+.insp-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--nb-line-1); }
+.h4 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 650; }
+.ib { flex: 1; overflow: auto; display: grid; align-content: start; gap: 18px; padding: 16px; }
+.fgroup { display: grid; gap: 8px; }
+.fgroup label { display: grid; gap: 4px; color: var(--nb-t3); font-size: 11px; }
+.fgroup textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--nb-line-2); border-radius: 7px; background: var(--nb-bg-3); color: var(--nb-t1); font-size: 12px; padding: 6px 8px; }
+.kv { display: grid; grid-template-columns: 52px 1fr; gap: 6px 8px; margin: 0; font-size: 12px; }
+.kv dt { color: var(--nb-t4); }
+.kv dd { margin: 0; color: var(--nb-t2); font-family: var(--nb-font-mono, ui-monospace, monospace); }
+.sliderrow { display: grid; grid-template-columns: 42px 1fr 46px; align-items: center; gap: 8px; color: var(--nb-t3); font-size: 11px; }
+.sliderrow .v { color: var(--nb-t2); text-align: right; font-family: var(--nb-font-mono, ui-monospace, monospace); }
+.insp-empty { display: grid; align-content: start; gap: 8px; padding: 20px 16px; color: var(--nb-t3); font-size: 12px; line-height: 1.6; }
+.insp-empty p { margin: 0; }
+.finish-mask { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(6, 8, 11, .72); }
+.finish-dialog { width: min(920px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--nb-line-3); border-radius: 12px; background: var(--nb-bg-2); color: var(--nb-t1); box-shadow: var(--nb-e4); }
+.finish-dialog header, .finish-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.finish-dialog h2 { margin: 0; font-size: 16px; }
+.finish-dialog header button, .finish-dialog .ghost, .finish-dialog .download { border: 0; border-radius: 8px; cursor: pointer; font: inherit; }
+.finish-dialog header button, .finish-dialog .ghost { padding: 8px 12px; background: transparent; color: var(--nb-t2); }
+.finish-dialog .download { padding: 8px 18px; background: var(--nb-accent); color: var(--nb-accent-ink); }
+.finish-video { width: 100%; max-height: 68vh; background: #000; border-radius: 8px; }
+@media (max-width: 1100px) {
+  .edmain { grid-template-columns: 220px minmax(0, 1fr); }
+  .edinsp { display: none; }
 }
 
-.editor-tracks {
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: rgba(5, 7, 11, 0.72);
-}
-.track-row {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  gap: 8px;
-  align-items: stretch;
-  min-height: 38px;
-}
-.track-row + .track-row { margin-top: 7px; }
-.track-name {
-  display: grid;
-  place-items: center;
-  color: var(--color-text-3);
-  font-size: 11px;
-  border-radius: 6px;
-  background: var(--color-bg-2);
-}
-.track-name:first-child { font-weight: 600; }
-.track-lane {
-  position: relative;
-  overflow: hidden;
-  min-height: 38px;
-  border-radius: 6px;
-  background: repeating-linear-gradient(90deg, rgba(255,255,255,.035) 0, rgba(255,255,255,.035) 1px, transparent 1px, transparent 10%);
-}
-.track-block {
-  position: absolute;
-  top: 3px;
-  bottom: 3px;
-  min-width: 30px;
-  overflow: hidden;
-  padding: 0 9px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: #fff;
-  font-size: 11px;
-  text-align: left;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.music-block { background: #624db0; }
-.text-block { background: #237d8a; }
-.track-block,
-.track-empty-add,
-.music-block,
-.text-block { display: flex; align-items: center; gap: 5px; }
-.text-block.on { border-color: #fff; box-shadow: 0 0 0 1px #31d4ea; }
-.track-empty-add {
-  height: 100%;
-  padding: 0 12px;
-  color: var(--color-text-3);
-  font-size: 11px;
-  border: 1px dashed var(--color-border);
-  background: transparent;
-}
-.source-player {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: #000;
-}
-.source-player-empty {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  background: #08090c;
-  color: var(--color-text-4);
-  font-size: 13px;
-  gap: 10px;
-}
-.filmstrip {
-  display: flex;
-  gap: 9px;
-  margin-top: var(--space-3);
-  padding: 4px 2px 9px;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.filmstrip-item,
-.filmstrip-add {
-  width: 142px;
-  flex: 0 0 142px;
-  padding: 0;
-  text-align: left;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
-  overflow: hidden;
-}
-.filmstrip-item:hover,
-.filmstrip-item.on {
-  border-color: #75a6ff;
-  box-shadow: none;
-}
-.filmstrip-item.disabled {
-  opacity: 0.42;
-}
-.filmstrip-thumb {
-  position: relative;
-  height: 78px;
-  overflow: hidden;
-  background: #050505;
-}
-.filmstrip-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.filmstrip-placeholder {
-  display: grid;
-  place-items: center;
-  height: 100%;
-  opacity: 0.45;
-  color: var(--color-text-3);
-}
-.filmstrip-play {
-  position: absolute;
-  inset: 50% auto auto 50%;
-  transform: translate(-50%, -50%);
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.68);
-  color: white;
-  font-size: 11px;
-  padding-left: 2px;
-}
-.filmstrip-index,
-.filmstrip-duration {
-  position: absolute;
-  bottom: 5px;
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.72);
-  color: white;
-  font-size: 9px;
-}
-.filmstrip-index { left: 5px; }
-.filmstrip-duration { right: 5px; }
-.filmstrip-title {
-  display: block;
-  padding: 7px 8px;
-  overflow: hidden;
-  color: var(--color-text-2);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.filmstrip-add {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 107px;
-  border-style: dashed;
-  border-color: var(--color-border);
-  color: var(--color-text-3);
-  text-align: center;
-}
-.filmstrip-add:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text-1);
-}
-.filmstrip-add strong { font-size: 24px; font-weight: 400; }
-.filmstrip-add strong { display: grid; place-items: center; margin-bottom: 5px; }
-.filmstrip-add span { font-size: 10px; }
-.timeline-card {
-  flex-shrink: 0;
-}
-
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--space-3);
-}
-.panel-head h3 {
-  font-size: 13px;
-  margin: 0;
-  font-weight: 600;
-}
-.add-all {
-  font-size: 11px;
-  color: var(--color-accent-2);
-  padding: 4px 8px;
-  border: 1px solid rgba(126,169,255,.22);
-  border-radius: 6px;
-  background: rgba(126,169,255,.08);
-}
-.add-all:hover {
-  background: var(--grad-primary-soft);
-}
-.media-add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: var(--space-3);
-}
-.media-add-row button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 9px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
-  color: var(--color-text-2);
-  font-size: 11px;
-}
-.media-add-row button:hover:not(:disabled) {
-  border-color: var(--color-accent);
-  color: var(--color-text-1);
-}
-.shot-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.shot-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: background var(--duration-fast), border-color var(--duration-fast);
-}
-.shot-item:hover {
-  background: var(--color-fill);
-  border-color: var(--color-border);
-}
-.shot-item.on {
-  opacity: 0.5;
-}
-.shot-item-num {
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  background: #597ed6;
-  color: white;
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.shot-item-info {
-  flex: 1;
-  min-width: 0;
-}
-.shot-item-title {
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.shot-item-meta {
-  font-size: 10px;
-  color: var(--color-text-4);
-}
-.shot-item-add {
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  background: var(--color-bg-2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--color-text-3);
-}
-.shot-item.on .shot-item-add {
-  background: var(--color-success);
-  color: white;
-}
-
-.finish-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.72);
-}
-.finish-dialog {
-  width: min(920px, 100%);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-  border-radius: 8px;
-  background: #16181d;
-  color: #e8e8ec;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-}
-.finish-dialog header,
-.finish-dialog footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.finish-dialog h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 650;
-}
-.finish-dialog header button,
-.finish-dialog .ghost,
-.finish-dialog .download {
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font: inherit;
-}
-.finish-dialog header button,
-.finish-dialog .ghost {
-  padding: 8px 12px;
-  background: transparent;
-  color: #b7b7bc;
-}
-.finish-dialog .download {
-  padding: 8px 18px;
-  background: #f4f4f5;
-  color: #18181b;
-}
-.finish-video {
-  width: 100%;
-  max-height: 68vh;
-  background: #000;
-  border-radius: 6px;
-}
-.preview-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--space-3);
-}
-.preview-head h3 {
-  margin: 0;
-  font-size: 14px;
-}
-.preview-head h3,
-.preview-head button,
-.section-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.preview-head button {
-  font-size: 12px;
-  color: var(--color-text-3);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-}
-.preview-head button:hover {
-  background: var(--color-fill);
-  color: var(--color-text-1);
-}
-.preview-video {
-  width: 100%;
-  max-height: 50vh;
-  background: #000;
-  border-radius: var(--radius-md);
-}
-
-.right-panel h3 {
-  font-size: 13px;
-  margin: 0 0 var(--space-3);
-  font-weight: 600;
-}
-.clip-prop-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: var(--space-4);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-.prop-num {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  background: #597ed6;
-  color: white;
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.prop-title {
-  font-size: 14px;
-  font-weight: 600;
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.prop-field {
-  display: block;
-  margin-bottom: var(--space-3);
-}
-.prop-field > span {
-  display: block;
-  font-size: 11px;
-  color: var(--color-text-3);
-  margin-bottom: 4px;
-}
-.row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-.range {
-  flex: 1;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  background: var(--color-bg-2);
-  border-radius: var(--radius-full);
-  outline: none;
-}
-.range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #7ea9ff;
-  cursor: pointer;
-}
-.range::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #7ea9ff;
-  cursor: pointer;
-  border: none;
-}
-.num {
-  width: 60px;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 4px 8px;
-  font-size: 12px;
-  color: var(--color-text-1);
-  outline: none;
-  text-align: right;
-}
-.num-text {
-  width: 50px;
-  font-size: 12px;
-  text-align: right;
-  color: var(--color-text-1);
-  font-variant-numeric: tabular-nums;
-}
-.prop-input {
-  width: 100%;
-  background: var(--color-bg-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--color-text-1);
-  outline: none;
-}
-.prop-input:focus,
-.num:focus,
-.text-content-editor:focus {
-  border-color: rgba(126,169,255,.75);
-  box-shadow: 0 0 0 2px rgba(126,169,255,.1);
-}
-.prop-actions {
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--color-border);
-}
-.hint {
-  font-size: 12px;
-  color: var(--color-text-3);
-  line-height: 1.6;
-  margin: 0 0 var(--space-2);
-}
-.media-settings {
-  margin-top: var(--space-3);
-}
-.property-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.property-title-row h3 { margin: 0; }
-.property-title-row button,
-.media-add-row button,
-.remove-text-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-2);
-  color: var(--color-text-2);
-  font-size: 11px;
-}
-.text-property-title {
-  margin-top: var(--space-5);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--color-border);
-}
-.inline-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.text-content-editor {
-  width: 100%;
-  resize: vertical;
-  padding: 8px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
-  font: inherit;
-}
-.color-input {
-  width: 100%;
-  height: 31px;
-  padding: 2px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-2);
-}
-.property-empty {
-  color: var(--color-text-4);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.remove-text-button { margin-top: 10px; color: #ff8585; }
-.danger-text { color: #ff8585 !important; }
-.burn-toggle {
-  margin-top: var(--space-4) !important;
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--color-border);
-}
-.current-media {
-  margin: 0 0 var(--space-2);
-  color: var(--color-text-3);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bgm-volume {
-  margin-top: var(--space-3);
-}
-.subtitle-toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  color: var(--color-text-2);
-  font-size: 11px;
-}
-
-@media (max-width: 1180px) {
-  .edit-layout { grid-template-columns: 200px minmax(440px, 1fr) 270px; }
-  .page-head { align-items: flex-start; }
-}
 </style>

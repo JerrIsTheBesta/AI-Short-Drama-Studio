@@ -976,7 +976,8 @@ export async function comfyPromptGenerate(opts: {
   }
 
   const started = Date.now()
-  const timeoutMs = opts.kind === 'video' ? 10 * 60_000 : 6 * 60_000
+  // 本地模型出视频经常超过 10 分钟，结果轮询放到 30 分钟。
+  const timeoutMs = opts.kind === 'video' ? 30 * 60_000 : 6 * 60_000
   while (Date.now() - started < timeoutMs) {
     if (opts.signal?.aborted) throw new Error('已取消')
     await new Promise((r) => setTimeout(r, 1500))
@@ -1069,7 +1070,7 @@ export async function comfyPromptGenerate(opts: {
     }
     opts.onProgress?.('ComfyUI 生成中…')
   }
-  throw new Error('[comfyui] 等待结果超时')
+  throw new Error(opts.kind === 'video' ? '[comfyui] 等待结果超时（30 分钟）' : '[comfyui] 等待结果超时')
 }
 
 export interface ConnectionTestResult {

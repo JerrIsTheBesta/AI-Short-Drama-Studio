@@ -752,7 +752,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-1);
+  background: color-mix(in srgb, var(--nb-bg-2) 62%, transparent);
   border: 1px solid var(--color-node-border);
   border-radius: 8px;
   overflow: hidden;
@@ -791,7 +791,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   gap: 10px;
   padding: 10px 14px 8px;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-node-well);
+  background: transparent;
   flex-shrink: 0;
   cursor: grab;
 }
@@ -856,7 +856,7 @@ async function generateThis(ev: Event, kind: 'play' | 'extract' | 'continue' = '
   resize: none;
   border: none;
   outline: none;
-  background: var(--color-bg-1);
+  background: transparent;
   color: var(--color-text-1);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;

@@ -785,7 +785,7 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'generate_video', phase: 4, timeoutMs: 20 * 60_000, required: ['shotId'], estimate: oneVideo,
+    name: 'generate_video', phase: 4, timeoutMs: 30 * 60_000, required: ['shotId'], estimate: oneVideo,
     async execute(action, ctx) {
       await runCanvasNode(`shotVideo:${action.shotId}`, progress(ctx), ctx.signal)
       revealCanvas(`shotVideo:${action.shotId}`)
@@ -1041,7 +1041,7 @@ const definitions: ToolDefinition[] = [
     }
   },
   {
-    name: 'run_node', phase: 2, timeoutMs: 20 * 60_000, required: ['nodeId'], estimate: oneImage,
+    name: 'run_node', phase: 2, timeoutMs: 30 * 60_000, required: ['nodeId'], estimate: oneImage,
     async execute(action, ctx) { await runCanvasNode(action.nodeId!, progress(ctx), ctx.signal); return '节点完成' }
   },
   {

@@ -1417,7 +1417,7 @@ const cropStyle = computed(() => ({
 .pnode {
   position: relative;
   width: 240px;
-  background: var(--color-bg-1);
+  background: color-mix(in srgb, var(--nb-bg-2) 62%, transparent);
   border: 1px solid var(--color-node-border);
   border-radius: 6px;
   overflow: visible;
@@ -1745,7 +1745,7 @@ const cropStyle = computed(() => ({
   gap: 6px;
   min-height: 32px;
   padding: 0 10px;
-  background: var(--color-bg-1);
+  background: transparent;
   border-radius: 0 0 5px 5px;
 }
 
@@ -1767,7 +1767,7 @@ const cropStyle = computed(() => ({
   padding: 8px 11px 9px;
   background:
     linear-gradient(180deg, rgba(167, 139, 250, 0.07), transparent 42%),
-    var(--color-bg-1);
+    transparent;
   border-radius: 0 0 5px 5px;
 }
 .sc-head {

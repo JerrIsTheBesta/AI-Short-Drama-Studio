@@ -6,55 +6,105 @@
 :root {
   color-scheme: dark;
 
-  /* 主色板 */
-  --color-bg-0: #101012;
-  --color-bg-1: #18181c;
-  --color-bg-2: #222228;
-  --color-bg-3: #2c2c34;
-  --color-bg-card: #1c1c22;
-  --color-canvas: #0e0e10;
-  --color-canvas-group: #16161a;
-  --color-node-well: #2a2a32;
-  --color-node-border: rgba(255, 255, 255, 0.12);
-  --shadow-node: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px rgba(0, 0, 0, 0.35);
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-strong: rgba(255, 255, 255, 0.16);
-  --color-fill: rgba(255, 255, 255, 0.05);
-  --color-fill-hover: rgba(255, 255, 255, 0.08);
-  --color-fill-strong: rgba(255, 255, 255, 0.14);
+  /* NEBULA · 深空控制台。首页星图仍用现有 banner，不换图。 */
+  --nb-void: #06080b;
+  --nb-bg-0: #0a0d12;
+  --nb-bg-1: #0e1219;
+  --nb-bg-2: #131822;
+  --nb-bg-3: #1a202b;
+  --nb-bg-4: #222a37;
+  --nb-bg-inset: #090c11;
+  --nb-line-1: rgba(255, 255, 255, 0.045);
+  --nb-line-2: rgba(255, 255, 255, 0.085);
+  --nb-line-3: rgba(255, 255, 255, 0.14);
+  --nb-line-4: rgba(255, 255, 255, 0.22);
+  --nb-line-accent: rgba(53, 214, 247, 0.32);
+  --nb-accent-glow: rgba(53, 214, 247, 0.22);
+  --nb-ai-line: rgba(125, 140, 255, 0.34);
+  --nb-success-soft: rgba(61, 217, 160, 0.13);
+  --nb-danger-soft: rgba(255, 92, 108, 0.13);
+  --nb-accent: #35d6f7;
+  --nb-accent-2: #12a9d4;
+  --nb-accent-ink: #04121a;
+  --nb-accent-soft: rgba(53, 214, 247, 0.12);
+  --nb-ai: #7d8cff;
+  --nb-ai-soft: rgba(125, 140, 255, 0.13);
+  --nb-t1: #e9f0f9;
+  --nb-t2: #a3b0c2;
+  --nb-t3: #6e7d91;
+  --nb-t4: #4c5969;
+  --nb-success: #3dd9a0;
+  --nb-warning: #ffb454;
+  --nb-danger: #ff5c6c;
+  --nb-fill-1: rgba(255, 255, 255, 0.045);
+  --nb-fill-2: rgba(255, 255, 255, 0.085);
+  --nb-fill-3: rgba(255, 255, 255, 0.14);
+  --nb-fill-4: rgba(255, 255, 255, 0.22);
+  --nb-grid-dot: rgba(255, 255, 255, 0.05);
+  --nb-grid-line-2: rgba(255, 255, 255, 0.028);
+  --nb-edge: rgba(255, 255, 255, 0.28);
+  --nb-accent-wash: rgba(53, 214, 247, 0.05);
+  --nb-accent-wash-2: rgba(53, 214, 247, 0.05);
+  --nb-accent-text: #35d6f7;
+  --nb-e-glow: 0 0 0 1px var(--nb-line-accent), 0 0 28px var(--nb-accent-glow);
+  --nb-lineart-filter: invert(1) grayscale(1) sepia(1) hue-rotate(175deg) saturate(2.4) brightness(1.25) contrast(1.15);
+  --nb-lineart-blend: normal;
+  --nb-lineart-ink-filter: none;
+  --nb-chip-bg: rgba(14, 18, 25, 0.88);
+  --nb-chip-ink: #dce6f2;
+  --nb-chip-line: rgba(255, 255, 255, 0.16);
+  --nb-panel-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent);
+  --nb-e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --nb-e2: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --nb-e3: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --nb-screen: #05070a;
 
-  --color-text-1: #ececef;
-  --color-text-2: #c4c4cc;
-  --color-text-3: #8e8e98;
-  --color-text-4: #6a6a74;
+  --color-bg-0: var(--nb-bg-0);
+  --color-bg-1: var(--nb-bg-1);
+  --color-bg-2: var(--nb-bg-2);
+  --color-bg-3: var(--nb-bg-3);
+  --color-bg-card: var(--nb-bg-2);
+  --color-canvas: var(--nb-void);
+  --color-canvas-group: var(--nb-bg-inset);
+  --color-node-well: var(--nb-bg-3);
+  --color-node-border: var(--nb-line-2);
+  --shadow-node: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --color-border: var(--nb-line-2);
+  --color-border-strong: var(--nb-line-3);
+  --color-fill: var(--nb-fill-1);
+  --color-fill-hover: var(--nb-fill-2);
+  --color-fill-strong: var(--nb-fill-3);
 
-  --color-accent: #7eb4ff;
-  --color-accent-2: #7eb4ff;
-  --color-accent-3: #7eb4ff;
-  --color-on-accent: #0b1220;
-  --color-success: #4ade80;
-  --color-warning: #fbbf24;
-  --color-error: #f87171;
-  --color-info: #7eb4ff;
+  --color-text-1: var(--nb-t1);
+  --color-text-2: var(--nb-t2);
+  --color-text-3: var(--nb-t3);
+  --color-text-4: var(--nb-t4);
 
-  --grad-primary: #7eb4ff;
-  --grad-primary-soft: rgba(126, 180, 255, 0.14);
-  --grad-card: #1c1c22;
+  --color-accent: var(--nb-accent);
+  --color-accent-2: var(--nb-accent-2);
+  --color-accent-3: var(--nb-ai);
+  --color-on-accent: var(--nb-accent-ink);
+  --color-success: var(--nb-success);
+  --color-warning: var(--nb-warning);
+  --color-error: var(--nb-danger);
+  --color-info: var(--nb-accent);
+
+  --grad-primary: linear-gradient(135deg, var(--nb-accent) 0%, var(--nb-ai) 100%);
+  --grad-primary-soft: var(--nb-accent-soft);
+  --grad-card: var(--nb-bg-2);
   --grad-glow: none;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --shadow-sm: var(--nb-e1);
+  --shadow-md: var(--nb-e2);
+  --shadow-lg: var(--nb-e3);
   --shadow-glow: none;
 
-  /* 圆角 */
   --radius-sm: 6px;
   --radius-md: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 24px;
-  --radius-full: 9999px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
 
-  /* 间距 */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -65,17 +115,81 @@
   --space-10: 40px;
   --space-12: 48px;
 
-  /* 字体 */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", sans-serif;
-  --font-mono: "SF Mono", "Monaco", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
 
-  /* 动画 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --duration-fast: 150ms;
-  --duration-normal: 240ms;
-  --duration-slow: 400ms;
+  --ease-spring: cubic-bezier(0.34, 1.46, 0.64, 1);
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+  --duration-slow: 320ms;
+}
+
+/* LUMEN · 浅色。与深色同一套变量，由 html[data-theme="light"] 切换。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --nb-void: #e8edf4;
+  --nb-bg-0: #f2f5f9;
+  --nb-bg-1: #fbfcfe;
+  --nb-bg-2: #ffffff;
+  --nb-bg-3: #f4f7fb;
+  --nb-bg-4: #e8edf5;
+  --nb-bg-inset: #e9eef5;
+  --nb-line-1: rgba(15, 26, 41, 0.055);
+  --nb-line-2: rgba(15, 26, 41, 0.1);
+  --nb-line-3: rgba(15, 26, 41, 0.17);
+  --nb-line-4: rgba(15, 26, 41, 0.28);
+  --nb-line-accent: rgba(11, 135, 168, 0.34);
+  --nb-accent-glow: rgba(11, 135, 168, 0.16);
+  --nb-ai-line: rgba(107, 123, 245, 0.3);
+  --nb-success-soft: rgba(33, 181, 126, 0.11);
+  --nb-danger-soft: rgba(224, 74, 90, 0.1);
+  --nb-accent: #12b8dc;
+  --nb-accent-2: #0a93b5;
+  --nb-accent-ink: #04121a;
+  --nb-accent-soft: rgba(11, 135, 168, 0.1);
+  --nb-ai: #6b7bf5;
+  --nb-ai-soft: rgba(107, 123, 245, 0.1);
+  --nb-t1: #0d1626;
+  --nb-t2: #41506a;
+  --nb-t3: #6a7a92;
+  --nb-t4: #7d8a9e;
+  --nb-success: #21b57e;
+  --nb-warning: #e09328;
+  --nb-danger: #e04a5a;
+  --nb-fill-1: rgba(15, 26, 41, 0.04);
+  --nb-fill-2: rgba(15, 26, 41, 0.085);
+  --nb-fill-3: rgba(15, 26, 41, 0.13);
+  --nb-fill-4: rgba(15, 26, 41, 0.2);
+  --nb-grid-dot: rgba(15, 26, 41, 0.12);
+  --nb-grid-line-2: rgba(15, 26, 41, 0.055);
+  --nb-edge: #3e516c;
+  --nb-accent-wash: rgba(11, 135, 168, 0.07);
+  --nb-accent-wash-2: rgba(11, 135, 168, 0.06);
+  --nb-accent-text: #0b7fa0;
+  --nb-e-glow: 0 0 0 1px var(--nb-line-accent), 0 0 20px rgba(11, 135, 168, 0.16);
+  --nb-lineart-filter: grayscale(1) brightness(0.6) contrast(5.1);
+  --nb-lineart-blend: multiply;
+  --nb-lineart-ink-filter: grayscale(1) brightness(0.6) contrast(5.1);
+  --nb-chip-bg: rgba(255, 255, 255, 0.94);
+  --nb-chip-ink: #2b3a52;
+  --nb-chip-line: rgba(15, 26, 41, 0.16);
+  --nb-panel-sheen: linear-gradient(180deg, rgba(15, 26, 41, 0.022), transparent);
+  --nb-e1: 0 1px 2px rgba(15, 26, 41, 0.06);
+  --nb-e2: 0 2px 8px rgba(15, 26, 41, 0.07), 0 1px 2px rgba(15, 26, 41, 0.05);
+  --nb-e3: 0 8px 28px rgba(15, 26, 41, 0.1), 0 2px 6px rgba(15, 26, 41, 0.05);
+  --nb-screen: #eef1f6;
+  --nb-warning-soft: rgba(224, 147, 40, 0.13);
+  --nb-warning-line: rgba(224, 147, 40, 0.34);
+  --nb-success-line: rgba(33, 181, 126, 0.32);
+  --nb-danger-line: rgba(224, 74, 90, 0.32);
+  --nb-clip-video-bg: rgba(184, 114, 15, 0.1);
+  --nb-clip-video-line: rgba(184, 114, 15, 0.34);
+  --nb-clip-audio-bg: rgba(194, 83, 111, 0.09);
+  --nb-clip-audio-line: rgba(194, 83, 111, 0.3);
+  --nb-clip-text-bg: rgba(91, 106, 224, 0.09);
+  --nb-clip-text-line: rgba(91, 106, 224, 0.3);
 }
 
 * {
@@ -115,7 +229,7 @@ body {
   border-radius: var(--radius-full);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: var(--nb-fill-4);
 }
 
 button,
@@ -141,7 +255,7 @@ a {
 input,
 select,
 textarea {
-  color-scheme: dark;
+  color-scheme: inherit;
 }
 
 /* ============================================
@@ -193,10 +307,10 @@ textarea {
 
 @keyframes pulse-glow {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(126, 180, 255, 0.28);
+    box-shadow: 0 0 0 0 rgba(53, 214, 247, 0.28);
   }
   50% {
-    box-shadow: 0 0 0 16px rgba(126, 180, 255, 0);
+    box-shadow: 0 0 0 16px rgba(53, 214, 247, 0);
   }
 }
 

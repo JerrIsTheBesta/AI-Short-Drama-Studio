@@ -55,6 +55,11 @@ const list = computed(() => {
     kind.value === 'all'
       ? assets.all
       : assets.all.filter((a) => a.kind === kind.value)
+  if ((kind.value === 'video' || kind.value === 'audio') && !props.pageIds?.length) {
+    const have = new Set(items.map((item) => item.id))
+    const fromLib = library.all.filter((item) => item.kind === kind.value && !have.has(item.id))
+    return [...items, ...fromLib]
+  }
   if (props.pageIds?.length) {
     const allow = new Set(props.pageIds)
     const fromProject = items.filter((a) => allow.has(a.id))
@@ -114,7 +119,7 @@ watch(
     loading.value = true
     try {
       await assets.refresh()
-      if (showTabs.value) await library.refresh()
+      if (showTabs.value || kind.value === 'video' || kind.value === 'audio') await library.refresh()
       await loadUrls()
     } finally {
       loading.value = false
@@ -313,6 +318,7 @@ function labelOf(a: Asset) {
   border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   box-shadow: var(--shadow-lg);
 }
 .head,

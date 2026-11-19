@@ -351,7 +351,7 @@ function removeSelf() {
 .fnode {
   position: relative;
   width: 240px;
-  background: var(--color-bg-1);
+  background: color-mix(in srgb, var(--nb-bg-2) 62%, transparent);
   border: 1px solid var(--color-node-border);
   border-radius: 6px;
   color: var(--color-text-1);

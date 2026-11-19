@@ -1,9 +1,19 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { desktop, isDesktop } from '@/services/desktop'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 
 const route = useRoute()
+const router = useRouter()
+
+function goHome() {
+  if (route.name === 'home') {
+    window.dispatchEvent(new CustomEvent('aicut:home'))
+    return
+  }
+  router.push({ name: 'home' })
+}
 
 /** 无边框窗口里必须画出顶栏；不依赖 preload 是否已经挂上 */
 const show = /electron/i.test(navigator.userAgent) || isDesktop()
@@ -35,11 +45,12 @@ function run(fn: () => void) {
 
 <template>
   <header v-if="show" class="titlebar win-titlebar">
-    <div v-if="route.name !== 'home'" class="brand">
+    <button type="button" class="brand" title="剧流 Studio" @click="goHome">
       <img class="mark" src="/logo.png" alt="" />
       <span class="name">剧流 Studio</span>
-    </div>
+    </button>
     <div class="controls">
+      <ThemeToggle class="theme" />
       <button type="button" class="ctrl" title="最小化" @click="run(() => desktop().minimize())">
         <svg viewBox="0 0 12 12" aria-hidden="true">
           <path d="M2 6h8" />
@@ -86,8 +97,14 @@ function run(fn: () => void) {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 0;
   padding: 0 14px;
-  pointer-events: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .mark {
   width: 18px;
@@ -103,9 +120,13 @@ function run(fn: () => void) {
 }
 .controls {
   display: flex;
+  align-items: center;
   margin-left: auto;
   -webkit-app-region: no-drag;
   app-region: no-drag;
+}
+.theme {
+  margin-right: 6px;
 }
 .ctrl {
   width: 52px;
@@ -144,6 +165,7 @@ function run(fn: () => void) {
   -webkit-app-region: drag !important;
   app-region: drag !important;
 }
+.win-titlebar .brand,
 .win-titlebar .ctrl,
 .win-titlebar .controls {
   -webkit-app-region: no-drag !important;

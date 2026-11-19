@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useProjectStore, useAssetsStore, useSettingsStore } from '@/stores'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -17,9 +17,18 @@ const showLayout = computed(
   () =>
     route.name !== 'home' &&
     route.name !== 'studio' &&
+    route.name !== 'edit' &&
     route.name !== 'smart-speech' &&
     route.name !== 'scripts' &&
     route.name !== 'settings'
+)
+
+watch(
+  () => settings.config.theme,
+  (theme) => {
+    document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark'
+  },
+  { immediate: true }
 )
 
 onMounted(async () => {

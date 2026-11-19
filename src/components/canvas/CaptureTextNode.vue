@@ -94,10 +94,10 @@ async function copy() {
   </section>
 </template>
 <style scoped>
-.capture-text { width: 360px; height: 350px; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; color: #c8c8ce; background: #161618; border: none; border-radius: 4px; }
+.capture-text { width: 360px; height: 350px; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; color: #c8c8ce; background: color-mix(in srgb, var(--nb-bg-2) 62%, transparent); border: none; border-radius: 4px; }
 .capture-text.plan { width: 440px; }
 .capture-text.selected { outline: 1px solid rgba(255, 255, 255, 0.28); }
-header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #1c1c20; font-size: 13px; }
+header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: transparent; font-size: 13px; }
 header strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d8d8de; font-weight: 600; }
 svg { width: 16px; height: 16px; fill: none; stroke: #9a9aa3; stroke-width: 1.5; }
 button { color: #c8c8ce; background: #2a2a2e; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
@@ -107,8 +107,8 @@ button { color: #c8c8ce; background: #2a2a2e; border: none; padding: 4px 8px; bo
 .next { margin: 0 0 8px; color: #d4d4d8; font-size: 13px; }
 .look, .model { margin: 0 0 12px; color: #8d8d93; font-size: 12px; line-height: 1.5; }
 ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-li { padding: 10px 12px; border-radius: 4px; background: #1c1c20; }
-li.current { background: #242428; }
+li { padding: 10px 12px; border-radius: 4px; background: transparent; }
+li.current { background: transparent; }
 .scene-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .scene-head strong { color: #dedee3; font-size: 13px; font-weight: 600; }
 .scene-head span, .beats { color: #9a9aa3; font-size: 12px; }
@@ -116,5 +116,21 @@ li.current { background: #242428; }
 .cast { display: flex; flex-wrap: wrap; gap: 6px; }
 .line { color: #c8c8ce; font-size: 12px; line-height: 1.55; }
 textarea { flex: 1; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 14px; border: none; resize: none; background: transparent; color: inherit; line-height: 1.7; font-family: inherit; font-size: 12px; outline: none; }
-footer { padding: 8px 14px; color: #8d8d93; font-size: 11px; background: #141416; }
+footer { padding: 8px 14px; color: #8d8d93; font-size: 11px; background: transparent; }
+/* LUMEN: solid white card and dark body text. Dark theme keeps the rules above. */
+:root[data-theme='light'] .capture-text {
+  background: #ffffff;
+  color: var(--nb-t1);
+}
+:root[data-theme='light'] .capture-text.selected { outline-color: var(--nb-line-4); }
+:root[data-theme='light'] header strong,
+:root[data-theme='light'] .next,
+:root[data-theme='light'] .scene-head strong,
+:root[data-theme='light'] .line { color: var(--nb-t1); }
+:root[data-theme='light'] .look,
+:root[data-theme='light'] .model,
+:root[data-theme='light'] .scene-head span,
+:root[data-theme='light'] .beats,
+:root[data-theme='light'] footer { color: var(--nb-t2); }
+:root[data-theme='light'] svg { stroke: var(--nb-t3); }
 </style>

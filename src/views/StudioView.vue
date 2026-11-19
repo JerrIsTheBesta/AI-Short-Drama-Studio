@@ -2,7 +2,6 @@
 import { computed, defineComponent, h, markRaw, nextTick, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import { SelectionMode, VueFlow, useVueFlow, type Connection, type Edge, type Node, type NodeMouseEvent } from '@vue-flow/core'
-import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
@@ -21,6 +20,7 @@ import {
   type LinkCanvasKind
 } from '@/services/canvas/references'
 import { isDesktop, desktop } from '@/services/desktop'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import PipelineNode from '@/components/canvas/PipelineNode.vue'
 import CaptureTextNode from '@/components/canvas/CaptureTextNode.vue'
 import ResizableNode from '@/components/canvas/ResizableNode.vue'
@@ -271,7 +271,7 @@ const flowEdges = computed<Edge[]>(() => {
     animated: false,
     interactionWidth: 28,
     class: 'pipe-edge',
-    style: { stroke: 'rgba(126, 180, 255, 0.42)', strokeWidth: 1.1 }
+    style: { stroke: 'var(--nb-edge)', strokeWidth: 1.4 }
   }))
 })
 
@@ -1283,6 +1283,7 @@ function goClassic() {
           >
             <CanvasToolbarIcon name="folder" :size="18" />
           </button>
+          <ThemeToggle />
           <button type="button" title="设置" @click="openSettings">
             <CanvasToolbarIcon name="settings" :size="18" />
           </button>
@@ -1336,7 +1337,6 @@ function goClassic() {
           @pane-context-menu="openCtxMenu"
           @node-context-menu="openCtxMenu"
         >
-          <Background :gap="22" color="rgba(255,255,255,0.08)" />
           <Controls position="bottom-left" :show-interactive="false" />
         </VueFlow>
         <div v-if="!project.current?.canvas?.nodes.length" class="empty-hint">
@@ -1527,7 +1527,7 @@ function goClassic() {
   white-space: nowrap;
 }
 .project-name:hover { background: rgba(255, 255, 255, 0.06); }
-.name-input { width: 220px; padding: 4px 6px; border-radius: 4px; background: #1c1c20; outline: 1px solid rgba(255, 255, 255, 0.16); }
+.name-input { width: 220px; padding: 4px 6px; border-radius: 6px; background: var(--nb-bg-inset); outline: 1px solid var(--nb-line-3); }
 .bar .dim {
   color: var(--color-text-4);
   font-size: 11px;
@@ -1628,10 +1628,10 @@ function goClassic() {
   gap: 6px;
   height: 30px;
   padding: 0 10px;
-  border: none;
-  border-radius: 4px;
-  background: #26262b;
-  color: #b7b7bc;
+  border: 1px solid var(--nb-ai-line);
+  border-radius: 8px;
+  background: var(--nb-ai-soft);
+  color: var(--nb-ai);
   font-size: 11px;
   white-space: nowrap;
   transition: background 0.18s ease, color 0.18s ease;
@@ -1639,8 +1639,8 @@ function goClassic() {
   app-region: no-drag;
 }
 .bulk-optimize-btn:hover:not(:disabled) {
-  background: #323238;
-  color: #d4d4d8;
+  background: rgba(125, 140, 255, 0.2);
+  color: #d5dbff;
 }
 .bulk-optimize-btn:disabled { opacity: .65; cursor: wait; }
 .empty-hint {
@@ -1841,39 +1841,59 @@ function goClassic() {
   position: relative;
 }
 .flow-wrap :deep(.vue-flow) {
-  background: var(--color-canvas);
+  background-color: var(--nb-void);
+  background-image:
+    radial-gradient(1000px 560px at 30% 10%, var(--nb-accent-wash), transparent 60%),
+    radial-gradient(circle, var(--nb-grid-dot) 1px, transparent 1.2px),
+    linear-gradient(var(--nb-grid-line-2) 1px, transparent 1px),
+    linear-gradient(90deg, var(--nb-grid-line-2) 1px, transparent 1px);
+  background-size: auto, 24px 24px, 120px 120px, 120px 120px;
+  background-repeat: no-repeat, repeat, repeat, repeat;
+}
+.flow-wrap :deep(.vue-flow__pane),
+.flow-wrap :deep(.vue-flow__viewport) {
+  background: transparent;
 }
 .flow-wrap :deep(.vue-flow__controls) {
   display: flex;
   flex-direction: row;
   gap: 2px;
-  margin: 12px;
+  margin: 16px;
   padding: 4px;
-  border-radius: 10px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-1);
-  box-shadow: var(--shadow-md);
+  border-radius: 14px;
+  border: 1px solid var(--nb-line-3);
+  background: var(--nb-bg-2) !important;
+  color: var(--nb-t2);
+  color-scheme: inherit;
+  box-shadow: var(--nb-e2, var(--shadow-md));
+  backdrop-filter: blur(14px);
 }
 .flow-wrap :deep(.vue-flow__controls-button) {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: none;
-  border-bottom: none;
+  border: none !important;
+  border-bottom: none !important;
   border-radius: 8px;
-  background: transparent;
+  background: transparent !important;
+  color: var(--nb-t2);
+  color-scheme: inherit;
+  appearance: none;
   box-sizing: border-box;
 }
-.flow-wrap :deep(.vue-flow__controls-button svg) {
+.flow-wrap :deep(.vue-flow__controls-button svg),
+.flow-wrap :deep(.vue-flow__controls-button svg path) {
   max-width: 14px;
   max-height: 14px;
-  fill: var(--color-text-2);
+  fill: currentColor !important;
 }
 .flow-wrap :deep(.vue-flow__controls-button:hover) {
-  background: var(--color-fill-hover);
+  background: var(--nb-bg-3) !important;
+  color: var(--nb-t1);
 }
-.flow-wrap :deep(.vue-flow__controls-button:hover svg) {
-  fill: var(--color-text-1);
+.flow-wrap :deep(.vue-flow__controls-button:hover svg),
+.flow-wrap :deep(.vue-flow__controls-button:hover svg path) {
+  fill: currentColor !important;
 }
 .flow-wrap :deep(.vue-flow__controls-button:disabled) {
   opacity: 0.35;
@@ -1908,6 +1928,9 @@ function goClassic() {
 }
 .flow-wrap :deep(.vue-flow__node.selected) {
   z-index: 12 !important;
+  outline: 1px solid var(--nb-accent);
+  outline-offset: 3px;
+  border-radius: 10px;
 }
 .flow-wrap :deep(.vue-flow__node-groupFrame) {
   overflow: visible !important;
@@ -1932,9 +1955,10 @@ function goClassic() {
   width: auto;
   height: auto;
 }
-.flow-wrap :deep(.vue-flow__edge-path) {
-  stroke: rgba(126, 180, 255, 0.42) !important;
-  stroke-width: 1.1 !important;
+.flow-wrap :deep(.vue-flow__edge-path),
+.flow-wrap :deep(.vue-flow__connection-path) {
+  stroke: var(--nb-edge) !important;
+  stroke-width: 1.8 !important;
   transition: stroke 0.16s ease, stroke-width 0.16s ease, filter 0.16s ease;
 }
 .flow-wrap :deep(.vue-flow__edge.pipe-edge:hover),
@@ -1942,9 +1966,9 @@ function goClassic() {
   z-index: 20;
 }
 .flow-wrap :deep(.vue-flow__edge:hover .vue-flow__edge-path) {
-  stroke: #9cc4ff !important;
-  stroke-width: 2.4 !important;
-  filter: none;
+  stroke: var(--nb-accent) !important;
+  stroke-width: 2.2 !important;
+  filter: drop-shadow(0 0 4px var(--nb-accent-glow));
 }
 .flow-wrap :deep(.vue-flow__edge .vue-flow__edgeupdater),
 .flow-wrap :deep(.vue-flow__edge-interaction) {
@@ -1952,7 +1976,7 @@ function goClassic() {
   stroke: transparent;
 }
 .flow-wrap :deep(.vue-flow__connection-line) {
-  stroke: rgba(126, 180, 255, 0.55) !important;
+  stroke: var(--nb-accent) !important;
   stroke-width: 1.4 !important;
 }
 </style>

@@ -7,12 +7,14 @@ import GalleryTemplates from '@/components/common/GalleryTemplates.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Tag from '@/components/common/Tag.vue'
 import HomeIcon from '@/components/common/HomeIcon.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import { isDesktop, desktop } from '@/services/desktop'
 import { pickCoverAssetId, projectCoverUrl } from '@/services/storage'
 import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import { openLightbox } from '@/composables/useLightbox'
 
 const router = useRouter()
+const showWindowChrome = /electron/i.test(navigator.userAgent) || isDesktop()
 const project = useProjectStore()
 const toast = useToastStore()
 
@@ -29,15 +31,16 @@ const covers = ref<Record<string, string>>({})
 const library = useLibraryStore()
 const libUrls = ref<Record<string, string>>({})
 const libUploading = ref(false)
-const libFolderId = ref(LIBRARY_PUBLIC_ID)
+const libKind = ref<'all' | 'image' | 'video' | 'audio'>('all')
 const libSelected = ref<Set<string>>(new Set())
 const libMoveTarget = ref(LIBRARY_PUBLIC_ID)
-const folderDraft = ref('')
-const renamingId = ref('')
-const renameDraft = ref('')
-const creatingFolder = ref(false)
+
+function showHomeNav() {
+  nav.value = 'home'
+}
 
 onMounted(async () => {
+  window.addEventListener('aicut:home', showHomeNav)
   await project.refreshList()
   await library.refresh()
   await loadLibraryThumbs()
@@ -87,6 +90,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  window.removeEventListener('aicut:home', showHomeNav)
   for (const url of Object.values(covers.value)) revokeCover(url)
 })
 
@@ -275,19 +279,41 @@ const statItems = computed(() => [
   { value: fmtDuration(totalDuration.value), label: '视频总时长', accent: true }
 ])
 
-const visibleLibraryAssets = computed(() => library.inFolder(libFolderId.value))
+const libKindCount = computed(() => ({
+  image: library.all.filter((a) => a.kind === 'image').length,
+  video: library.all.filter((a) => a.kind === 'video').length,
+  audio: library.all.filter((a) => a.kind === 'audio').length,
+  all: library.all.length
+}))
 
-const currentFolderLabel = computed(() =>
-  libFolderId.value === LIBRARY_PUBLIC_ID ? '公共资产' : library.folderName(libFolderId.value)
+const libTabs = computed(() => [
+  { id: 'image' as const, label: '图片', count: libKindCount.value.image },
+  { id: 'video' as const, label: '视频', count: libKindCount.value.video },
+  { id: 'audio' as const, label: '音频', count: libKindCount.value.audio },
+  { id: 'all' as const, label: '全部', count: libKindCount.value.all }
+])
+
+const visibleLibraryAssets = computed(() =>
+  libKind.value === 'all' ? library.all : library.all.filter((a) => a.kind === libKind.value)
 )
 
-function selectLibFolder(id: string) {
-  libFolderId.value = id
+const selectedLibraryNames = computed(() => {
+  const names = [...libSelected.value]
+    .map((id) => library.getMeta(id)?.filename)
+    .filter((name): name is string => Boolean(name))
+  if (names.length <= 3) return names.join('、')
+  return `${names.slice(0, 3).join('、')} 等`
+})
+
+function setLibKind(id: 'all' | 'image' | 'video' | 'audio') {
+  libKind.value = id
   libSelected.value = new Set()
-  libMoveTarget.value =
-    id === LIBRARY_PUBLIC_ID
-      ? library.folders[0]?.id ?? LIBRARY_PUBLIC_ID
-      : LIBRARY_PUBLIC_ID
+}
+
+function openLibraryItem(asset: { id: string; kind: string; filename: string }) {
+  const url = libUrls.value[asset.id]
+  if (!url || asset.kind === 'audio') return
+  openLightbox(url, asset.kind === 'video' ? 'video' : 'image', asset.filename)
 }
 
 function clearLibSelected() {
@@ -326,13 +352,10 @@ async function uploadLibraryImages() {
   libUploading.value = true
   try {
     for (const file of files) {
-      await library.add(file, 'uploaded', {
-        filename: file.name,
-        folderId: libFolderId.value
-      })
+      await library.add(file, 'uploaded', { filename: file.name })
     }
     await loadLibraryThumbs()
-    toast.success(`已上传 ${files.length} 张到${currentFolderLabel.value}`)
+    toast.success(`已上传 ${files.length} 张`)
   } catch (err: any) {
     toast.error(err?.message || '上传失败')
   } finally {
@@ -350,52 +373,35 @@ async function removeLibraryItem(id: string) {
   toast.success('已删除')
 }
 
-async function createLibFolder() {
-  creatingFolder.value = true
-  try {
-    const folder = await library.createFolder(folderDraft.value)
-    folderDraft.value = ''
-    libFolderId.value = folder.id
-    toast.success(`已创建「${folder.name}」`)
-  } catch (err: any) {
-    toast.error(err?.message || '创建失败')
-  } finally {
-    creatingFolder.value = false
+async function downloadSelectedLibrary() {
+  const ids = [...libSelected.value]
+  let saved = 0
+  for (const id of ids) {
+    const asset = library.getMeta(id)
+    const blob = await library.getBlob(id)
+    if (!blob || !asset) continue
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = asset.filename || id
+    link.click()
+    URL.revokeObjectURL(url)
+    saved += 1
+    await new Promise((resolve) => setTimeout(resolve, 180))
   }
+  toast[saved ? 'success' : 'warn'](saved ? `开始下载 ${saved} 项` : '这些素材读不出来')
 }
 
-function startRenameFolder(id: string, name: string) {
-  renamingId.value = id
-  renameDraft.value = name
-}
-
-async function commitRenameFolder() {
-  const id = renamingId.value
-  if (!id) return
-  try {
-    await library.renameFolder(id, renameDraft.value)
-    renamingId.value = ''
-    toast.success('已重命名')
-  } catch (err: any) {
-    toast.error(err?.message || '重命名失败')
+async function removeSelectedLibrary() {
+  const ids = [...libSelected.value]
+  if (!ids.length) return
+  if (!confirm(`从资产库删除这 ${ids.length} 项？`)) return
+  for (const id of ids) {
+    await library.remove(id)
+    delete libUrls.value[id]
   }
-}
-
-async function removeLibFolder(id: string, name: string) {
-  const n = library.folderCount(id)
-  const msg =
-    n > 0
-      ? `删除「${name}」后，里面的 ${n} 张图会回到公共资产。确定删除？`
-      : `删除文件夹「${name}」？`
-  if (!confirm(msg)) return
-  try {
-    await library.deleteFolder(id)
-    if (libFolderId.value === id) libFolderId.value = LIBRARY_PUBLIC_ID
-    libSelected.value = new Set()
-    toast.success('已删除文件夹')
-  } catch (err: any) {
-    toast.error(err?.message || '删除失败')
-  }
+  libSelected.value = new Set()
+  toast.success(`已删除 ${ids.length} 项`)
 }
 
 async function moveSelectedLibrary() {
@@ -418,44 +424,41 @@ async function moveSelectedLibrary() {
 <template>
   <div class="home">
     <aside class="sidenav">
-      <button type="button" class="brand" @click="nav = 'home'">
+      <button v-if="!showWindowChrome" type="button" class="brand" @click="nav = 'home'">
         <img class="brand-mark" src="/logo.png" alt="" />
-        <span>
-          <strong>剧流 Studio</strong>
-          <em>AI 短剧工作台</em>
-        </span>
+        <span class="nav-label">剧流 Studio</span>
       </button>
       <nav class="side-links" aria-label="首页导航">
         <button type="button" :class="{ on: nav === 'home' }" @click="nav = 'home'">
-          <HomeIcon name="home" :size="18" /> 首页
+          <HomeIcon name="home" :size="18" /><span class="nav-label">首页</span>
         </button>
         <button type="button" :class="{ on: nav === 'projects' }" @click="nav = 'projects'">
-          <HomeIcon name="folder" :size="18" /> 我的项目
+          <HomeIcon name="folder" :size="18" /><span class="nav-label">我的项目</span>
         </button>
         <button type="button" @click="router.push('/scripts')">
-          <HomeIcon name="script" :size="18" /> 剧本管理
+          <HomeIcon name="script" :size="18" /><span class="nav-label">剧本管理</span>
         </button>
         <button type="button" :class="{ on: nav === 'library' }" @click="nav = 'library'">
-          <HomeIcon name="library" :size="18" /> 素材库
+          <HomeIcon name="library" :size="18" /><span class="nav-label">素材库</span>
         </button>
         <button type="button" :class="{ on: nav === 'templates' }" @click="nav = 'templates'">
-          <HomeIcon name="image" :size="18" /> 图库模板
+          <HomeIcon name="image" :size="18" /><span class="nav-label">图库模板</span>
         </button>
         <button type="button" :class="{ on: nav === 'tools' }" @click="nav = 'tools'">
-          <HomeIcon name="wand" :size="18" /> 工具集
+          <HomeIcon name="wand" :size="18" /><span class="nav-label">工具集</span>
         </button>
         <button type="button" @click="router.push('/settings')">
-          <HomeIcon name="settings" :size="18" /> 设置
+          <HomeIcon name="settings" :size="18" /><span class="nav-label">设置</span>
         </button>
-        <a class="tutorial-link" href="https://www.bilibili.com/video/BV1o6n66fE5p/" target="_blank" rel="noopener noreferrer" title="配置、软件操作与短剧制作入门">
-          <HomeIcon name="script" :size="18" /> 视频教程 ↗
+        <a class="tutorial-link" href="https://www.bilibili.com/video/BV1o6n66fE5p/" target="_blank" rel="noopener noreferrer">
+          <HomeIcon name="play" :size="18" /><span class="nav-label">视频教程</span>
         </a>
       </nav>
       <div class="side-foot">
-        <div class="side-kicker">开源，免费</div>
+        <ThemeToggle />
         <a href="https://github.com/JerrIsTheBesta/AI-Short-Drama-Studio" target="_blank" rel="noreferrer">
-          <HomeIcon name="github" :size="15" />
-          去 GitHub →
+          <HomeIcon name="github" :size="16" />
+          <span class="nav-label">去 GitHub</span>
         </a>
       </div>
     </aside>
@@ -472,13 +475,33 @@ async function moveSelectedLibrary() {
 
       <template v-if="nav === 'home'">
         <section class="banner">
-          <div class="banner-stars" aria-hidden="true"></div>
+          <div class="banner-flow" aria-hidden="true">
+            <svg viewBox="0 0 1000 240" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="banner-wave" x1="0" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stop-color="var(--nb-accent-2)" stop-opacity="0.42" />
+                  <stop offset="42%" stop-color="var(--nb-accent)" stop-opacity="0.22" />
+                  <stop offset="100%" stop-color="var(--nb-accent)" stop-opacity="0" />
+                </linearGradient>
+              </defs>
+              <path class="wave hint" vector-effect="non-scaling-stroke" d="M0 108C42 94 83 94 125 108C167 122 208 122 250 108C292 94 333 94 375 108C417 122 458 122 500 108C542 94 583 94 625 108C667 122 708 122 750 108C792 94 833 94 875 108C917 122 958 122 1000 108" />
+              <path class="wave streak" vector-effect="non-scaling-stroke" d="M0 108C42 94 83 94 125 108C167 122 208 122 250 108C292 94 333 94 375 108C417 122 458 122 500 108C542 94 583 94 625 108C667 122 708 122 750 108C792 94 833 94 875 108C917 122 958 122 1000 108" />
+              <path class="wave hint" vector-effect="non-scaling-stroke" d="M0 148C42 160 83 160 125 148C167 136 208 136 250 148C292 160 333 160 375 148C417 136 458 136 500 148C542 160 583 160 625 148C667 136 708 136 750 148C792 160 833 160 875 148C917 136 958 136 1000 148" />
+              <path class="wave streak late" vector-effect="non-scaling-stroke" d="M0 148C42 160 83 160 125 148C167 136 208 136 250 148C292 160 333 160 375 148C417 136 458 136 500 148C542 160 583 160 625 148C667 136 708 136 750 148C792 160 833 160 875 148C917 136 958 136 1000 148" />
+            </svg>
+          </div>
           <div class="banner-copy">
-            <h1>用 AI，轻松创作<br /><span>属于你的短剧世界</span></h1>
-            <p>一站式 AI 短剧创作平台，支持图文、视频、数字人、智能剪辑与多种生成能力</p>
+            <span class="home-kicker">剧流 Studio · AI 短剧工作台</span>
+            <h1>用 AI 创作<br /><em>属于你的短剧世界</em></h1>
+            <p>一站式完成剧本、角色、分镜、影像、配音与合成。模型自由接入，随时重做其中任意一步。</p>
             <div class="banner-actions">
-              <button type="button" class="go" :disabled="creating" @click="quickCreate">开始创作 →</button>
+              <button type="button" class="go" :disabled="creating" @click="quickCreate">开始创作</button>
               <button type="button" class="open" @click="openLatestProject">打开项目</button>
+            </div>
+            <div class="hero-meta">
+              <div><strong>{{ project.allProjects.length }}</strong><span>本地项目</span></div>
+              <div><strong>{{ totalShots }}</strong><span>已产出分镜</span></div>
+              <div><strong>{{ doneCount }}</strong><span>已完成项目</span></div>
             </div>
           </div>
           <img class="banner-art" src="/home-banner.png" alt="" />
@@ -488,7 +511,7 @@ async function moveSelectedLibrary() {
           <h2><i /> 快速入口</h2>
           <div class="quick-row">
             <button type="button" @click="quickCreate">
-              <span class="q-icon violet"><HomeIcon name="image" :size="18" /></span>
+              <span class="q-icon violet"><HomeIcon name="video" :size="18" /></span>
               <span><strong>AI 生成视频</strong><em>文生视频 / 图生视频</em></span>
               <b>→</b>
             </button>
@@ -657,121 +680,83 @@ async function moveSelectedLibrary() {
       </section>
 
       <GalleryTemplates v-if="nav === 'templates'" />
-      <div v-if="nav === 'library'" class="lib-layout">
-        <div class="lib-top">
-          <h2>素材库</h2>
+      <div v-if="nav === 'library'" class="lib-page">
+        <header class="lib-top">
+          <div>
+            <span class="home-kicker">资源库 · 全部项目</span>
+            <h2>所有素材，都在这里</h2>
+            <p>跨项目的画面、视频和音频。勾选后可以批量下载、转移到文件夹，或一起删除。</p>
+          </div>
           <button type="button" class="lib-upload" :disabled="libUploading" @click="uploadLibraryImages">
             <HomeIcon name="upload" :size="16" />
-            {{ libUploading ? '上传中…' : `上传到${currentFolderLabel}` }}
+            {{ libUploading ? '上传中…' : '导入素材' }}
+          </button>
+        </header>
+        <div class="lib-tabs" role="tablist">
+          <button
+            v-for="tab in libTabs"
+            :key="tab.id"
+            type="button"
+            role="tab"
+            class="lib-tab"
+            :class="{ on: libKind === tab.id }"
+            :aria-selected="libKind === tab.id"
+            @click="setLibKind(tab.id)"
+          >
+            {{ tab.label }} <span class="cnt">{{ tab.count }}</span>
           </button>
         </div>
-        <aside class="lib-side">
-          <div class="lib-side-title">分类</div>
-          <button
-            type="button"
-            class="lib-folder"
-            :class="{ on: libFolderId === LIBRARY_PUBLIC_ID }"
-            @click="selectLibFolder(LIBRARY_PUBLIC_ID)"
-          >
-            <HomeIcon name="library" :size="16" />
-            <span>公共资产</span>
-            <em>{{ library.folderCount(LIBRARY_PUBLIC_ID) }}</em>
-          </button>
-          <div v-for="f in library.folders" :key="f.id" class="lib-folder-row">
-            <button
-              v-if="renamingId !== f.id"
-              type="button"
-              class="lib-folder"
-              :class="{ on: libFolderId === f.id }"
-              @click="selectLibFolder(f.id)"
-            >
-              <span>{{ f.name }}</span>
-              <em>{{ library.folderCount(f.id) }}</em>
-            </button>
-            <form v-else class="lib-rename" @submit.prevent="commitRenameFolder">
-              <input v-model="renameDraft" maxlength="24" @keydown.esc="renamingId = ''" />
-              <button type="submit">好</button>
-            </form>
-            <button
-              type="button"
-              class="lib-folder-act"
-              title="重命名"
-              @click="startRenameFolder(f.id, f.name)"
-            >
-              <HomeIcon name="edit" :size="14" />
-            </button>
-            <button
-              type="button"
-              class="lib-folder-act danger"
-              title="删除文件夹"
-              @click="removeLibFolder(f.id, f.name)"
-            >
-              <HomeIcon name="trash" :size="14" />
-            </button>
-          </div>
-          <form class="lib-new-folder" @submit.prevent="createLibFolder">
-            <input
-              v-model="folderDraft"
-              maxlength="24"
-              placeholder="新文件夹名称"
-              :disabled="creatingFolder"
-            />
-            <button type="submit" :disabled="creatingFolder || !folderDraft.trim()">创建</button>
-          </form>
-        </aside>
-
-        <div class="lib-main">
-          <p class="lib-hint">
-            公共资产可转移到自己的文件夹分类。选图时也能从公共资产或这些文件夹里挑。
-          </p>
-          <div v-if="libSelected.size" class="lib-move-bar">
-            <span>已选 {{ libSelected.size }} 张</span>
-            <select v-model="libMoveTarget">
+        <div v-if="libSelected.size" class="lib-batch">
+          <span class="n">已选择 {{ libSelected.size }} 项</span>
+          <span v-if="selectedLibraryNames" class="d">{{ selectedLibraryNames }}</span>
+          <div class="lib-batch-actions">
+            <select v-model="libMoveTarget" aria-label="移动到文件夹">
               <option :value="LIBRARY_PUBLIC_ID">公共资产</option>
               <option v-for="f in library.folders" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
-            <button type="button" @click="moveSelectedLibrary">转移</button>
-            <button type="button" class="ghost" @click="clearLibSelected">取消</button>
+            <button type="button" class="outline" @click="moveSelectedLibrary">移动到文件夹</button>
+            <button type="button" class="outline" @click="downloadSelectedLibrary">
+              <HomeIcon name="download" :size="14" />
+              批量下载
+            </button>
+            <button type="button" class="danger" @click="removeSelectedLibrary">
+              <HomeIcon name="trash" :size="14" />
+              删除
+            </button>
+            <button type="button" class="ghost" @click="clearLibSelected">取消选择</button>
           </div>
-          <EmptyState
-            v-if="visibleLibraryAssets.length === 0"
-            :title="
-              library.all.length === 0 && libFolderId === LIBRARY_PUBLIC_ID
-                ? '资产库还是空的'
-                : `${currentFolderLabel}还是空的`
-            "
-            :description="
-              library.all.length === 0 && libFolderId === LIBRARY_PUBLIC_ID
-                ? '上传图片，或在项目画布里把生成图加入公共库'
-                : '上传到这里，或从公共资产勾选后点「转移」'
-            "
+        </div>
+        <EmptyState
+          v-if="visibleLibraryAssets.length === 0"
+          :title="library.all.length === 0 ? '资产库还是空的' : '这个分类还是空的'"
+          :description="library.all.length === 0 ? '上传图片，或在项目画布里把生成图加入公共库' : '换一个标签，或导入新的素材'"
+        >
+          <template #icon>
+            <HomeIcon :name="libKind === 'video' ? 'video' : libKind === 'audio' ? 'mic' : 'image'" :size="44" />
+          </template>
+        </EmptyState>
+        <div v-else class="lib-grid">
+          <div
+            v-for="a in visibleLibraryAssets"
+            :key="a.id"
+            class="lib-card"
+            :class="{ picked: libSelected.has(a.id) }"
           >
-            <template #icon>
-              <HomeIcon :name="library.all.length === 0 ? 'image' : 'folder'" :size="44" />
-            </template>
-          </EmptyState>
-          <div v-else class="lib-grid">
-            <div
-              v-for="a in visibleLibraryAssets"
-              :key="a.id"
-              class="lib-card"
-              :class="{ picked: libSelected.has(a.id) }"
-            >
-              <label class="lib-check">
-                <input
-                  type="checkbox"
-                  :checked="libSelected.has(a.id)"
-                  @change="toggleLibSelect(a.id)"
-                />
-              </label>
-              <button type="button" class="lib-thumb" :aria-label="`查看大图：${a.filename}`" @click="libUrls[a.id] && openLightbox(libUrls[a.id], 'image')">
-                <img v-if="libUrls[a.id]" :src="libUrls[a.id]" alt="" />
-                <span v-else><HomeIcon name="image" :size="30" /></span>
-              </button>
-              <div class="lib-meta">
-                <span>{{ a.filename }}</span>
-                <button type="button" title="删除" @click="removeLibraryItem(a.id)"><HomeIcon name="trash" :size="14" /></button>
-              </div>
+            <label class="lib-check">
+              <input
+                type="checkbox"
+                :checked="libSelected.has(a.id)"
+                @change="toggleLibSelect(a.id)"
+              />
+            </label>
+            <button type="button" class="lib-thumb" :aria-label="`查看：${a.filename}`" @click="openLibraryItem(a)">
+              <img v-if="a.kind === 'image' && libUrls[a.id]" :src="libUrls[a.id]" alt="" />
+              <video v-else-if="a.kind === 'video' && libUrls[a.id]" :src="libUrls[a.id]" muted />
+              <span v-else><HomeIcon :name="a.kind === 'audio' ? 'mic' : a.kind === 'video' ? 'video' : 'image'" :size="30" /></span>
+            </button>
+            <div class="lib-meta">
+              <span>{{ a.filename }}</span>
+              <button type="button" title="删除" @click="removeLibraryItem(a.id)"><HomeIcon name="trash" :size="14" /></button>
             </div>
           </div>
         </div>
@@ -786,101 +771,141 @@ async function moveSelectedLibrary() {
   height: 100%;
   display: flex;
   min-height: 0;
-  background:
-    radial-gradient(900px 480px at 78% 8%, rgba(98, 54, 196, 0.28), transparent 60%),
-    #0c0b14;
-  color: #f4f1ff;
+  background: var(--nb-bg-0);
+  color: var(--nb-t1);
 }
 .sidenav {
-  width: 228px;
-  flex: 0 0 228px;
+  width: 64px;
+  flex: 0 0 64px;
   display: flex;
   flex-direction: column;
-  padding: 22px 16px 18px;
-  background: linear-gradient(180deg, #141226 0%, #100e1c 100%);
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  align-items: center;
+  padding: 16px 0 14px;
+  background: var(--nb-bg-1);
+  border-right: 1px solid var(--nb-line-2);
+  overflow: visible;
+  z-index: 6;
 }
 .brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 8px 22px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 12px;
+  padding: 0;
   background: none;
   border: 0;
   color: inherit;
-  text-align: left;
   cursor: pointer;
 }
 .brand-mark {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   object-fit: contain;
-}
-.brand strong {
-  display: block;
-  font-size: 15px;
-  letter-spacing: -0.02em;
-}
-.brand em {
-  display: block;
-  margin-top: 2px;
-  font-style: normal;
-  font-size: 11px;
-  color: #8d88a8;
 }
 .side-links {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 4px;
+  width: 100%;
+}
+.side-links button,
+.side-links .tutorial-link,
+.side-foot a,
+.brand {
+  position: relative;
 }
 .side-links button,
 .side-links .tutorial-link {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 42px;
-  padding: 0 14px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
   border: 0;
-  border-radius: 12px;
+  border-radius: 8px;
   background: transparent;
-  color: #c8c3dc;
-  font-size: 14px;
+  color: var(--nb-t3);
   cursor: pointer;
-  text-align: left;
+  text-decoration: none;
+}
+.nav-label {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  z-index: 8;
+  transform: translateY(-50%);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--nb-line-3);
+  background: var(--nb-bg-3);
+  color: var(--nb-t1);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.brand:hover .nav-label,
+.side-links button:hover .nav-label,
+.side-links .tutorial-link:hover .nav-label,
+.side-foot a:hover .nav-label {
+  opacity: 1;
 }
 .side-links button.on {
-  color: white;
-  background: linear-gradient(90deg, #6d4dff 0%, #7a5cff 100%);
-  box-shadow: 0 8px 20px rgba(109, 77, 255, 0.35);
+  color: var(--nb-accent);
+  background: var(--nb-accent-soft);
 }
-.side-links button:hover:not(.on) {
-  background: rgba(255, 255, 255, 0.04);
+.side-links button:hover:not(.on),
+.side-links .tutorial-link:hover {
+  background: var(--nb-bg-2);
+  color: var(--nb-t1);
 }
 .side-foot {
   margin-top: auto;
-  padding: 14px 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-.side-kicker {
-  font-size: 13px;
-  font-weight: 650;
-}
-.side-foot a {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  color: #b9a6ff;
-  font-size: 13px;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+}
+.side-foot :deep(.nb-theme),
+.side-foot a {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--nb-line-2);
+  border-radius: 8px;
+  background: var(--nb-bg-2);
+  color: var(--nb-t2);
   text-decoration: none;
+}
+.side-foot a:hover,
+.side-foot :deep(.nb-theme:hover) {
+  background: var(--nb-bg-3);
+  color: var(--nb-t1);
+  border-color: var(--nb-line-accent);
 }
 .stage {
   flex: 1;
   min-width: 0;
   overflow: auto;
-  padding: 18px 28px 40px;
+  padding: 28px 36px 48px;
+  background:
+    radial-gradient(900px 480px at 18% -8%, var(--nb-accent-wash), transparent 62%),
+    radial-gradient(700px 420px at 88% 4%, var(--nb-ai-soft), transparent 60%),
+    linear-gradient(var(--nb-grid-line-2) 1px, transparent 1px),
+    linear-gradient(90deg, var(--nb-grid-line-2) 1px, transparent 1px),
+    var(--nb-bg-0);
+  background-size: auto, auto, 32px 32px, 32px 32px, auto;
+  background-repeat: no-repeat, no-repeat, repeat, repeat, no-repeat;
 }
 .stage-bar {
   position: relative;
@@ -901,31 +926,32 @@ async function moveSelectedLibrary() {
   place-items: center;
   cursor: pointer;
 }
-.icon-round:hover { border-color: rgba(167, 139, 250, 0.6); }
+.icon-round:hover { border-color: var(--nb-line-accent); color: var(--nb-accent); }
+.home-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nb-t3);
+}
+.home-kicker::before {
+  content: "";
+  width: 14px;
+  height: 1px;
+  background: var(--nb-line-accent);
+}
 .banner {
   position: relative;
-  min-height: 280px;
-  margin: -18px -28px 4px;
-  padding: 36px 56px 20px;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
-}
-.banner::before {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  inset: 0 0 -8px;
-  pointer-events: none;
-  background:
-    radial-gradient(480px 260px at 84% 42%, rgba(255, 166, 77, 0.34), transparent 68%),
-    radial-gradient(680px 360px at 72% 18%, rgba(132, 96, 255, 0.46), transparent 70%),
-    radial-gradient(520px 280px at 8% 80%, rgba(64, 28, 140, 0.28), transparent 72%),
-    linear-gradient(102deg, rgba(18, 12, 36, 0.2) 0%, rgba(36, 18, 78, 0.72) 36%, rgba(62, 26, 120, 0.94) 68%, rgba(78, 34, 132, 0.96) 100%);
-  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 46%, transparent 100%);
-  mask-image: linear-gradient(180deg, #000 0%, #000 46%, transparent 100%);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(336px, 552px);
+  gap: 36px;
+  align-items: center;
+  min-height: 384px;
+  margin: 0 0 28px;
+  padding: 12px 0 8px;
 }
 .banner-stars {
   position: absolute;
@@ -983,62 +1009,98 @@ async function moveSelectedLibrary() {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 0.9; }
 }
+.banner-flow {
+  position: absolute;
+  z-index: 0;
+  inset: 8% 4% 6% 30%;
+  overflow: hidden;
+  pointer-events: none;
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 86%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 86%, transparent);
+}
+.banner-flow svg { width: 100%; height: 100%; display: block; }
+.banner-flow .wave {
+  fill: none;
+  stroke: url(#banner-wave);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+.banner-flow .wave.hint { opacity: 0.28; }
+.banner-flow .wave.streak {
+  stroke-width: 1.6;
+  opacity: 0.72;
+  stroke-dasharray: 56 1100;
+  filter: blur(0.4px);
+  animation: banner-wave 1.7s linear infinite;
+}
+.banner-flow .wave.streak.late { animation-duration: 2.3s; animation-delay: -0.8s; }
+@keyframes banner-wave {
+  to { stroke-dashoffset: -1156; }
+}
 @media (prefers-reduced-motion: reduce) {
   .banner-stars::before,
-  .banner-stars::after { animation: none; opacity: 0.45; }
+  .banner-stars::after,
+  .banner-flow .wave { animation: none; }
+  .banner-flow .wave.streak { stroke-dasharray: none; opacity: 0.2; }
 }
-.banner-copy { position: relative; z-index: 2; max-width: min(540px, 54%); }
+.banner-copy { position: relative; z-index: 2; min-width: 0; }
 .banner h1 {
-  margin: 0;
-  font-size: 40px;
-  line-height: 1.25;
-  font-weight: 750;
+  margin: 12px 0 10px;
+  font-size: 42px;
+  line-height: 1.12;
+  font-weight: 700;
   letter-spacing: -0.03em;
 }
-.banner h1 span {
-  background: linear-gradient(90deg, #d7cbff 0%, #8b78ff 55%, #6d5efc 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
+.banner h1 em { font-style: normal; color: var(--nb-t4); }
 .banner p {
-  margin: 14px 0 22px;
-  max-width: 560px;
-  color: #c9c3de;
+  margin: 0;
+  max-width: 460px;
+  color: var(--nb-t3);
   font-size: 14px;
   line-height: 1.7;
-  white-space: nowrap;
 }
-.banner-actions { display: flex; gap: 12px; }
+.banner-actions { display: flex; gap: 12px; margin-top: 22px; }
 .banner-actions button {
-  height: 42px;
+  height: 40px;
   padding: 0 18px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-size: 14px;
   cursor: pointer;
 }
 .banner-actions .go {
   border: 0;
-  color: white;
-  background: linear-gradient(90deg, #6a4dff, #7d5cff);
-  box-shadow: 0 10px 24px rgba(106, 77, 255, 0.4);
+  color: var(--nb-accent-ink);
+  background: var(--nb-accent);
 }
+.banner-actions .go:hover:not(:disabled) { background: #67e4fb; }
 .banner-actions .go:disabled { opacity: 0.6; cursor: default; }
 .banner-actions .open {
-  color: #efeaff;
-  background: rgba(12, 10, 24, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--nb-t1);
+  background: transparent;
+  border: 1px solid var(--nb-line-3);
 }
+.banner-actions .open:hover { border-color: var(--nb-line-accent); color: var(--nb-accent); }
+.hero-meta {
+  display: flex;
+  gap: 28px;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--nb-line-1);
+}
+.hero-meta strong {
+  display: block;
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--nb-t1);
+}
+.hero-meta span { font-size: 12px; color: var(--nb-t4); }
 .banner-art {
-  position: absolute;
+  position: relative;
   z-index: 1;
-  top: 14px;
-  right: 24px;
-  width: auto;
-  height: calc(100% - 18px);
-  max-width: none;
+  width: 100%;
+  height: 384px;
   object-fit: contain;
-  object-position: right center;
+  object-position: center;
   pointer-events: none;
   filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.28));
 }
@@ -1067,22 +1129,22 @@ async function moveSelectedLibrary() {
   align-items: center;
   gap: 10px;
   min-height: 74px;
-  padding: 12px 14px;
+  padding: 14px;
   text-align: left;
   color: inherit;
   cursor: pointer;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: linear-gradient(180deg, rgba(36, 32, 58, 0.96), rgba(24, 21, 42, 0.96));
+  border-radius: 12px;
+  border: 1px solid var(--nb-line-2);
+  background: var(--nb-bg-2);
 }
-.quick-row button:hover { border-color: rgba(154, 132, 255, 0.45); }
-.quick-row strong, .tools strong { display: block; font-size: 14px; }
+.quick-row button:hover { border-color: var(--nb-line-accent); transform: translateY(-2px); }
+.quick-row strong, .tools strong { display: block; font-size: 13px; color: var(--nb-t1); }
 .quick-row em, .tools em {
   display: block;
   margin-top: 3px;
   font-style: normal;
-  font-size: 12px;
-  color: #958eae;
+  font-size: 11px;
+  color: var(--nb-t3);
 }
 .quick-row b { margin-left: auto; color: #7d7696; font-weight: 500; }
 .q-icon {
@@ -1093,11 +1155,11 @@ async function moveSelectedLibrary() {
   place-items: center;
   flex: 0 0 auto;
 }
-.q-icon.violet { background: rgba(124, 92, 255, 0.18); color: #b7a6ff; }
-.q-icon.blue { background: rgba(72, 149, 239, 0.16); color: #8ec2ff; }
-.q-icon.green { background: rgba(52, 199, 123, 0.16); color: #7de7b2; }
-.q-icon.indigo { background: rgba(99, 102, 241, 0.16); color: #a5b4fc; }
-.q-icon.amber { background: rgba(245, 166, 35, 0.16); color: #f6c56b; }
+.q-icon.violet { background: rgba(255, 180, 84, 0.13); color: var(--nb-t-video, #ffb454); }
+.q-icon.blue { background: rgba(255, 143, 168, 0.13); color: var(--nb-t-audio, #ff8fa8); }
+.q-icon.green { background: rgba(52, 216, 168, 0.13); color: var(--nb-t-image, #34d8a8); }
+.q-icon.indigo { background: rgba(125, 140, 255, 0.13); color: var(--nb-t-script, #7d8cff); }
+.q-icon.amber { background: rgba(183, 139, 255, 0.13); color: var(--nb-t-compose, #b78bff); }
 .projects { margin-top: 26px; }
 .proj-head {
   display: flex;
@@ -1110,23 +1172,24 @@ async function moveSelectedLibrary() {
 .filters button, .view-toggle button {
   height: 32px;
   padding: 0 12px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
-  color: #b7b1cb;
+  color: var(--nb-t3);
   cursor: pointer;
   font-size: 13px;
 }
 .filters button.on {
-  color: white;
-  background: rgba(109, 77, 255, 0.22);
-  border-color: rgba(141, 116, 255, 0.45);
+  color: var(--nb-accent);
+  background: var(--nb-accent-soft);
+  border-color: var(--nb-line-accent);
 }
 .view-toggle {
   display: flex;
   padding: 3px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--nb-fill-1);
+  border: 1px solid var(--nb-line-1);
 }
 .view-toggle button {
   width: 30px;
@@ -1134,8 +1197,9 @@ async function moveSelectedLibrary() {
   display: grid;
   place-items: center;
   border-radius: 8px;
+  color: var(--nb-t3);
 }
-.view-toggle button.on { background: rgba(255, 255, 255, 0.08); color: white; }
+.view-toggle button.on { background: var(--nb-bg-3); color: var(--nb-t1); }
 .filter {
   margin-left: auto;
   position: relative;
@@ -1149,7 +1213,7 @@ async function moveSelectedLibrary() {
   top: 50%;
   z-index: 1;
   transform: translateY(-50%);
-  color: #8d88a8;
+  color: var(--nb-t4);
   pointer-events: none;
 }
 .filter .search {
@@ -1158,10 +1222,10 @@ async function moveSelectedLibrary() {
   height: 36px;
   padding: 0 14px 0 34px;
   line-height: 36px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: white;
+  border-radius: 8px;
+  border: 1px solid var(--nb-line-2);
+  background: var(--nb-bg-inset);
+  color: var(--nb-t1);
   outline: none;
 }
 .create-card {
@@ -1171,28 +1235,30 @@ async function moveSelectedLibrary() {
   justify-content: center;
   gap: 8px;
   min-height: 228px;
-  border-radius: 16px;
-  border: 1px dashed rgba(154, 140, 255, 0.28);
-  background: rgba(22, 18, 40, 0.72);
-  color: #efeaff;
+  border-radius: 12px;
+  border: 1px dashed var(--nb-line-3);
+  background: var(--nb-fill-1);
+  color: var(--nb-t2);
   cursor: pointer;
 }
-.create-card em { font-style: normal; color: #8d88a8; font-size: 12px; }
+.create-card:hover { border-color: var(--nb-line-accent); color: var(--nb-accent); background: var(--nb-accent-soft); }
+.create-card em { font-style: normal; color: var(--nb-t4); font-size: 12px; }
 .create-mark {
-  width: 54px;
-  height: 54px;
-  border-radius: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
-  background: rgba(109, 77, 255, 0.16);
-  color: #c4b6ff;
+  border: 1px solid var(--nb-line-3);
+  background: transparent;
+  color: inherit;
 }
 .create-go {
   margin-top: 6px;
-  color: #b7a6ff;
+  color: var(--nb-accent);
   font-size: 13px;
 }
-.filter-empty { grid-column: 1 / -1; color: #8d88a8; font-size: 13px; }
+.filter-empty { grid-column: 1 / -1; color: var(--nb-t4); font-size: 13px; }
 .shot-pill, .phase {
   display: inline-flex;
   align-items: center;
@@ -1200,26 +1266,38 @@ async function moveSelectedLibrary() {
   padding: 0 8px;
   border-radius: 999px;
   font-size: 11px;
-  background: rgba(8, 6, 18, 0.62);
-  color: white;
+  background: rgba(6, 8, 11, 0.72);
+  color: #eef4fa;
 }
-.phase.active { background: rgba(59, 130, 246, 0.9); }
-.phase.done { background: rgba(34, 160, 98, 0.92); }
+.phase.active { background: var(--nb-accent-soft); color: var(--nb-accent); }
+.phase.done { background: var(--nb-success-soft, rgba(61, 217, 160, 0.14)); color: var(--nb-success, #3dd9a0); }
 .proj-open { display: none; }
 .grid.list { grid-template-columns: 1fr; }
 .grid.list .create-card { min-height: 84px; flex-direction: row; }
-.lib-top { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; }
+.lib-top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 0 18px;
+}
+.lib-top h2 { margin: 8px 0 6px; font-size: 28px; letter-spacing: -0.03em; }
+.lib-top p { margin: 0; max-width: 620px; color: var(--nb-t3); font-size: 13px; line-height: 1.6; }
 @media (max-width: 1100px) {
   .quick-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .banner { min-height: 420px; margin-top: -18px; padding-bottom: 200px; }
+  .banner { grid-template-columns: 1fr; min-height: 0; }
+  .banner-flow { display: none; }
+  .banner-art { height: 264px; }
   .banner p { white-space: normal; }
-  .banner-art { height: 58%; right: 8px; bottom: 0; }
+  .banner-art { height: 70%; right: 8px; bottom: 0; }
 }
 @media (max-width: 860px) {
   .home { flex-direction: column; }
-  .sidenav { width: auto; flex-basis: auto; border-right: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
-  .side-links { flex-direction: row; overflow: auto; }
-  .side-foot { display: none; }
+  .sidenav { width: auto; flex: none; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--nb-line-2); padding: 8px 12px; }
+  .side-links { flex-direction: row; }
+  .side-foot { flex-direction: row; width: auto; margin-top: 0; margin-left: auto; }
+  .brand { margin: 0 8px 0 0; }
+  .nav-label { left: 50%; top: calc(100% + 8px); transform: translateX(-50%); }
   .proj-head { flex-wrap: wrap; }
   .filter { margin-left: 0; }
 }
@@ -1464,24 +1542,27 @@ async function moveSelectedLibrary() {
 .proj {
   cursor: pointer;
   overflow: hidden;
-  border-radius: 16px !important;
+  border-radius: var(--radius-lg) !important;
   box-shadow: none !important;
-  border: 1px solid rgba(255, 255, 255, 0.06) !important;
-  background: #17142a !important;
+  border: 1px solid var(--nb-line-2) !important;
+  background: var(--nb-bg-2) !important;
+  color: var(--nb-t1);
   transition:
     border-color 0.18s,
     transform 0.18s,
+    box-shadow 0.18s,
     background 0.18s !important;
 }
 .proj:hover {
   transform: translateY(-3px) !important;
-  border-color: rgba(126, 180, 255, 0.4) !important;
-  background: #171921 !important;
+  border-color: var(--nb-line-3) !important;
+  background: var(--nb-bg-2) !important;
+  box-shadow: var(--nb-e3) !important;
 }
 .proj-thumb {
   position: relative;
   aspect-ratio: 16/9;
-  background: #191b22;
+  background: var(--nb-bg-inset);
   overflow: hidden;
 }
 .proj-cover {
@@ -1499,10 +1580,7 @@ async function moveSelectedLibrary() {
 .proj-thumb-grad {
   position: absolute;
   inset: 0;
-  opacity: 0.55;
-  background:
-    radial-gradient(120% 100% at 30% 0%, rgba(126, 180, 255, 0.22), transparent 60%),
-    linear-gradient(135deg, #23262f 0%, #171921 100%);
+  background: var(--nb-bg-inset);
 }
 .proj-thumb-overlay {
   position: absolute;
@@ -1512,8 +1590,8 @@ async function moveSelectedLibrary() {
   justify-content: center;
 }
 .proj-thumb-icon {
-  color: var(--color-text-4);
-  opacity: 0.5;
+  color: var(--nb-t4);
+  opacity: 0.85;
 }
 .proj-open {
   display: none;
@@ -1525,7 +1603,7 @@ async function moveSelectedLibrary() {
   gap: 8px;
   padding: 12px 14px;
   opacity: 0;
-  background: linear-gradient(to top, rgba(10, 11, 15, 0.72), transparent 58%);
+  background: linear-gradient(to top, rgba(6, 8, 11, 0.72), transparent 58%);
   transition: opacity 0.2s;
 }
 .proj:hover .proj-open {
@@ -1536,28 +1614,28 @@ async function moveSelectedLibrary() {
   align-items: center;
   gap: 5px;
   padding: 4px 11px;
-  border: 1px solid var(--color-border);
+  border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 99px;
-  background: rgba(16, 18, 24, 0.55);
+  background: rgba(6, 8, 11, 0.55);
   backdrop-filter: blur(4px);
-  color: var(--color-text-2);
+  color: #e9f0f9;
   font-size: 11px;
   letter-spacing: 0.04em;
   cursor: pointer;
   transition: all 0.15s;
 }
 .open-btn:hover {
-  border-color: rgba(126, 180, 255, 0.6);
-  background: rgba(126, 180, 255, 0.16);
-  color: #eaf0ff;
+  border-color: var(--nb-line-accent);
+  background: var(--nb-accent-soft);
+  color: #e9f0f9;
 }
 .open-btn.primary {
-  border-color: rgba(126, 180, 255, 0.5);
-  background: rgba(126, 180, 255, 0.2);
-  color: #dce6ff;
+  border-color: var(--nb-line-accent);
+  background: var(--nb-accent-soft);
+  color: #e9f0f9;
 }
 .open-btn.primary:hover {
-  background: rgba(126, 180, 255, 0.3);
+  background: rgba(53, 214, 247, 0.22);
 }
 .proj-open em {
   font-style: normal;
@@ -1578,7 +1656,7 @@ async function moveSelectedLibrary() {
 .proj-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--color-text-1);
+  color: var(--nb-t1);
   margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
@@ -1586,7 +1664,7 @@ async function moveSelectedLibrary() {
 }
 .proj-topic {
   font-size: 12px;
-  color: var(--color-text-3);
+  color: var(--nb-t3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1599,7 +1677,7 @@ async function moveSelectedLibrary() {
 }
 .proj-date {
   font-size: 11px;
-  color: var(--color-text-4);
+  color: var(--nb-t4);
   font-variant-numeric: tabular-nums;
 }
 .proj-actions {
@@ -1614,19 +1692,19 @@ async function moveSelectedLibrary() {
   background: transparent;
   border-radius: 6px;
   opacity: 0.5;
-  color: var(--color-text-2);
+  color: var(--nb-t3);
   cursor: pointer;
   transition: all 0.15s;
 }
 .proj-del:hover {
   opacity: 1;
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
+  background: var(--nb-danger-soft);
+  color: var(--nb-danger);
 }
 .proj-folder:hover:not(:disabled) {
   opacity: 1;
-  background: rgba(126, 180, 255, 0.14);
-  color: #a9c8ff;
+  background: var(--nb-accent-soft);
+  color: var(--nb-accent);
 }
 .proj-folder:disabled {
   opacity: 0.2;
@@ -1985,201 +2063,145 @@ async function moveSelectedLibrary() {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--color-text-1);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.16s;
-}
-.lib-upload:hover:not(:disabled) {
-  border-color: rgba(126, 180, 255, 0.5);
-  background: rgba(126, 180, 255, 0.08);
-  color: #cfe0ff;
-}
-.lib-layout {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 20px;
-  align-items: start;
-}
-.lib-side {
-  position: sticky;
-  top: 12px;
-  padding: 12px;
-  background: #14161c;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 12px;
-}
-.lib-side-title {
-  font-size: 10px;
-  font-weight: 650;
-  color: var(--color-text-4);
-  letter-spacing: 0.08em;
-  margin-bottom: 10px;
-}
-.lib-folder-row {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 2px;
-  align-items: center;
-}
-.lib-folder {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  margin: 0 0 4px;
-  padding: 7px 8px;
+  height: 36px;
+  padding: 0 14px;
   border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--color-text-3);
+  border: 0;
+  background: var(--nb-accent);
+  color: var(--nb-accent-ink);
   font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.lib-folder span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.lib-folder em {
-  font-style: normal;
-  font-size: 11px;
-  color: var(--color-text-4);
-  font-variant-numeric: tabular-nums;
-}
-.lib-folder:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--color-text-2);
-}
-.lib-folder.on {
-  background: rgba(126, 180, 255, 0.12);
-  border-color: rgba(126, 180, 255, 0.32);
-  color: var(--color-text-1);
-}
-.lib-folder-act {
-  margin: 0 0 4px;
-  padding: 4px;
-  background: transparent;
-  border: none;
-  color: var(--color-text-4);
-  cursor: pointer;
-  display: inline-flex;
-}
-.lib-folder-act:hover {
-  color: var(--color-text-1);
-}
-.lib-folder-act.danger:hover {
-  color: var(--color-error);
-}
-.lib-rename,
-.lib-new-folder {
-  display: flex;
-  gap: 4px;
-  margin-top: 8px;
-}
-.lib-rename {
-  margin: 0 0 4px;
-}
-.lib-rename input,
-.lib-new-folder input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--color-text-1);
-  font-size: 12px;
-  outline: none;
-}
-.lib-rename input:focus,
-.lib-new-folder input:focus {
-  border-color: rgba(126, 180, 255, 0.55);
-}
-.lib-rename button,
-.lib-new-folder button {
-  margin: 0;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--color-text-1);
-  font-size: 12px;
-  cursor: pointer;
-}
-.lib-new-folder button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.lib-hint {
-  margin: 0 0 16px;
-  font-size: 12px;
-  color: var(--color-text-4);
-}
-.lib-move-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(126, 180, 255, 0.3);
-  background: rgba(126, 180, 255, 0.08);
-  font-size: 12px;
-  color: var(--color-text-2);
-}
-.lib-move-bar select {
-  padding: 4px 8px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #14161c;
-  color: var(--color-text-1);
-}
-.lib-move-bar button {
-  margin: 0;
-  padding: 4px 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: linear-gradient(135deg, #7eb4ff, #8f9dff);
-  color: #0b0d13;
   font-weight: 600;
   cursor: pointer;
 }
-.lib-move-bar button.ghost {
-  background: transparent;
-  border-color: rgba(255, 255, 255, 0.1);
-  color: var(--color-text-2);
-  font-weight: 400;
+.lib-upload:hover:not(:disabled) { background: #67e4fb; }
+.lib-upload:disabled { opacity: 0.6; cursor: default; }
+.lib-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
+.lib-tabs {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--nb-line-2);
+}
+.lib-tab {
+  position: relative;
+  margin: 0;
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+  color: var(--nb-t3);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.lib-tab:hover { color: var(--nb-t2); }
+.lib-tab.on { color: var(--nb-t1); }
+.lib-tab.on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--nb-accent);
+  box-shadow: 0 0 10px var(--nb-accent-glow);
+}
+.lib-tab .cnt {
+  margin-left: 5px;
+  color: var(--nb-t4);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.lib-batch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--nb-line-accent);
+  background: var(--nb-accent-soft);
+}
+.lib-batch .n {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--nb-accent);
+}
+.lib-batch .d {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--nb-t2);
+}
+.lib-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.lib-batch select {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--nb-line-2);
+  background: var(--nb-bg-3);
+  color: var(--nb-t1);
+  font-size: 12px;
+}
+.lib-batch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--nb-line-3);
+  background: transparent;
+  color: var(--nb-t1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lib-batch button.danger {
+  border-color: var(--nb-danger-line);
+  color: var(--nb-danger);
+}
+.lib-batch button.ghost {
+  border-color: transparent;
+  color: var(--nb-t3);
+}
+.lib-batch button:hover { background: rgba(255, 255, 255, 0.04); }
 .lib-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 248px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
   gap: 16px;
   padding-bottom: 32px;
 }
 .lib-card {
   position: relative;
-  background: #14161c;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--nb-bg-2);
+  border: 1px solid var(--nb-line-2);
   border-radius: 12px;
   overflow: hidden;
   transition: border-color 0.16s, transform 0.16s;
 }
 .lib-card:hover {
   transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: var(--nb-line-accent);
 }
 .lib-card.picked {
-  border-color: rgba(126, 180, 255, 0.8);
-  box-shadow: 0 0 0 1px rgba(126, 180, 255, 0.6);
+  border-color: var(--nb-accent);
+  box-shadow: 0 0 0 1px var(--nb-accent), 0 0 24px var(--nb-accent-glow);
 }
 .lib-check {
   position: absolute;
@@ -2202,14 +2224,16 @@ async function moveSelectedLibrary() {
   display: grid;
   place-items: center;
   width: 100%;
-  height: clamp(228px, 27vh, 320px);
+  aspect-ratio: 16 / 10;
+  height: auto;
   margin: 0;
   padding: 0;
   border: none;
-  background: #171921;
+  background: var(--nb-bg-inset);
   cursor: zoom-in;
 }
-.lib-thumb img {
+.lib-thumb img,
+.lib-thumb video {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -2259,11 +2283,6 @@ async function moveSelectedLibrary() {
   .search { width: 100%; }
   .mode-grid,
   .aspect-grid { grid-template-columns: 1fr 1fr; }
-  .lib-layout {
-    grid-template-columns: 1fr;
-  }
-  .lib-side {
-    position: static;
-  }
+  .lib-batch-actions { margin-left: 0; }
 }
 </style>

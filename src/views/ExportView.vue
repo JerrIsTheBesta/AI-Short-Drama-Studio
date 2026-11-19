@@ -202,6 +202,11 @@ async function doExport() {
       const blob = await assets.getBlob(shot.audioAssetId)
       if (blob) voiceoverAudioMap.set(clip.shotId, blob)
     }
+    for (const clip of workingTimeline) {
+      if (!clip.enabled || !clip.voiceAssetId) continue
+      const blob = await assets.getBlob(clip.voiceAssetId)
+      if (blob) voiceoverAudioMap.set(clip.id, blob)
+    }
     if (missingVo > 0 && !digitalHuman) {
       toast.warn(`${missingVo} 个分镜有口播文案但还没配音，视频这些段会没有人声。可回「字幕」页生成口播。`)
     }
