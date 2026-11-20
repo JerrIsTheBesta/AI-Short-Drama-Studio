@@ -26,6 +26,7 @@ import {
 } from './env'
 import type { AspectRatio, H3VideoGenMode, Shot, VideoGenModel, VideoResolution } from '@/types'
 import { normalizeVideoResolution, videoMaxSeconds } from '@/types'
+import { pickDocVideoResolution, videoResolutionApiValue, videoResolutionChoices } from '@/services/ai/modelOptions'
 import { abortableDelay, controlledSignal, isTimeoutAbort, throwIfAborted } from './abort'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { blobFromPath, desktop, isDesktop } from '@/services/desktop'
@@ -575,7 +576,7 @@ async function downloadGeneratedVideo(
 ): Promise<VideoGenOutput> {
   log(`→ 下载视频: ${videoUrl}`)
   onProgress?.('下载视频...')
-  const dl = controlledSignal(signal, 120_000)
+  const dl = controlledSignal(signal, 10 * 60_000)
   try {
     const { blob: rawBlob, mime: mimeHint } = await fetchVideoBytes(videoUrl, dl.signal)
     onProgress?.('校验视频文件...')
@@ -703,7 +704,7 @@ async function realWorkflowVideo(
           ? `提交首尾帧任务（${input.aspectRatio || resolution}）...`
           : `提交生成任务（${input.aspectRatio || resolution}，${dataUrls.length} 张参考图）...`
     )
-    const submitCtl = controlledSignal(input.signal, 120_000)
+    const submitCtl = controlledSignal(input.signal, 10 * 60_000)
     let submitResp: AutodlHttpResult
     try {
       submitResp = await autodlRequest(
@@ -714,12 +715,12 @@ async function realWorkflowVideo(
           body: JSON.stringify(body),
           signal: submitCtl.signal
         },
-        120_000
+        10 * 60_000
       )
     } catch (error: any) {
       if (isTimeoutAbort(error, submitCtl.signal)) {
         throw new Error(
-          `[video] 提交超时（120 秒），参考图约 ${referencePayloadMb.toFixed(1)} MB。请检查网络或减小参考图。`
+          `[video] 提交超时（10 分钟），参考图约 ${referencePayloadMb.toFixed(1)} MB。请检查网络或减小参考图。`
         )
       }
       throw new Error(
@@ -846,7 +847,7 @@ async function realWorkflowVideo(
   throw new Error(`[video] 生成超时（30 分钟未完成），task_id=${taskId}`)
 }
 
-/** 百炼 wan3.0-video-prime：单张首帧，多张走全能参考（reference_image），固定 720P */
+/** 百炼 wan3.0-video-prime：单张首帧，多张走全能参考（reference_image）。分辨率跟节点选择，文档档位是 480P / 720P / 1080P。 */
 async function realWanVideo(
   input: VideoGenInput,
   onProgress?: (msg: string) => void
@@ -882,11 +883,14 @@ async function realWanVideo(
   if (!prompt) throw new Error('[video] 请先写提示词')
   if (prompt.length > 20000) prompt = prompt.slice(0, 20000)
 
+  const wanChoices = videoResolutionChoices({ model: 'wan-prime' })
+  const wanTier = pickDocVideoResolution(input.videoResolution, wanChoices) || '720p'
+  const wanQuality = videoResolutionApiValue(wanTier)
   const body = {
     model: WAN_PRIME_MODEL,
     input: { prompt, media },
     parameters: {
-      resolution: '720P',
+      resolution: wanQuality,
       ratio: wanRatio(input.aspectRatio),
       duration: targetDuration,
       prompt_extend: true,
@@ -896,9 +900,9 @@ async function realWanVideo(
   }
 
   const modeLabel = media[0]?.type === 'first_frame' ? '首帧' : `全能参考 ${media.length} 张`
-  onProgress?.(`提交万相任务（720P，${modeLabel}，${targetDuration}s）...`)
+  onProgress?.(`提交万相任务（${wanQuality}，${modeLabel}，${targetDuration}s）...`)
   const auth = `Bearer ${apiKey}`
-  const submitCtl = controlledSignal(input.signal, 120_000)
+  const submitCtl = controlledSignal(input.signal, 10 * 60_000)
   let submitResp: AutodlHttpResult
   try {
     submitResp = await dashscopeRequest(
@@ -910,11 +914,11 @@ async function realWanVideo(
         body: JSON.stringify(body),
         signal: submitCtl.signal
       },
-      120_000
+      10 * 60_000
     )
   } catch (error: any) {
     if (isTimeoutAbort(error, submitCtl.signal)) {
-      throw new Error('[video] 万相提交超时（120 秒），请检查网络或减小参考图')
+      throw new Error('[video] 万相提交超时（10 分钟），请检查网络或减小参考图')
     }
     throw new Error(`[video] 无法连接百炼：${error?.message || String(error)}`)
   } finally {
@@ -1119,6 +1123,11 @@ async function realHttpCustomVideo(
     throw new Error('[video] APIMart 需要在这条视频接入的工作流 ID 里填写模型名，例如 MiniMax-H3。')
   }
   const prompt = buildPrompt(input)
+  const resolutionChoices = videoResolutionChoices({
+    model: input.videoModel,
+    profile: { name: cfg.name, workflowId: cfg.workflowId, options: cfg.options }
+  })
+  const pickedResolution = pickDocVideoResolution(input.videoResolution, resolutionChoices)
   onProgress?.('自定义 HTTP 出视频…')
   const images: string[] = []
   if (input.imageBlob) images.push(await blobToDataUrl(input.imageBlob))
@@ -1140,6 +1149,7 @@ async function realHttpCustomVideo(
       aspect_ratio: input.aspectRatio && String(input.aspectRatio) !== 'auto' ? input.aspectRatio : '16:9',
       width: input.width,
       height: input.height,
+      ...(pickedResolution ? { resolution: videoResolutionApiValue(pickedResolution) } : {}),
       ...(typeof input.generateAudio === 'boolean'
         ? { [cfg.options?.audioField || 'audio']: input.generateAudio }
         : {})
@@ -1204,7 +1214,7 @@ async function realZealmanVideo(
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: submitBody,
         signal: input.signal
-      }, 180_000)
+      }, 10 * 60_000)
     let finalSubmitUrl = submitUrl
     let response = await postSubmit(finalSubmitUrl)
     let text = await response.text()

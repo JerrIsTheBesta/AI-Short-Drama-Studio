@@ -1,5 +1,5 @@
 import { blobToChatImageUrl, callLLM, getAIMode } from './client'
-import { getVisionConfig } from './runtime'
+import { getVisionConfig, visionCallsEnabled } from './runtime'
 import type { Subject } from '@/types'
 import type { VideoPromptStyle } from '@/utils/shotPrompt'
 import { parseJsonRobust } from '@/utils/jsonRepair'
@@ -21,7 +21,7 @@ export async function h3IdentityLockFromFrame(opts: {
   promptStyle?: VideoPromptStyle
 }): Promise<string> {
   const style = opts.promptStyle ?? 'scene-narrative'
-  if (getAIMode() === 'mock') return fallbackLock(style)
+  if (getAIMode() === 'mock' || !visionCallsEnabled()) return fallbackLock(style)
 
   const roster = (opts.subjects || [])
     .map((s, i) => `${i + 1}. ${s.name}${s.role ? `（${s.role}）` : ''}：${(s.description || '').slice(0, 280)}`)

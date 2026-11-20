@@ -903,7 +903,7 @@ app.whenReady().then(async () => {
       throw new Error('只允许请求百炼视频 API')
     }
     const method = String(opts?.method || 'GET').toUpperCase()
-    const timeoutMs = Math.min(180000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const timeoutMs = Math.min(600000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {

@@ -16,10 +16,9 @@ import { pickPlayMarkdownFile } from '@/utils/pickPlayFile'
 import { friendlyAiError, shouldToastAiError } from '@/services/ai/abort'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
-import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
-import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
-import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
+import VideoSettingsPopover from '@/components/canvas/VideoSettingsPopover.vue'
+import { pickDocImageResolution, pickDocVideoResolution, videoResolutionChoices, type DocImageResolution } from '@/services/ai/modelOptions'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import TtsModelSelect from '@/components/settings/TtsModelSelect.vue'
@@ -38,7 +37,7 @@ import {
 import { VISUAL_STYLE_LABEL } from '@/utils/visualStyle'
 import { resolvedCanvasReferenceAssetIds } from '@/services/canvas/references'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
-import { normalizeH3GenMode, normalizeVideoGenModel, normalizeVideoResolution, videoAllows1080p, videoMaxSeconds, videoMinSeconds, type AspectRatio, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VideoResolution, type VisualStyle } from '@/types'
+import { normalizeH3GenMode, normalizeVideoGenModel, videoDurationOptions, videoMaxSeconds, videoMinSeconds, type AspectRatio, type CanvasNode, type H3VideoGenMode, type ID, type ShotAudioMode, type VideoGenModel, type VideoResolution, type VisualStyle } from '@/types'
 
 const props = defineProps<{
   node: CanvasNode | null
@@ -289,8 +288,18 @@ const videoModel = computed({
 function onSelectVideoProfile(profileId: string) {
   if (props.node) applyShotVideoProfile(props.node.id, profileId)
 }
+const resolutionChoices = computed(() =>
+  videoResolutionChoices({
+    model: videoModel.value,
+    profile: videoModel.value === 'wan-prime' ? null : docVideoProfile.value
+  })
+)
 const videoResolution = computed({
-  get: () => normalizeVideoResolution(props.node?.data.videoResolution, videoModel.value),
+  get: () => {
+    const choices = resolutionChoices.value
+    if (choices.length) return pickDocVideoResolution(props.node?.data.videoResolution, choices) || choices[0]
+    return '768p' as VideoResolution
+  },
   set: (v: VideoResolution) => {
     if (props.node) project.patchCanvasNode(props.node.id, { videoResolution: v })
   }
@@ -308,6 +317,25 @@ const imageResolution = computed({
   get: () => pickDocImageResolution(props.node?.data.imageResolution, imageResolutionChoices.value) || '2k',
   set: (v: DocImageResolution) => {
     if (props.node) project.patchCanvasNode(props.node.id, { imageResolution: v })
+  }
+})
+const inspectorDurations = computed(() => videoDurationOptions(videoModel.value))
+const inspectorDuration = computed({
+  get() {
+    const opts = inspectorDurations.value
+    const raw = Math.round(
+      Number(props.node?.type === 'shotVideo' ? shot.value?.duration : props.node?.data.duration) || opts[0] || 5
+    )
+    if (opts.includes(raw)) return raw
+    return opts.reduce((best, item) => (Math.abs(item - raw) < Math.abs(best - raw) ? item : best), opts[0] || raw)
+  },
+  set(v: number) {
+    if (!props.node) return
+    if (props.node.type === 'shotVideo' && shot.value) {
+      project.updateShot(shot.value.id, { duration: v })
+      return
+    }
+    project.patchCanvasNode(props.node.id, { duration: v })
   }
 })
 const showVideoAudio = computed(() => docVideoProfile.value?.options?.videoAudio === true)
@@ -1173,11 +1201,20 @@ async function optimizeVideoPrompt() {
           :profile-id="node.data.videoProfileId"
           @select-profile="onSelectVideoProfile"
         />
-        <DocAudioToggle v-if="isVideoNode && showVideoAudio" v-model="generateAudio" />
-        <VideoResolutionSeg
-          v-if="isVideoNode && videoAllows1080p(videoModel) && !isH3Fl2va"
-          v-model="videoResolution"
-          compact
+        <VideoSettingsPopover
+          v-if="isVideoNode"
+          plain
+          :resolution="videoResolution"
+          :resolutions="resolutionChoices"
+          :aspect="nodeAspectRatio"
+          :duration="inspectorDuration"
+          :durations="inspectorDurations"
+          :show-audio="showVideoAudio"
+          :audio="generateAudio"
+          @update:resolution="videoResolution = $event"
+          @update:aspect="nodeAspectRatio = $event"
+          @update:duration="inspectorDuration = $event"
+          @update:audio="generateAudio = $event"
         />
       </div>
       <template v-if="node.type === 'script' && isPlayReady(project.current?.script)">

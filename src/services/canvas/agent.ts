@@ -85,6 +85,8 @@ export interface AgentRunOptions {
   selectedNodeId?: string
   /** 用户在对话框附加的本地文件（文本内容已读入） */
   attachments?: AgentAttachment[]
+  /** 这一轮之前的对话。连续拍说「继续」时要从这里找回刚贴过的剧本。 */
+  history?: Array<{ role: string; content: string }>
 }
 
 const TOOLS_HINT = `你是剧流 Studio 画布上的现场助理。一边干活一边告诉用户画布上发生了什么。

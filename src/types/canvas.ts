@@ -25,7 +25,7 @@ export type CanvasNodeType =
 /** 图生视频节点模型。默认 H3 15s；h3-v5 为 10 秒且可选 1080p；万相走百炼同一套 Key。 */
 export type VideoGenModel = 'h3' | 'h3-v5' | 'wan-prime'
 
-export type VideoResolution = '768p' | '1080p'
+export type VideoResolution = '480p' | '720p' | '768p' | '1080p'
 
 /** H3 出片方式。reference=多图参考（当前默认）；fl2va=首尾帧。 */
 export type H3VideoGenMode = 'reference' | 'fl2va'
@@ -101,9 +101,17 @@ export function videoAllows1080p(model: VideoGenModel): boolean {
 }
 
 export function normalizeVideoResolution(value: unknown, model: VideoGenModel): VideoResolution {
-  if (!videoAllows1080p(model)) return '768p'
-  if (value === '768p') return '768p'
-  return '1080p'
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s/g, '')
+  if (raw === '480p' || raw === '480') return '480p'
+  if (raw === '720p' || raw === '720') return '720p'
+  if (raw === '1080p' || raw === '1080') return '1080p'
+  if (raw === '768p' || raw === '768') return '768p'
+  if (model === 'wan-prime') return '720p'
+  if (model === 'h3-v5') return '1080p'
+  return '768p'
 }
 
 export function normalizeH3GenMode(value: unknown): H3VideoGenMode {
@@ -144,7 +152,7 @@ export interface CanvasNode {
     videoProfileId?: string
     /** 这一镜出视频时用什么参考图；切模型时写入，决定画布是否铺分镜关键帧 */
     videoStillMode?: VideoStillMode
-    /** h3-v5 可选 1080p，其余固定 768p */
+    /** 这一镜的视频分辨率。万相可选 480P / 720P / 1080P，H3 v5 可选 768p / 1080p */
     videoResolution?: VideoResolution
     /** 文档列出的出图档位，节点上由用户选 1K / 2K / 4K */
     imageResolution?: '1k' | '2k' | '4k'

@@ -97,6 +97,8 @@ export interface AppSettings {
   vision: ServiceEndpoint
   visions: NamedEndpoint[]
   activeVisionId: string
+  /** 关掉时即使填了地址和密钥，也不会把图发给视觉模型。 */
+  visionEnabled: boolean
   image: ServiceEndpoint
   images: NamedEndpoint[]
   activeImageId: string
@@ -490,6 +492,7 @@ function buildDefaults(): AppSettings {
     vision: asEndpoint(visionFirst),
     visions: [visionFirst],
     activeVisionId: visionFirst.id,
+    visionEnabled: false,
     image: asEndpoint(imageFirst),
     images: [imageFirst],
     activeImageId: imageFirst.id,
@@ -629,6 +632,7 @@ function parseSettings(raw: string | null): AppSettings {
       vision: vision.active,
       visions: vision.list,
       activeVisionId: vision.activeId,
+      visionEnabled: parsed.visionEnabled === true,
       image: image.active,
       images: image.list,
       activeImageId: image.activeId,

@@ -131,8 +131,12 @@ function videoSeconds(model: string, raw?: number, limit?: number): number {
   return Math.min(15, Math.max(1, seconds || 6))
 }
 
-function videoQuality(raw?: string): '480p' | '720p' {
-  return /480/.test(String(raw || '')) ? '480p' : '720p'
+function videoQuality(raw?: string): '480p' | '720p' | '768p' | '1080p' {
+  const text = String(raw || '').toLowerCase()
+  if (/1080/.test(text)) return '1080p'
+  if (/768/.test(text)) return '768p'
+  if (/480/.test(text)) return '480p'
+  return '720p'
 }
 
 function errorMessage(json: any, status: number): string {
@@ -204,7 +208,8 @@ function resultUrls(json: any, kind: 'image' | 'video'): string[] {
 async function downloadMedia(
   url: string,
   authorization: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 120_000
 ): Promise<{ blob: Blob; mimeType: string }> {
   // 结果文件在图床上。带上生图用的 Bearer，或 Accept: application/json，图床会回 400。
   const load = (auth?: string) =>
@@ -215,7 +220,7 @@ async function downloadMedia(
         ...(auth ? { Authorization: auth } : {})
       },
       signal,
-      timeoutMs: 120_000
+      timeoutMs
     })
   let resp = await load()
   if (!resp.ok && authorization && (resp.status === 400 || resp.status === 401 || resp.status === 403)) {
@@ -259,7 +264,7 @@ async function pollTask(opts: {
       const media = resultUrls(json, opts.kind)[0]
       if (!media) throw new Error('任务已完成，但没有返回图片或视频地址')
       opts.onProgress?.('正在下载结果...')
-      return downloadMedia(media, opts.authorization, opts.signal)
+      return downloadMedia(media, opts.authorization, opts.signal, opts.kind === 'video' ? 10 * 60_000 : 120_000)
     }
     const label = Number.isFinite(progress) ? `${Math.round(progress)}%` : status || '处理中'
     opts.onProgress?.(`生成中 ${label}`)
@@ -268,7 +273,7 @@ async function pollTask(opts: {
   throw new Error('等待生成结果超时')
 }
 
-async function postJson(root: string, path: string, authorization: string, body: Record<string, unknown>, signal?: AbortSignal) {
+async function postJson(root: string, path: string, authorization: string, body: Record<string, unknown>, signal?: AbortSignal, timeoutMs = 60_000) {
   const resp = await providerHttp(`${root}${path}`, {
     method: 'POST',
     headers: {
@@ -278,7 +283,7 @@ async function postJson(root: string, path: string, authorization: string, body:
     },
     body: JSON.stringify(body),
     signal,
-    timeoutMs: 60_000
+    timeoutMs
   })
   return readJson(resp)
 }
@@ -372,7 +377,8 @@ async function uploadReferenceImage(
   root: string,
   authorization: string,
   blob: Blob,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 120_000
 ): Promise<string> {
   const file = dataUriToBlob(await referenceDataUrl(blob))
   const bytes = new Uint8Array(await file.blob.arrayBuffer())
@@ -384,7 +390,7 @@ async function uploadReferenceImage(
     bodyBase64: part.bodyBase64,
     contentType: part.contentType,
     signal,
-    timeoutMs: 120_000
+    timeoutMs
   })
   const json = await readJson(resp)
   const url = String(json?.url || json?.data?.url || '').trim()
@@ -413,7 +419,8 @@ async function referenceImageUrls(
   blobs: Blob[],
   limit: number,
   signal?: AbortSignal,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  timeoutMs = 120_000
 ): Promise<string[]> {
   const list = blobs.slice(0, limit)
   if (!list.length) return []
@@ -423,7 +430,7 @@ async function referenceImageUrls(
       for (let i = 0; i < list.length; i++) {
         if (signal?.aborted) throw new Error('已取消')
         onProgress?.(`上传参考图 ${i + 1}/${list.length}...`)
-        urls.push(await uploadReferenceImage(root, authorization, list[i], signal))
+        urls.push(await uploadReferenceImage(root, authorization, list[i], signal, timeoutMs))
       }
       return urls
     } catch (error) {
@@ -598,7 +605,8 @@ export async function apimartGenerateVideo(opts: {
       opts.images || [],
       7,
       opts.signal,
-      opts.onProgress
+      opts.onProgress,
+      10 * 60_000
     )
     const ratio = concreteAspectRatio(opts.aspectRatio, opts.width, opts.height)
     const body: Record<string, unknown> = {
@@ -615,7 +623,7 @@ export async function apimartGenerateVideo(opts: {
     }
     if (imageUrls.length) body.image_urls = imageUrls
     opts.onProgress?.('提交视频任务...')
-    const submitted = await postJson(root, '/v1/videos/generations', authorization, body, opts.signal)
+    const submitted = await postJson(root, '/v1/videos/generations', authorization, body, opts.signal, 10 * 60_000)
     taskId = taskIdOf(submitted)
     if (!taskId) throw new Error('提交成功但没有返回 task_id')
     await opts.onTaskSubmitted?.(taskId)

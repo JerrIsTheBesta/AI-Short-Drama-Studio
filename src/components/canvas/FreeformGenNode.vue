@@ -17,10 +17,9 @@ import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
-import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
-import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
-import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
+import VideoSettingsPopover from '@/components/canvas/VideoSettingsPopover.vue'
+import { pickDocImageResolution, pickDocVideoResolution, videoResolutionChoices, type DocImageResolution } from '@/services/ai/modelOptions'
 import { selectCanvasNode } from '@/services/canvas/canvasBridge'
 import { pickLocalFiles } from '@/utils/pickLocalFiles'
 import {
@@ -31,8 +30,6 @@ import type { AspectRatio, CanvasNodeType, H3VideoGenMode, ID, VideoGenModel, Vi
 import {
   normalizeH3GenMode,
   normalizeVideoGenModel,
-  normalizeVideoResolution,
-  videoAllows1080p,
   videoDurationOptions
 } from '@/types'
 
@@ -145,8 +142,18 @@ const videoModel = computed({
   get: () => normalizeVideoGenModel(node.value?.data.videoModel),
   set: (v: VideoGenModel) => applyShotVideoModel(props.id, v)
 })
+const resolutionChoices = computed(() =>
+  videoResolutionChoices({
+    model: videoModel.value,
+    profile: videoModel.value === 'wan-prime' ? null : effectiveVideoProfile.value
+  })
+)
 const videoResolution = computed({
-  get: () => normalizeVideoResolution(node.value?.data.videoResolution, videoModel.value),
+  get: () => {
+    const choices = resolutionChoices.value
+    if (choices.length) return pickDocVideoResolution(node.value?.data.videoResolution, choices) || choices[0]
+    return '768p' as VideoResolution
+  },
   set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
 })
 const isH3Video = computed(() => isVideo.value && videoModel.value !== 'wan-prime')
@@ -706,35 +713,26 @@ function removeSelf() {
             @select-profile="(id) => applyShotVideoProfile(props.id, id)"
           />
           <!-- 比例和模型同排：一眼看到「用什么模型、出什么画幅」 -->
-          <AspectRatioSeg v-model="aspectRatio" compact />
+          <AspectRatioSeg v-if="!isVideo" v-model="aspectRatio" compact />
           <ImageResolutionSeg
             v-if="!isVideo && imageResolutionChoices.length"
             v-model="imageResolution"
             :choices="imageResolutionChoices"
           />
-          <DocAudioToggle v-if="isVideo && showVideoAudio" v-model="generateAudio" />
-          <VideoResolutionSeg
-            v-if="isVideo && videoAllows1080p(videoModel) && !isH3Fl2va"
-            v-model="videoResolution"
-            compact
+          <VideoSettingsPopover
+            v-if="isVideo"
+            :resolution="videoResolution"
+            :resolutions="resolutionChoices"
+            :aspect="aspectRatio"
+            :duration="duration"
+            :durations="durationOptions"
+            :show-audio="showVideoAudio"
+            :audio="generateAudio"
+            @update:resolution="videoResolution = $event"
+            @update:aspect="aspectRatio = $event"
+            @update:duration="duration = $event"
+            @update:audio="generateAudio = $event"
           />
-          <div v-if="isVideo" class="dur-edit">
-            <button type="button" class="dur-btn" @click="durOpen = durOpen === 'foot' ? '' : 'foot'">
-              {{ duration }} 秒
-            </button>
-            <div v-if="durOpen === 'foot'" class="dur-menu">
-              <button
-                v-for="n in durationOptions"
-                :key="'foot-' + n"
-                type="button"
-                :class="{ on: n === duration }"
-                @mousedown.prevent.stop
-                @click.stop="pickDuration(n)"
-              >
-                {{ n }} 秒
-              </button>
-            </div>
-          </div>
           <button class="go" type="button" :disabled="generating || optimizingPrompt" :title="genLabel" @click="generate">↑</button>
         </div>
       </div>

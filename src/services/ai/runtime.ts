@@ -33,6 +33,13 @@ export function getLlmConfig() {
   }
 }
 
+/** 设置里打开了视觉开关，并且当前视觉接入填了地址、密钥和模型。 */
+export function visionCallsEnabled(): boolean {
+  const config = pick()
+  const vision = config?.vision
+  return Boolean(config?.visionEnabled && vision?.baseUrl?.trim() && vision.apiKey?.trim() && vision.model?.trim())
+}
+
 export function getVisionConfig() {
   const d = envDefaults().vision
   const s = pick()?.vision
@@ -152,6 +159,7 @@ export function getVideoConfig(profileId?: string) {
     adapter: s?.adapter,
     provider: s?.provider,
     options: s?.options,
+    name: s && 'name' in s ? String((s as { name?: string }).name || '') : '',
     zealmanBaseUrl: settings?.zealmanBaseUrl || ''
   }
 }

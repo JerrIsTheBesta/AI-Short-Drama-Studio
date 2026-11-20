@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { runAgentTurn, type AgentEvent, type AgentMessage } from '@/services/canvas/agent'
 import { runContinuousTurn } from '@/services/continuous/capture'
-import { editSelectedCanvasText, isSelectedTextEdit } from '@/services/canvas/selectedText'
+import { editSelectedCanvasText, isDirectNodeShortcut, isSelectedTextEdit, runSelectedNodeShortcut } from '@/services/canvas/selectedText'
 import { rebuildCanvasGraph } from '@/services/canvas/layout'
 import { friendlyAiError, isAbortError, isTimeoutAbort } from '@/services/ai/abort'
 import { appendAgentMessage, getAgentState, setAgentAutonomy } from '@/services/canvas/taskStore'
@@ -606,9 +606,16 @@ async function sendText(text: string) {
       signal: turnController.signal,
       autonomy: autonomy.value,
       selectedNodeId: props.selectedNode?.id,
-      attachments: attachOptions
+      attachments: attachOptions,
+      history: messages.value.slice(0, -1).slice(-16).map((message) => ({ role: message.role, content: message.content }))
     }
-    const result = isSelectedTextEdit(t, props.selectedNode) && props.selectedNode
+    const result = props.selectedNode && isDirectNodeShortcut(t)
+      ? {
+          reply: await (onProgress({ kind: 'intent', label: '改当前节点' }), runSelectedNodeShortcut(t, props.selectedNode, turnController.signal, (label) => onProgress({ kind: 'log', label }))),
+          results: [],
+          chips: []
+        }
+      : isSelectedTextEdit(t, props.selectedNode) && props.selectedNode
       ? {
           reply: await editSelectedCanvasText(t, props.selectedNode, turnController.signal),
           results: [],
@@ -759,7 +766,7 @@ function visibleRows(rows: TraceRow[]) {
     </div>
 
     <form class="composer" @submit.prevent="send">
-      <p v-if="continuousEnabled" class="capture-hint">连续拍会判断你这句话是要接着拍、改文字，还是只是问问。</p>
+      <p v-if="continuousEnabled" class="capture-hint">选中节点后，上面的快捷方式只改这一镜。开始拍、从头开始拍才动整场。</p>
       <p v-if="!continuousEnabled && input.trim() && estimate.calls" class="estimate">
         预计 {{ estimate.calls }} 次调用 · 约 {{ Math.max(1, Math.ceil(estimate.seconds / 60)) }} 分钟
       </p>

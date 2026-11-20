@@ -4,6 +4,7 @@ import { build } from 'esbuild'
 import { resolve, basename } from 'node:path'
 
 const mocks = {
+  runtime: `export const visionCallsEnabled=()=>{const v=globalThis.__agentTest.vision;return Boolean(v?.baseUrl&&v.apiKey&&v.model)};`,
   stores: `export const useProjectStore=()=>globalThis.__agentTest.store; export const useSettingsStore=()=>({config:{vision:globalThis.__agentTest.vision}});
     export const useAssetsStore=()=>({getBlob:async id=>globalThis.__agentTest.blobs?.[id],add:async()=>({id:'saved-tail'})});
     export const useLibraryStore=()=>({getBlob:async()=>null});`,

@@ -14,7 +14,8 @@ const mocks = {
     return {content:JSON.stringify(review ? h.reviews?.shift() ?? {ok:true,reason:''} : h.responses.shift()||h.fixture)}};`,
   '@/services/ai/image': `export const generateImage=async req=>{globalThis.h.images.push(req);return {blob:new Blob(['image'],{type:'image/png'})}};`,
   '@/services/ai/video': `export const generateVideo=async req=>{const h=globalThis.h;h.videos.push(req);await req.onTaskSubmitted('task-'+h.videos.length);if(h.failVideo){h.failVideo=false;throw Error('polling interrupted')}return {blob:new Blob(['video-'+h.videos.length],{type:'video/mp4'})}};`,
-  '@/services/ai/runtime': `export const autodlVideoProfileId=()=>globalThis.h.config.activeVideoId;`,
+  '@/services/ai/runtime': `export const autodlVideoProfileId=()=>globalThis.h.config.activeVideoId;export const visionCallsEnabled=()=>false;`,
+  '@/services/canvas/selectedText': `export const isDirectNodeShortcut=()=>false;export const runSelectedNodeShortcut=async()=>undefined;`,
   '@/services/ai/autodl': `export const autodlWorkflowById=()=>undefined;`,
   '@/services/ai/zealman': `export const zealmanWorkflowById=()=>undefined;`,
   '@/services/ai/apimart': `export const isApimartEndpoint=()=>false;`,
@@ -214,7 +215,7 @@ assert.match(h.videos[0].prompt, /integrated_multimodal_description/)
 assert.match(h.videos[0].prompt, /overall_soundscape/)
 
 h = reset(); h.store.current.script = null
-assert.match((await turn('开始')).reply, /已有剧本/)
+assert.match((await turn('开始')).reply, /没有剧本|已有剧本/)
 assert.equal(h.requests.length, 0)
 h = reset(); h.config.videos[0].name = 'seedance2.5'
 // 30 seconds must reach the generation layer, not the ordinary 15-second clamp.

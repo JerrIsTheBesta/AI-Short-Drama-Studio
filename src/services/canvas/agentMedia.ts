@@ -1,3 +1,4 @@
+import { visionCallsEnabled } from '@/services/ai/runtime'
 import { useAssetsStore, useLibraryStore, useProjectStore, useSettingsStore } from '@/stores'
 import { blobToChatImageUrl, callLLM, type LLMContentPart } from '@/services/ai/client'
 import { extractVideoLastFrame } from '@/services/ffmpeg'
@@ -9,8 +10,7 @@ import { canvasNodeOutputAssetId, canvasNodeProducesImage, resolvedCanvasReferen
 import { revealCanvas, selectCanvasNode } from './canvasBridge'
 
 export function canvasVisionReady(): boolean {
-  const vision = useSettingsStore().config.vision
-  return Boolean(vision?.baseUrl?.trim() && vision.apiKey?.trim() && vision.model?.trim())
+  return visionCallsEnabled()
 }
 
 function inputShot(p: Project, node: CanvasNode) {
@@ -32,7 +32,7 @@ function canvasTarget(nodeId: string) {
 }
 
 async function observeImages(images: Blob[], question: string, signal?: AbortSignal) {
-  if (!canvasVisionReady()) throw new Error('未配置视觉模型，无法读取图片。')
+  if (!canvasVisionReady()) throw new Error('视觉模型还没打开。请到设置 → 视觉理解打开开关，并填好地址、密钥和模型。')
   const content: LLMContentPart[] = [{ type: 'text', text: question }]
   for (const [index, blob] of images.entries()) {
     signal?.throwIfAborted()
@@ -48,7 +48,7 @@ async function observeImages(images: Blob[], question: string, signal?: AbortSig
 }
 
 export async function inspectCanvasImage(nodeId: string, index: number | undefined, question: string | undefined, signal?: AbortSignal) {
-  if (!canvasVisionReady()) throw new Error('请先在设置 → 视觉理解配置地址、密钥和模型。')
+  if (!canvasVisionReady()) throw new Error('请先在设置 → 视觉理解打开开关，并配置地址、密钥和模型。')
   const { p, node } = canvasTarget(nodeId)
   const refs = canvasInspectionRefs(p, node)
   const output = canvasNodeProducesImage(node) ? canvasNodeOutputAssetId(p, node) : undefined
@@ -89,7 +89,7 @@ export async function createTailContinuation(nodeId: string, request: string, si
       signal?.throwIfAborted()
       onLog?.('视觉观察未成功，改按上段提示词和实际末帧参考续写。')
     }
-  } else onLog?.('未配置视觉模型，按上段提示词续写；实际末帧仍会作为参考图。')
+  } else onLog?.('视觉模型未打开，按上段提示词续写；实际末帧仍会作为参考图。')
   if (!previous.trim() && !observed) throw new Error('找不到上一段的提示词，也未取得视觉观察；请为源视频补上剧情描述或配置视觉模型。')
   const videoModel = normalizeVideoGenModel(node.data.videoModel || useSettingsStore().config.defaultVideoModel)
   const duration = Math.max(videoMinSeconds(videoModel), Math.min(videoMaxSeconds(videoModel), Math.round(node.data.duration || shot?.duration || p.settings.defaultShotDuration || 8)))

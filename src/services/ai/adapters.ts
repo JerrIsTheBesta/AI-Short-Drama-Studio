@@ -499,8 +499,14 @@ function requestBodyForProvider(
     body.aspect_ratio = ratio
     const seconds = Math.round(Number(source.duration) || 6)
     body.duration = /grok-imagine-1\.5/i.test(model) ? Math.min(15, Math.max(6, seconds || 6)) : seconds
-    const quality = String(source.resolution || '')
-    body.resolution = /480/.test(quality) ? '480p' : '720p'
+    const quality = String(source.resolution || '').toLowerCase()
+    body.resolution = /1080/.test(quality)
+      ? '1080p'
+      : /768/.test(quality)
+        ? '768p'
+        : /480/.test(quality)
+          ? '480p'
+          : '720p'
     if (images.length) body.image_urls = images.slice(0, 7)
     for (const [key, value] of Object.entries(source)) {
       if (typeof value === 'boolean' && /audio/i.test(key) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
@@ -551,7 +557,7 @@ export async function httpCustomMediaGenerate(opts: {
     headers,
     body: JSON.stringify(body),
     signal: opts.signal,
-    timeoutMs: kind === 'video' ? 180_000 : 180_000
+    timeoutMs: kind === 'video' ? 10 * 60_000 : 180_000
   })
   if (!res.ok) {
     const text = await res.text()

@@ -15,16 +15,14 @@ import { openLightbox } from '@/composables/useLightbox'
 import ShotRefStrip from '@/components/canvas/ShotRefStrip.vue'
 import NodeBusyOverlay from '@/components/canvas/NodeBusyOverlay.vue'
 import AssetPicker from '@/components/common/AssetPicker.vue'
-import ParamSelect from '@/components/common/ParamSelect.vue'
 import ImageModelSelect from '@/components/settings/ImageModelSelect.vue'
 import VideoModelSelect from '@/components/settings/VideoModelSelect.vue'
 import H3GenModeSelect from '@/components/settings/H3GenModeSelect.vue'
 import FramePairSlots from '@/components/canvas/FramePairSlots.vue'
 import AspectRatioSeg from '@/components/common/AspectRatioSeg.vue'
-import VideoResolutionSeg from '@/components/common/VideoResolutionSeg.vue'
 import ImageResolutionSeg from '@/components/common/ImageResolutionSeg.vue'
-import DocAudioToggle from '@/components/common/DocAudioToggle.vue'
-import { pickDocImageResolution, type DocImageResolution } from '@/services/ai/modelOptions'
+import VideoSettingsPopover from '@/components/canvas/VideoSettingsPopover.vue'
+import { pickDocImageResolution, pickDocVideoResolution, videoResolutionChoices, type DocImageResolution } from '@/services/ai/modelOptions'
 import CanvasToolbarIcon from '@/components/canvas/CanvasToolbarIcon.vue'
 import NodeLinkPlus from '@/components/canvas/NodeLinkPlus.vue'
 import { canBuildExport } from '@/utils/timeline'
@@ -35,8 +33,6 @@ import { clampRect, cropContainedImage, trimVideoBlob, type NormRect } from '@/u
 import {
   normalizeH3GenMode,
   normalizeVideoGenModel,
-  normalizeVideoResolution,
-  videoAllows1080p,
   videoDurationOptions,
   videoMaxSeconds,
   videoMinSeconds,
@@ -315,8 +311,18 @@ const videoModel = computed({
   get: () => normalizeVideoGenModel(nodeMeta.value?.data.videoModel),
   set: (v: VideoGenModel) => applyShotVideoModel(props.id, v)
 })
+const resolutionChoices = computed(() =>
+  videoResolutionChoices({
+    model: videoModel.value,
+    profile: videoModel.value === 'wan-prime' ? null : docVideoProfile.value
+  })
+)
 const videoResolution = computed({
-  get: () => normalizeVideoResolution(nodeMeta.value?.data.videoResolution, videoModel.value),
+  get: () => {
+    const choices = resolutionChoices.value
+    if (choices.length) return pickDocVideoResolution(nodeMeta.value?.data.videoResolution, choices) || choices[0]
+    return '768p' as VideoResolution
+  },
   set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })
 })
 const docVideoProfile = computed(() => {
@@ -1359,7 +1365,7 @@ const cropStyle = computed(() => ({
         <span v-if="type === 'shotVideo' && videoStillHint" class="still-hint">{{ videoStillHint }}</span>
         <span v-else>{{ metaLine }}</span>
         <AspectRatioSeg
-          v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames' || type === 'shotVideo'"
+          v-if="type === 'shotBoard' || type === 'shotImage' || type === 'shotFrames'"
           v-model="nodeAspectRatio"
           compact
         />
@@ -1368,22 +1374,20 @@ const cropStyle = computed(() => ({
           v-model="imageResolution"
           :choices="imageResolutionChoices"
         />
-        <DocAudioToggle v-if="type === 'shotVideo' && showVideoAudio" v-model="generateAudio" />
-        <VideoResolutionSeg
-          v-if="type === 'shotVideo' && videoAllows1080p(videoModel) && !isH3Fl2va"
-          v-model="videoResolution"
-          compact
-        />
-        <ParamSelect
+        <VideoSettingsPopover
           v-if="type === 'shotVideo' && shot"
-          class="dur-edit"
-          width="76px"
-          title="时长"
-          :model-value="String(shotDurationValue)"
-          @update:model-value="setShotDuration(Number($event))"
-        >
-          <option v-for="n in durationOptions" :key="n" :value="String(n)">{{ n }} 秒</option>
-        </ParamSelect>
+          :resolution="videoResolution"
+          :resolutions="resolutionChoices"
+          :aspect="nodeAspectRatio"
+          :duration="shotDurationValue"
+          :durations="durationOptions"
+          :show-audio="showVideoAudio"
+          :audio="generateAudio"
+          @update:resolution="videoResolution = $event"
+          @update:aspect="nodeAspectRatio = $event"
+          @update:duration="setShotDuration($event)"
+          @update:audio="generateAudio = $event"
+        />
         <button
           v-if="genLabel"
           class="go"

@@ -235,6 +235,11 @@ function patchAdapter(
     </template>
 
     <template v-else-if="module === 'vision'">
+      <button type="button" class="vision-switch" role="switch" :aria-checked="settings.config.visionEnabled" :class="{ on: settings.config.visionEnabled }" @click="settings.update({ visionEnabled: !settings.config.visionEnabled })">
+        <span class="vision-switch-track" aria-hidden="true"><span /></span>
+        <span>{{ settings.config.visionEnabled ? '视觉模型已开启' : '视觉模型未开启' }}</span>
+      </button>
+      <p class="hint">打开后，看图、确认参考图是谁、以及画面核对才会调用视觉模型。关掉就只用语言模型看图片名称。</p>
       <ProfileLibrary
         title="已保存的视觉接入"
         hint="它让 AI 看得懂图：自动挑出能用的参考图，并检查生成的图片视频有没有跑偏。用得多可以换更强的模型。"
@@ -549,6 +554,44 @@ function patchAdapter(
   color: var(--color-text-4);
   line-height: 1.5;
 }
+.vision-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.vision-switch-track {
+  display: inline-flex;
+  align-items: center;
+  width: 28px;
+  height: 16px;
+  padding: 2px;
+  border-radius: 12px;
+  background: var(--nb-bg-4, var(--color-bg-3));
+  box-sizing: border-box;
+}
+.vision-switch-track > span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--nb-t2, var(--color-text-3));
+  transition: transform .15s;
+}
+.vision-switch.on {
+  color: var(--color-text-1);
+  border-color: var(--nb-accent, var(--color-accent));
+}
+.vision-switch.on .vision-switch-track { background: var(--nb-accent, var(--color-accent)); }
+.vision-switch.on .vision-switch-track > span { transform: translateX(12px); background: var(--nb-accent-ink, #062027); }
 label,
 .extra-label,
 .name-label {

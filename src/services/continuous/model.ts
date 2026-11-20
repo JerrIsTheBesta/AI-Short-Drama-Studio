@@ -102,12 +102,21 @@ function assetKind(value: unknown, fallback?: 'character' | 'prop' | 'scene') {
   const known: Record<string, 'character' | 'prop' | 'scene'> = {
     character: 'character', char: 'character', person: 'character', cast: 'character',
     人物: 'character', 角色: 'character', 演员: 'character',
-    prop: 'prop', item: 'prop', 道具: 'prop', 物品: 'prop',
+    prop: 'prop', item: 'prop', 道具: 'prop', 物品: 'prop', 器物: 'prop',
     scene: 'scene', location: 'scene', place: 'scene', set: 'scene',
-    场景: 'scene', 地点: 'scene', 环境: 'scene'
+    场景: 'scene', 地点: 'scene', 环境: 'scene', 布景: 'scene',
+    costume: 'character', outfit: 'character', wardrobe: 'character', clothing: 'character', look: 'character',
+    服装: 'character', 造型: 'character', 衣着: 'character', 换装: 'character'
   }
   const folded = fieldText(value).toLowerCase().replace(/\s+/g, '').replace(/4/g, 'a').replace(/3/g, 'e').replace(/1/g, 'i').replace(/0/g, 'o')
   return known[folded] ?? fallback
+}
+
+function inferAssetKind(name: string, prompt: string): 'character' | 'prop' | 'scene' {
+  const text = `${name}\n${prompt}`
+  if (/场景|地点|空镜|环境|布景|室内|室外|建筑|街道|房间/.test(text) && !/四视图|三视图|人脸|岁/.test(text)) return 'scene'
+  if (/道具|物品|武器|器物/.test(text) && !/人物|角色|人脸|岁/.test(name)) return 'prop'
+  return 'character'
 }
 
 function normalizeAssets(body: Record<string, unknown>) {
@@ -128,11 +137,13 @@ function normalizeAssets(body: Record<string, unknown>) {
     const row = asRecord(item)
     if (!row) return undefined
     const name = fieldText(pick(row, ['name', '名称', 'title', '角色名']))
+    const prompt = fieldText(pick(row, ['prompt', '提示词', 'description', '描述', 'desc'])) || name
+    const rawKind = pick(row, ['kind', 'type', '类型', 'category'])
     return {
       id: fieldText(pick(row, ['id', 'ID'])) || name,
       name,
-      kind: assetKind(pick(row, ['kind', 'type', '类型', 'category']), fallback),
-      prompt: fieldText(pick(row, ['prompt', '提示词', 'description', '描述', 'desc'])) || name
+      kind: assetKind(rawKind, fallback) || inferAssetKind(`${fieldText(rawKind)}\n${name}`, prompt),
+      prompt
     }
   })).filter((item): item is NonNullable<typeof item> => Boolean(item?.name))
   assets.forEach((asset, index) => { if (!asset.id) asset.id = `asset-${index + 1}` })

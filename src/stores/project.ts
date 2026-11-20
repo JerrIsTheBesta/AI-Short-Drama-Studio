@@ -746,7 +746,10 @@ export const useProjectStore = defineStore('project', () => {
       current.value.canvas = {
         ...current.value.canvas,
         nodes: current.value.canvas.nodes.map((node) =>
-          node.type === 'shotVideo' || node.type === 'videoGen'
+          (node.type === 'shotVideo' || node.type === 'videoGen') &&
+          node.data.videoModel !== 'wan-prime' &&
+          node.data.videoResolution !== '480p' &&
+          node.data.videoResolution !== '720p'
             ? { ...node, data: { ...node.data, videoResolution: resolution } }
             : node
         )

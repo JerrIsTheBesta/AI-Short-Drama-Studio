@@ -109,7 +109,7 @@ const SYSTEM = `${settingsSkillRaw}
 一次最多 8 个 actions。没有把握就 actions 为空，先问。文档已经够写的时候不要空 actions。
 
 可用工具：
-{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe", "options": { "imageResolutions": ["1k","2k"], "videoAudio": true, "lastFrameRequired": false, "audioField": "audio" }, "adapter": { "type": "openai-compatible|openai-images|http-custom|comfyui-workflow|comfyui-prompt", "path": "可选", "pollPath": "可选含{id}", "resultJsonPath": "可选", "authHeader": "可选", "authPrefix": "可选，Bearer 或空", "workflowTemplate": "ComfyUI /prompt JSON，可用{{prompt}}{{image}}" } }
+{ "tool": "add_profile", "kind": "vision|image|tts|video|llm", "name": "显示名", "provider": "预设id，可选", "baseUrl": "", "apiKey": "", "model": "", "models": ["可选"], "voice": "tts可选", "workflowId": "video可选", "promptStyle": "scene-narrative|formatted", "stillMode": "identity|keyframe|storyboard，video可选。H3用人设+场景填 identity，其它模型要关键帧填 keyframe", "options": { "imageResolutions": ["1k","2k"], "videoResolutions": ["480p","720p","1080p"], "videoAudio": true, "lastFrameRequired": false, "audioField": "audio" }, "adapter": { "type": "openai-compatible|openai-images|http-custom|comfyui-workflow|comfyui-prompt", "path": "可选", "pollPath": "可选含{id}", "resultJsonPath": "可选", "authHeader": "可选", "authPrefix": "可选，Bearer 或空", "workflowTemplate": "ComfyUI /prompt JSON，可用{{prompt}}{{image}}" } }
 { "tool": "update_profile", "kind": "…", "id": "profile_id", "name": "可选", "baseUrl": "可选", "apiKey": "可选", "model": "可选", "models": ["可选"], "voice": "可选", "workflowId": "可选", "promptStyle": "可选", "options": "可选，同上", "adapter": "可选，同上" }
 { "tool": "select_profile", "kind": "…", "id": "…", "model": "可选，设为当前模型" }
 { "tool": "add_model", "kind": "llm|vision|image|tts", "id": "profile_id，可省略表示当前套", "model": "模型名" }
@@ -143,6 +143,7 @@ ${catalog(VIDEO_PROVIDERS)}
 - OpenAI 兼容中转：LLM/视觉用默认；生图若不是 /images/generations，设 adapter.type=http-custom 并填 path、resultJsonPath。
 - 写完接入后，若用户要求「测一下」，调用 test_connection。
 - options 只写文档里明确出现的节点参数，禁止编造。生图文档列出 1K/2K/4K 时，imageResolutions 只收录文档有的档位，写成小写 1k、2k、4k。文档没写分辨率就不要填 imageResolutions。
+- 视频文档列出 480P、720P、768P、1080P 时，videoResolutions 只收录文档有的档位，写成小写 480p、720p、768p、1080p。文档没写视频分辨率就不要填 videoResolutions。
 - 视频文档有音频开关时 videoAudio 才写 true，并把文档里的字段名写入 audioField（必须含 audio，例如 audio 或 generate_audio）。没有音频开关就不要写 videoAudio。
 - 尾帧默认不是必填。只有文档写明尾帧、结束帧或 last frame 必填时，lastFrameRequired 才写 true。文档没提尾帧，就不要写这个字段。`
 
@@ -796,7 +797,7 @@ export async function runSetupAgentTurn(
     jsonMode: true,
     temperature: 0.2,
     maxTokens: looksLikeDocs ? 4000 : 1800,
-    timeoutMs: looksLikeDocs ? 180_000 : 120_000,
+    timeoutMs: 5 * 60_000,
     signal
   })
 

@@ -3,7 +3,7 @@ import { useProjectStore, useSettingsStore, useAssetsStore, useLibraryStore } fr
 import { blobToChatImageUrl, callLLM, type LLMContentPart } from '@/services/ai/client'
 import { generateImage } from '@/services/ai/image'
 import { generateVideo } from '@/services/ai/video'
-import { autodlVideoProfileId } from '@/services/ai/runtime'
+import { autodlVideoProfileId, visionCallsEnabled } from '@/services/ai/runtime'
 import { autodlWorkflowById } from '@/services/ai/autodl'
 import { zealmanWorkflowById } from '@/services/ai/zealman'
 import { isApimartEndpoint } from '@/services/ai/apimart'
@@ -20,6 +20,7 @@ import { buildH3ImageSlots, compileH3OfficialPrompt, isOfficialH3Prompt, type H3
 import type { AgentProgress, AgentRunOptions, AgentTurnResult } from '@/services/canvas/agent'
 import type { AgentPlan } from '@/services/canvas/planner'
 import { CAPTURE_DIRECTOR } from './prompt'
+import { runSelectedNodeShortcut } from '@/services/canvas/selectedText'
 import { captureIntentLabel, detectCaptureIntent, isLastFrameGrab, type CaptureIntent } from './intent'
 import { compact, parseCaptureVerdict, planSeconds, validateCapturePlan, type CapturePlan, type CaptureState } from './model'
 
@@ -389,8 +390,7 @@ function linkAssetSheets(projectId: string, videoId: string, capture: CaptureSta
 }
 
 function visionConfigured() {
-  const vision = useSettingsStore().config.vision
-  return Boolean(vision?.baseUrl?.trim() && vision.apiKey?.trim() && vision.model?.trim())
+  return visionCallsEnabled()
 }
 
 function readPictures(raw: string, candidates: SheetCandidate[]): ShotPicture[] | undefined {
@@ -814,8 +814,31 @@ export async function runContinuousTurn(text: string, onProgress: AgentProgress,
     }
     let s = p.continuousCapture
     const attached = options.attachments?.map(a => a.content).join('\n\n') || ''
-    const pasted = !/^重新规划/.test(text) && text.length >= 24 && /(?:^|\n)\s*(?:场景|场次|[^\n：:]{1,16}[：:])/.test(text) ? text : ''
-    const intent: CaptureIntent = await detectCaptureIntent(text, Boolean(s), Boolean(pasted || attached), signal)
+    const looksLikeScript = (value: string) => {
+      const body = value.trim()
+      if (body.length < 24 || /^(?:继续|确认|重试|分析剧本|开始拍摄|制定连续拍计划)/.test(body)) return false
+      return /[：:]/.test(body) || /场景|场次|镜头|剧本|脚本/.test(body) || body.length >= 80
+    }
+    const pasted = !/^重新规划/.test(text) && looksLikeScript(text) ? text : ''
+    const earlierUserTexts = (options.history || [])
+      .filter((message) => message.role === 'user')
+      .map((message) => message.content.trim())
+      .filter((body) => body && body !== text.trim())
+    const continuing = /^(?:继续|确认|重试|分析剧本|开始拍摄|制定连续拍计划)/.test(text.trim())
+    const remembered = (continuing
+      ? [...earlierUserTexts].reverse().find((body) => body.length >= 24 && !/^(?:继续|确认|重试)/.test(body))
+      : undefined) || [...earlierUserTexts].reverse().find(looksLikeScript) || ''
+    const intent: CaptureIntent = await detectCaptureIntent(text, Boolean(s), Boolean(pasted || attached), signal, Boolean(options.selectedNodeId))
+    if (intent === 'node') {
+      onProgress({ kind: 'intent', label: '改当前节点' })
+      const selected = options.selectedNodeId ? node(p.id, options.selectedNodeId) : undefined
+      if (!selected) return reply('先点中要改的节点。这句不会重拆剧本。', '')
+      try {
+        return reply(await runSelectedNodeShortcut(text, selected, signal, log), '')
+      } catch (error) {
+        return reply(error instanceof Error ? error.message : String(error), '')
+      }
+    }
     const label = !s && (intent === 'plan' || intent === 'revise' || intent === 'approve')
       ? '制定连续拍计划'
       : intent === 'approve' && s?.phase === 'videos'
@@ -824,10 +847,11 @@ export async function runContinuousTurn(text: string, onProgress: AgentProgress,
           ? '生成本场缺少的资产'
           : captureIntentLabel(intent)
     onProgress({ kind: 'intent', label })
-    const sourceOf = () => attached || pasted || (s?.sourceFromCanvas ? p.script?.content : s?.source) || p.script?.content || ''
+    const sourceOf = () => attached || pasted || remembered || (s?.sourceFromCanvas ? p.script?.content : s?.source) || p.script?.content || ''
     const beginPlan = async () => {
       const source = sourceOf()
-      if (!source.trim()) return reply('需要已有剧本。放到画布上，或直接贴一集过来。', '')
+      if (!source.trim()) return reply('这轮对话里还没有剧本。把剧本贴在这里，或放到画布上。贴过之后直接说「继续」，我会接着用那一版。', '分析剧本')
+      if (!attached && !pasted && remembered) log('接着用你刚才贴在对话里的剧本。')
       const mark = showPlan(onProgress, intent === 'revise' ? '改一版计划' : '排这场戏', [
         { key: 'read', title: '通读剧本' },
         { key: 'draft', title: '分场并估时' },
