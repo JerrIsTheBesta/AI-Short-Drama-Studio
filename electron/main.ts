@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
+import http from 'node:http'
 import https from 'node:https'
 import { closeAppDb, getDbPath, kvGet, kvSet, openAppDb } from './sqlite'
 
@@ -813,6 +814,77 @@ app.whenReady().then(async () => {
     }
   })
 
+  // 语言模型一次要等好几分钟才吐出完整 JSON。Chromium 的 net.fetch 走 HTTP/2，
+  // 长时间没有字节时会把连接掐掉，上游日志里却已经是成功返回。这里改用 Node 的 HTTP/1.1。
+  const readLlmText = (
+    target: URL,
+    method: 'GET' | 'POST',
+    headers: Record<string, string>,
+    body: string | undefined,
+    timeoutMs: number,
+    signal: AbortSignal
+  ) => new Promise<{ status: number; ok: boolean; text: string }>((resolve, reject) => {
+    let settled = false
+    const finish = (run: () => void) => {
+      if (settled) return
+      settled = true
+      run()
+    }
+    if (signal.aborted) {
+      finish(() => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+      return
+    }
+    const secure = target.protocol === 'https:'
+    const lib = (secure ? https : http) as typeof https
+    const agent = new lib.Agent({ keepAlive: false })
+    const reqHeaders = { ...headers }
+    if (method === 'POST') reqHeaders['Content-Length'] = String(Buffer.byteLength(body || ''))
+    let broken = false
+    const fail = (err: unknown) => {
+      broken = true
+      agent.destroy()
+      finish(() => reject(err))
+    }
+    const req = lib.request(target, { method, headers: reqHeaders, agent, timeout: timeoutMs }, (res) => {
+      const chunks: Buffer[] = []
+      let size = 0
+      res.on('data', (chunk: Buffer | string) => {
+        if (broken) return
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += buf.length
+        if (size > 32 * 1024 * 1024) {
+          fail(new Error('语言模型返回过大'))
+          req.destroy()
+          return
+        }
+        chunks.push(buf)
+      })
+      res.on('end', () => {
+        if (broken) return
+        agent.destroy()
+        const status = res.statusCode || 0
+        finish(() => resolve({ status, ok: status >= 200 && status < 300, text: Buffer.concat(chunks).toString('utf8') }))
+      })
+      res.on('error', (err) => fail(err))
+    })
+    const onAbort = () => {
+      req.destroy()
+      fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    req.on('timeout', () => {
+      const err = new Error('timeout') as NodeJS.ErrnoException
+      err.code = 'ETIMEDOUT'
+      req.destroy(err)
+    })
+    req.on('error', (err) => {
+      signal.removeEventListener('abort', onAbort)
+      fail(err)
+    })
+    if (method === 'POST') req.write(body || '')
+    req.end()
+  })
+
   ipcMain.handle('desktop:llmFetch', async (_e, opts?: {
     url?: string
     authorization?: string
@@ -842,7 +914,7 @@ app.whenReady().then(async () => {
     if (method === 'POST' && body.length > 32 * 1024 * 1024) {
       throw new Error('语言模型请求过大')
     }
-    const timeoutMs = Math.min(540000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
+    const timeoutMs = Math.min(900000, Math.max(5000, Number(opts?.timeoutMs) || 120000))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
@@ -852,24 +924,21 @@ app.whenReady().then(async () => {
       if (method === 'POST') headers['Content-Type'] = 'application/json'
       const token = String(opts?.authorization || '').trim()
       if (token) headers.Authorization = token
-      const res = await net.fetch(url, {
-        method,
-        headers,
-        body: method === 'POST' ? body : undefined,
-        signal: controller.signal
-      })
-      const text = await res.text()
-      return { status: res.status, ok: res.ok, text }
+      return await readLlmText(parsed, method, headers, method === 'POST' ? body : undefined, timeoutMs, controller.signal)
     } catch (err: any) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || err?.code === 'ETIMEDOUT' || err?.name === 'AbortError') {
         throw new Error(`语言模型请求超时（${Math.round(timeoutMs / 1000)} 秒）`)
       }
+      const code = String(err?.code || '')
       const msg = err instanceof Error ? err.message : String(err ?? '')
-      throw new Error(
-        /Failed to fetch|net::ERR|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED/i.test(msg)
-          ? '连不上语言模型（网络中断或被拦截）。请检查网络后重试。'
-          : msg || '连不上语言模型'
-      )
+      const reason = code || msg || '未知错误'
+      if (/ECONNRESET|EPIPE|ECONNABORTED|socket hang up|EAI_AGAIN/i.test(`${code} ${msg}`)) {
+        throw new Error(`连不上语言模型：结果传回时连接中断（${reason}）。上游可能已经生成完成，请重试。`)
+      }
+      if (/ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(`${code} ${msg}`)) {
+        throw new Error(`连不上语言模型（${reason}）。请检查接口地址后重试。`)
+      }
+      throw new Error(msg || '连不上语言模型')
     } finally {
       clearTimeout(timer)
     }

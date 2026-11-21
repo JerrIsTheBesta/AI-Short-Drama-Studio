@@ -25,6 +25,7 @@ secrets*.json
 coverage
 output
 diagnostics
+*.tsbuildinfo
 *.zip
 
 # FFmpeg 核心（大文件，让用户自己下）

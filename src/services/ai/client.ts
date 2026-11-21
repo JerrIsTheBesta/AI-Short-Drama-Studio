@@ -92,9 +92,13 @@ function llmHttpError(status: number, detail: string, baseUrl: string, provider?
   return new Error(`[LLM] ${status} ${detail}`)
 }
 
+function stripRemoteMethod(msg: string): string {
+  return msg.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '').trim()
+}
+
 function friendlyNetworkError(e: unknown): Error {
-  const msg = e instanceof Error ? e.message : String(e ?? '')
-  if (/连不上语言模型/.test(msg)) return e instanceof Error ? e : new Error(msg)
+  const msg = stripRemoteMethod(e instanceof Error ? e.message : String(e ?? ''))
+  if (/连不上语言模型/.test(msg)) return new Error(msg)
   return new Error('连不上语言模型（网络中断或被页面拦截）。请检查网络后点右侧重试。')
 }
 
@@ -317,6 +321,8 @@ export async function callLLM(req: LLMRequest): Promise<LLMResponse> {
       throw llmAbortError(e, control.signal, timeoutMs)
     }
     if (isRetryableNetwork(e)) throw friendlyNetworkError(e)
+    const stripped = stripRemoteMethod(e instanceof Error ? e.message : String(e ?? ''))
+    if (e instanceof Error && stripped !== e.message) throw new Error(stripped)
     throw e
   } finally {
     control.cleanup()

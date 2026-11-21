@@ -9,7 +9,7 @@ const mocks = {
     export const useAssetsStore=()=>({getBlob:async id=>globalThis.h.blobs[id],add:async (blob,kind,source,meta)=>{const h=globalThis.h;const id='asset-'+(++h.assetCounter);h.blobs[id]=blob;h.saved.push({id,kind,source,meta});return {id}}});
     export const useLibraryStore=()=>({getBlob:async()=>null});`,
   '@/services/ai/client': `export const blobToChatImageUrl=async()=> 'data:image/png;base64,dGVzdA==';
-    export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const system=req.messages[0].content;const review=system.includes('独立的短剧场记');
+    export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const system=req.messages[0].content;if(system.includes('只改这一条镜头'))return {content:JSON.stringify(h.repairs?.shift() ?? {invalid:true})};const review=system.includes('独立的短剧场记');
     if(system.includes('图几是什么')||system.includes('你看图确认参考图身份'))return {content:JSON.stringify({pictures:[{id:'a',role:'character',caption:'阿默'},{id:'b',role:'character',caption:'阿青'},{id:'room',role:'scene',caption:'室内'}]})};
     return {content:JSON.stringify(review ? h.reviews?.shift() ?? {ok:true,reason:''} : h.responses.shift()||h.fixture)}};`,
   '@/services/ai/image': `export const generateImage=async req=>{globalThis.h.images.push(req);return {blob:new Blob(['image'],{type:'image/png'})}};`,
@@ -37,7 +37,7 @@ const bundled = await build({
     b.onLoad({ filter: /.*/, namespace: 'mock' }, args => ({ contents: mocks[args.path], loader: 'js' }))
   } }]
 })
-const { runContinuousTurn, runCaptureNode, validateCapturePlan, parseCaptureVerdict, isCaptureApproval, planSeconds } = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'))
+const { runContinuousTurn, runCaptureNode, validateCapturePlan, parseCaptureVerdict, parseShotReview, isCaptureApproval, planSeconds } = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'))
 const detail = '中景固定机位，阿默站在门口左侧抬手，阿青在右侧听他说话，视线与轴线不变。冷色晨光照亮门框，暖色室内灯光落在人物脸上。镜头以缓慢而克制的速度推进，人物边说边放下手，脚步停稳，手指触及木门边缘，背景传来鸟鸣和轻微脚步声，最后停在双方对视的姿态。全段保持原服装、脸和道具，不新增路人。'
 const segment = (speaker, text) => ({ title: '交谈', duration: 6, prompt: detail, startState: '门口站立', endState: '原地对视', sound: '鸟鸣', dialogue: [{ speaker, text, delivery: '自然说话' }] })
 const source1 = '阿默：你好。\n阿青：你好。\n'
@@ -72,6 +72,10 @@ assert.equal(validateCapturePlan(leet, 15).scenes.length, 2)
 assert.deepEqual(parseCaptureVerdict('{"ok":true}'), { ok: true, reason: '' })
 assert.deepEqual(parseCaptureVerdict('{"ok":"false","原因":"第一场串词"}'), { ok: false, reason: '第一场串词' })
 assert.equal(parseCaptureVerdict('{"title":"不是审核"}'), null)
+assert.deepEqual(parseShotReview('{"ok":true}'), { shots: [], unlocated: '' })
+assert.deepEqual(parseShotReview('{"shots":[{"scene":1,"index":2,"ok":false,"reason":"时长不够"}]}'), { shots: [{ scene: 1, index: 2, reason: '时长不够' }], unlocated: '' })
+assert.deepEqual(parseShotReview('{"ok":false,"reason":"没指到镜头"}'), { shots: [], unlocated: '没指到镜头' })
+assert.equal(parseShotReview('不是结论'), null)
 assert.equal(planSeconds(fixture), 18)
 for (const input of ['不要继续', '继续但先改台词', '不要开始生成', '确认一下是否合理']) assert.equal(isCaptureApproval(input), false)
 assert.equal(isCaptureApproval('继续！'), true)
@@ -112,7 +116,7 @@ for (const mutate of [p => p.scenes[0].segments[0].duration = 5, p => p.scenes[0
 }
 await turn('分析剧本')
 assert.equal(h.images.length, 0, 'planning cannot submit assets')
-assert.equal(h.requests[0].timeoutMs, 300000)
+assert.equal(h.requests[0].timeoutMs, 600000)
 assert.equal(h.requests[0].useProviderOutputLimit, true)
 let s = h.store.current.continuousCapture
 assert.equal(h.store.current.canvas.nodes.filter(n => n.type === 'captureText').length, 4)
@@ -182,11 +186,16 @@ await turn('分析剧本')
 assert.equal(h.requests.length, 2, '通过结论可以不带 reason')
 assert.ok(h.store.current.continuousCapture)
 h = reset()
-h.reviews = [{ ok: false, reason: '第一场对白串人' }, { ok: false, reason: '第一场对白仍串人' }]
-await assert.rejects(() => turn('分析剧本'), /第一场对白仍串人/)
-assert.equal(h.requests.length, 4)
-assert.match(h.requests[2].messages[1].content, /第一场对白串人/)
-assert.equal(h.store.current.continuousCapture, undefined)
+h.reviews = [{ shots: [{ scene: 1, index: 1, ok: false, reason: '第一场对白串人' }] }]
+h.repairs = [{ title: '交谈', duration: 8, prompt: '中景固定。阿默把这句你好说完，阿青听着，镜头停在两人脸上，不再串到下一句。', startState: '门口站立', endState: '说完你好', sound: '鸟鸣', dialogue: [{ speaker: '阿默', text: '你好。', delivery: '自然说话' }] }]
+const revised = await turn('分析剧本')
+assert.match(revised.reply, /场景1-1 已改/)
+assert.match(revised.reply, /第一场对白串人/)
+assert.equal(h.requests.length, 3)
+assert.ok(h.store.current.continuousCapture)
+const repaired = h.store.current.canvas.nodes.find(n => n.data.label === '场景1-1')
+assert.equal(repaired.data.duration, 8)
+assert.match(repaired.data.prompt, /说完你好/)
 assert.equal(h.images.length + h.videos.length, 0)
 h = reset()
 await turn('分析剧本')

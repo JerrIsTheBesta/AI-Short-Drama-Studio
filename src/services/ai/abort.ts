@@ -42,7 +42,7 @@ export function llmAbortError(e: unknown, signal?: AbortSignal, timeoutMs = 120_
 
 export function friendlyAiError(e: unknown): string {
   if (isAbortError(e) && !isTimeoutAbort(e)) return '已取消'
-  return errMessage(e) || '生成失败'
+  return errMessage(e).replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '').trim() || '生成失败'
 }
 
 export function shouldToastAiError(e: unknown): boolean {

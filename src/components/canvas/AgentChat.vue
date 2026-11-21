@@ -12,6 +12,7 @@ import { nextPipelineStep } from '@/services/canvas/pipeline'
 import { useProjectStore, useSettingsStore, useToastStore } from '@/stores'
 import { desktop, isDesktop } from '@/services/desktop'
 import { autodlVideoProfileId } from '@/services/ai/runtime'
+import { docVideoResolutionLabel, pickDocVideoResolution, videoResolutionChoices, type DocVideoResolution } from '@/services/ai/modelOptions'
 import { SCRIPT_REFERENCE_OPTIONS, normalizeScriptReference } from '@/services/ai/scriptReference'
 import type { VideoGenModel } from '@/types'
 import type { AgentAttachment } from '@/services/canvas/attachments'
@@ -342,13 +343,31 @@ const VIDEO_WORKFLOW_OPTIONS: { value: VideoGenModel; name: string; desc: string
   { value: 'wan-prime', name: '万相 3.0 Prime', desc: '需四宫格关键帧' }
 ]
 const videoDefault = computed(() => settings.config.defaultVideoModel)
-const VIDEO_RES_OPTIONS: { value: VideoResolution; label: string }[] = [
-  { value: '768p', label: '768p' },
-  { value: '1080p', label: '1080p' }
-]
-const currentVideoResolution = computed<VideoResolution>(
-  () => project.current?.settings.defaultVideoResolution || '768p'
-)
+const preferenceResolutionChoices = computed(() => {
+  const model = videoDefault.value
+  const profile = model === 'wan-prime' || model === 'h3-v5' ? null : activeVideo.value
+  const listed = videoResolutionChoices({ model, profile })
+  if (listed.length) return listed
+  const fallback: DocVideoResolution[] = model === 'h3-v5' ? ['768p', '1080p'] : ['768p']
+  return fallback
+})
+const currentVideoResolution = computed<VideoResolution>(() => {
+  const choices = preferenceResolutionChoices.value
+  const stored = project.current?.settings.defaultVideoResolution
+  return pickDocVideoResolution(stored, [...choices]) || choices[0]
+})
+const videoResolutionHint = computed(() => {
+  const values = preferenceResolutionChoices.value
+  if (values.includes('480p')) return '万相可选 480P、720P、1080P。这里选的档位会交给新的视频节点，单个节点仍可再改。'
+  if (values.includes('1080p')) return '1080p 只在 H3 v5 上出到 1080p。'
+  return '当前模型按 768p 出片。'
+})
+watch(preferenceResolutionChoices, (choices) => {
+  if (!project.current || !choices.length) return
+  const stored = project.current.settings.defaultVideoResolution
+  const next = pickDocVideoResolution(stored, [...choices])
+  if (next && next !== stored) project.setDefaultVideoResolution(next)
+}, { immediate: true })
 
 const scriptReferenceType = computed({
   get: () => normalizeScriptReference(settings.config.scriptReferenceType),
@@ -873,17 +892,17 @@ function visibleRows(rows: TraceRow[]) {
                     <p class="pref-k pref-k-gap">视频分辨率</p>
                     <div class="res-row">
                       <button
-                        v-for="r in VIDEO_RES_OPTIONS"
-                        :key="r.value"
+                        v-for="r in preferenceResolutionChoices"
+                        :key="r"
                         type="button"
                         class="res-btn"
-                        :class="{ on: currentVideoResolution === r.value }"
-                        @click="pickVideoResolution(r.value)"
+                        :class="{ on: currentVideoResolution === r }"
+                        @click="pickVideoResolution(r)"
                       >
-                        {{ r.label }}
+                        {{ docVideoResolutionLabel(r) }}
                       </button>
                     </div>
-                    <p class="pref-hint">1080p 只在 H3 v5 上出到 1080p，其它模型仍按 768p。</p>
+                    <p class="pref-hint">{{ videoResolutionHint }}</p>
                   </template>
                   <template v-else>
                     <select v-model="imageChoice" class="pref-select" aria-label="选择图像模型">

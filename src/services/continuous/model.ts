@@ -284,6 +284,56 @@ function verdictReason(item: Record<string, unknown>): string {
   return ''
 }
 
+export interface ShotIssue {
+  scene: number
+  index: number
+  reason: string
+}
+
+function positiveInt(value: unknown): number | undefined {
+  const text = fieldText(value).replace(/第|场景|镜头|场次|场|镜/g, '')
+  const parsed = Number(text)
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined
+}
+
+/** 逐镜核对结果。整份 ok/reason 不再当成否决；定位不到镜头时放进 unlocated，分镜仍然保留。 */
+export function parseShotReview(content: string): { shots: ShotIssue[]; unlocated: string } | null {
+  let parsed: unknown
+  try { parsed = parseJsonRobust(content) } catch { return null }
+  const root = asRecord(parsed)
+  if (!root) return null
+  const records = [root]
+  for (const key of ['review', 'result', 'data']) {
+    const nested = asRecord(root[key])
+    if (nested) records.push(nested)
+  }
+  for (const record of records) {
+    const list = pick(record, ['shots', 'issues', '镜头', '问题列表'])
+    if (!Array.isArray(list)) continue
+    const shots: ShotIssue[] = []
+    for (const item of list) {
+      const row = asRecord(item)
+      if (!row) continue
+      const scene = positiveInt(pick(row, ['scene', 'sceneIndex', '场', '场景', '场次']))
+      const index = positiveInt(pick(row, ['index', 'shot', 'segment', '镜头', '镜']))
+      const ok = verdictFlag(row.ok ?? row.pass ?? row.passed ?? row['通过'] ?? row['是否通过'])
+      const reason = verdictReason(row).trim()
+      if (ok === true || !scene || !index || !reason) continue
+      shots.push({ scene, index, reason })
+    }
+    return { shots, unlocated: '' }
+  }
+  for (const record of records) {
+    const ok = verdictFlag(record.ok ?? record.pass ?? record.passed ?? record.approved ?? record['通过'] ?? record['是否通过'])
+    if (ok === true) return { shots: [], unlocated: '' }
+    if (ok === false) {
+      const reason = verdictReason(record).trim()
+      if (reason) return { shots: [], unlocated: reason }
+    }
+  }
+  return null
+}
+
 /** 审核结论只认 ok/reason。计划 JSON、缺字段或中文键都尽量收成同一结构；通过时允许不写 reason。 */
 export function parseCaptureVerdict(content: string): { ok: boolean; reason: string } | null {
   let parsed: unknown
