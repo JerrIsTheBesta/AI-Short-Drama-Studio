@@ -151,7 +151,7 @@ const resolutionChoices = computed(() =>
 const videoResolution = computed({
   get: () => {
     const choices = resolutionChoices.value
-    if (choices.length) return pickDocVideoResolution(node.value?.data.videoResolution, choices) || choices[0]
+    if (choices.length) return pickDocVideoResolution(node.value?.data.videoResolution ?? project.current?.settings.defaultVideoResolution, choices) || choices[0]
     return '768p' as VideoResolution
   },
   set: (v: VideoResolution) => project.patchCanvasNode(props.id, { videoResolution: v })

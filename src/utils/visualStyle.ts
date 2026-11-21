@@ -207,6 +207,8 @@ export function extractUserMediumPhrase(...texts: Array<string | undefined>): st
   if (!blob.trim()) return ''
 
   const cel = extractCelShadePhrase(blob)
+  const dimensional = blob.match(/(?:3\s*d|三维)\s*[-·]?\s*(?:半写实|写实|卡通|动画|渲染)(?:\s*(?:风格|画风))?/i)
+  if (dimensional) return dimensional[0].trim()
   if (cel) return cel
 
   const open: string[] = []
@@ -244,6 +246,7 @@ export function inferVisualStyleFromText(...texts: Array<string | undefined>): V
   if (!blob.trim()) return null
   // 点了卡通渲染 / Q 版就不要对成词库里的像素或写实三维
   if (extractCelShadePhrase(blob)) return null
+  if (/(?:3\s*d|三维)\s*[-·]?\s*(?:半写实|写实|动画|渲染)/i.test(blob)) return '3d-render'
   const lower = blob.toLowerCase()
   for (const style of INFER_ORDER) {
     const hit = STYLE_ALIASES[style].some((alias) => {
@@ -294,7 +297,7 @@ export function styleLinesFromPlay(content?: string): string {
   return (content || '')
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => /画风|视觉风格|画面风格|美术风格|绘制风格|风格要求|整体风格|画面质感/.test(line))
+    .filter((line) => /画风|视觉风格|画面风格|美术风格|绘制风格|风格要求|整体风格|画面质感|(?:3\s*d|三维)\s*(?:半写实|写实|动画|渲染)/i.test(line))
     .join('\n')
 }
 
@@ -312,6 +315,8 @@ export function lookFromScript(
 ): VisualLook {
   const fallback = script?.style ?? 'cinematic'
   if (script?.visualStyleOverride?.trim()) return lookFromTexts(fallback, script.visualStyleOverride)
+  const scriptLook = lookFromTexts(fallback, styleLinesFromPlay(script?.content))
+  if (scriptLook.userNamed) return scriptLook
   return lookFromTexts(
     fallback,
     script?.topic,
@@ -325,6 +330,7 @@ export function lookFromScript(
 
 /** 用户点了非实拍媒介时，人设不要走摄影棚三视图 */
 export function isPhotographicLook(look: VisualLook): boolean {
+  if (/(?:3\s*d|三维)/i.test(look.medium)) return false
   if (look.matched) {
     return look.matched === 'cinematic' || look.matched === 'photorealistic'
   }

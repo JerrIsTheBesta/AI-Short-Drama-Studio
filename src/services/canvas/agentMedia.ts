@@ -113,7 +113,8 @@ export async function createTailContinuation(nodeId: string, request: string, si
     label: `${node.data.label || '视频'} · 续拍`, prompt: `图1＝上一段视频的实际最后一帧，作为本段起幅。\n\n${result.content}`,
     referenceAssetIds: [asset.id], firstFrameAssetId: asset.id, duration,
     aspectRatio: node.data.aspectRatio || p.settings.aspectRatio,
-    videoModel, videoProfileId: node.data.videoProfileId || shot?.videoProfileId
+    videoModel, videoProfileId: node.data.videoProfileId || shot?.videoProfileId,
+    videoResolution: node.data.videoResolution ?? p.settings.defaultVideoResolution
   } })
   store.setCanvas({ ...store.current!.canvas!, edges: [...latest.edges, { id: `e-${nodeId}-${id}-in`, source: nodeId, target: id, sourceHandle: 'out', targetHandle: 'in' }] })
   await store.save()

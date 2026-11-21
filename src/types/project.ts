@@ -552,6 +552,10 @@ export interface Project {
   agentState?: AgentWorkspaceState
   /** 独立连续拍模式，不写入普通分镜流水线。 */
   continuousCaptureEnabled?: boolean
+  /** 用户明确选择的画风，独立于模型生成的美学描述。 */
+  visualStylePreference?: string
+  /** 连续拍等待用户确认画风时保留本次剧本。 */
+  continuousPendingScript?: string
   continuousCapture?: import('@/services/continuous/model').CaptureState
   /**
    * standard：主题/文案创作

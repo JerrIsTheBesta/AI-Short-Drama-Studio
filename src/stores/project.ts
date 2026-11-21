@@ -491,6 +491,7 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   /** 人声方案属于视频生成条件；切换时保留旧视频到历史并要求局部重做。 */
+  /** 修改口播配置不删除现有视频；新设置在用户主动生成时生效。 */
   function setShotAudioMode(id: ID, audioMode: ShotAudioMode) {
     if (!current.value) return
     const idx = current.value.shots.findIndex((s) => s.id === id)
@@ -501,13 +502,11 @@ export const useProjectStore = defineStore('project', () => {
     current.value.shots[idx] = {
       ...shot,
       audioMode,
-      videoHistoryIds: pushHistory(shot.videoAssetId, '', shot.videoHistoryIds).filter(Boolean),
-      videoAssetId: undefined,
       audioHistoryIds: keepTts
         ? shot.audioHistoryIds
         : pushHistory(shot.audioAssetId, '', shot.audioHistoryIds).filter(Boolean),
       audioAssetId: keepTts ? shot.audioAssetId : undefined,
-      status: shot.imageAssetId ? 'image-generated' : 'draft'
+      status: shot.status
     }
     touch()
   }
@@ -747,9 +746,7 @@ export const useProjectStore = defineStore('project', () => {
         ...current.value.canvas,
         nodes: current.value.canvas.nodes.map((node) =>
           (node.type === 'shotVideo' || node.type === 'videoGen') &&
-          node.data.videoModel !== 'wan-prime' &&
-          node.data.videoResolution !== '480p' &&
-          node.data.videoResolution !== '720p'
+          node.data.videoResolution == null
             ? { ...node, data: { ...node.data, videoResolution: resolution } }
             : node
         )

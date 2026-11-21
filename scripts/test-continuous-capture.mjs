@@ -9,18 +9,20 @@ const mocks = {
     export const useAssetsStore=()=>({getBlob:async id=>globalThis.h.blobs[id],add:async (blob,kind,source,meta)=>{const h=globalThis.h;const id='asset-'+(++h.assetCounter);h.blobs[id]=blob;h.saved.push({id,kind,source,meta});return {id}}});
     export const useLibraryStore=()=>({getBlob:async()=>null});`,
   '@/services/ai/client': `export const blobToChatImageUrl=async()=> 'data:image/png;base64,dGVzdA==';
-    export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const system=req.messages[0].content;if(system.includes('只改这一条镜头'))return {content:JSON.stringify(h.repairs?.shift() ?? {invalid:true})};const review=system.includes('独立的短剧场记');
+    export const callLLM=async req=>{const h=globalThis.h;h.requests.push(req);const system=req.messages[0].content;
+    if(system.includes('生成前对白场记')){h.preflightCalls=(h.preflightCalls||0)+1;return {content:JSON.stringify(h.preflightReviews?.shift() ?? {ok:true,issues:[]})}};
+    if(system.includes('只改这一条镜头'))return {content:JSON.stringify(h.repairs?.shift() ?? {invalid:true})};const review=system.includes('独立的短剧场记');
     if(system.includes('图几是什么')||system.includes('你看图确认参考图身份'))return {content:JSON.stringify({pictures:[{id:'a',role:'character',caption:'阿默'},{id:'b',role:'character',caption:'阿青'},{id:'room',role:'scene',caption:'室内'}]})};
     return {content:JSON.stringify(review ? h.reviews?.shift() ?? {ok:true,reason:''} : h.responses.shift()||h.fixture)}};`,
-  '@/services/ai/image': `export const generateImage=async req=>{globalThis.h.images.push(req);return {blob:new Blob(['image'],{type:'image/png'})}};`,
-  '@/services/ai/video': `export const generateVideo=async req=>{const h=globalThis.h;h.videos.push(req);await req.onTaskSubmitted('task-'+h.videos.length);if(h.failVideo){h.failVideo=false;throw Error('polling interrupted')}return {blob:new Blob(['video-'+h.videos.length],{type:'video/mp4'})}};`,
+  '@/services/ai/image': `export const generateImage=async req=>{globalThis.h.images.push(req);globalThis.h.afterImage?.();return {blob:new Blob(['image'],{type:'image/png'})}};`,
+  '@/services/ai/video': `export const generateVideo=async req=>{const h=globalThis.h;h.videos.push(req);await req.onTaskSubmitted('task-'+h.videos.length);if(h.failVideo){h.failVideo=false;throw Error('polling interrupted')}h.afterVideo?.();return {blob:new Blob(['video-'+h.videos.length],{type:'video/mp4'})}};`,
   '@/services/ai/runtime': `export const autodlVideoProfileId=()=>globalThis.h.config.activeVideoId;export const visionCallsEnabled=()=>false;`,
   '@/services/canvas/selectedText': `export const isDirectNodeShortcut=()=>false;export const runSelectedNodeShortcut=async()=>undefined;`,
   '@/services/ai/autodl': `export const autodlWorkflowById=()=>undefined;`,
   '@/services/ai/zealman': `export const zealmanWorkflowById=()=>undefined;`,
   '@/services/ai/apimart': `export const isApimartEndpoint=()=>false;`,
   '@/services/ffmpeg': `export const extractVideoLastFrame=async (video,o)=>{if(!o.preserveEnding)throw Error('must preserve ending');globalThis.h.tails++;return new Blob(['tail:'+await video.text()],{type:'image/jpeg'})};`,
-  '@/utils/visualStyle': `export const lookFromScript=()=>({style:'cinematic',medium:'电影感'});export const lookFromTexts=()=>lookFromScript();export const isPhotographicLook=()=>true;export const mediumLockText=()=>'媒介锁定';`,
+  '@/utils/visualStyle': `export const lookFromScript=()=>({style:'cinematic',medium:'电影感',userNamed:true});export const lookFromTexts=()=>lookFromScript();export const isPhotographicLook=()=>true;export const mediumLockText=()=>'媒介锁定';`,
   '@/utils/aspect': `export const aspectToSize=()=>({width:1280,height:720});`,
   '@/types': `export const emptyCanvas=()=>({nodes:[],edges:[],groups:[],viewport:{x:0,y:0,zoom:1}});export const normalizeVideoGenModel=x=>x||'h3';export const videoMaxSeconds=x=>x==='wan-prime'?30:x==='h3-v5'?10:15;`,
   '@/services/canvas/jobs': `const running=new Set();export async function withNodeJob(id,fn){if(running.has(id))throw Error('already running');running.add(id);try{return await fn()}finally{running.delete(id)}}`,
@@ -142,6 +144,9 @@ assert.equal(h.images.length, 7, 'same-scene tail is repaired once before the ne
 const repair = h.images[6]
 assert.equal(repair.referenceImages.length, 3, 'repair uses the tail plus both character sheets')
 assert.match(repair.prompt, /高清修复/)
+assert.ok(repair.prompt.includes(s.plan.aesthetic), 'tail repair includes the current drama aesthetic verbatim')
+assert.match(repair.prompt, /不得擅自改变画风/)
+assert.match(repair.prompt, /保留原有风格化造型/)
 assert.match(repair.prompt, /阿默/)
 assert.match(repair.prompt, /阿青/)
 assert.match(await repair.referenceImages[0].text(), /^tail:video-/)
@@ -253,3 +258,61 @@ const controller = new AbortController(); controller.abort()
 await assert.rejects(() => runContinuousTurn('继续', () => {}, { signal: controller.signal }))
 assert.equal(h.videos.length, 0, 'cancelled runs never submit videos')
 console.log('PASS continuous capture: validation, confirmation gates, asset reuse, per-scene serial tails, checkpoints, H3 retry, model limits, no ordinary pipeline mutations')
+
+h = reset(); await turn('分析剧本')
+const missing = {scene:1,index:1,reason:'阿默缺少原台词你好。'}
+h.preflightReviews = [{ok:false,issues:[missing]}, {ok:true,issues:[]}]
+h.repairs = [structuredClone(fixture.scenes[0].segments[0])]
+await turn('继续')
+assert.equal(h.preflightCalls, 2, 'repair must pass a second LLM review before paid images')
+assert.equal(h.images.length, 4)
+assert.match(h.store.current.canvas.nodes.find(n=>n.id===h.store.current.continuousCapture.videoNodes['s1:0']+'-text').data.prompt, /你好/)
+await turn('继续')
+assert.equal(h.preflightCalls, 2, 'unchanged image plan reuses successful preflight')
+await turn('继续')
+assert.equal(h.preflightCalls, 3, 'video stage independently rechecks the full screenplay')
+
+h = reset(); await turn('分析剧本')
+h.preflightReviews = [{ok:false,issues:[missing]}]
+h.repairs = [{invalid:true}]
+await assert.rejects(()=>turn('继续'), /补充暂未完成/)
+assert.equal(h.images.length + h.videos.length, 0)
+h.preflightReviews = [{ok:true,issues:[]}]
+await turn('继续')
+assert.equal(h.images.length, 4, 'a failed review can be retried without losing the plan')
+
+h = reset(); await turn('分析剧本')
+let stop = false
+h.afterImage = () => { stop = true }
+const paused = await runContinuousTurn('继续', ()=>{}, {stopAfterCurrent:()=>stop})
+assert.match(paused.reply, /已停止后续/)
+assert.equal(h.images.length, 1, 'current node finishes, later image nodes do not start')
+assert.ok(h.store.current.canvas.nodes.find(n=>n.id===h.store.current.continuousCapture.assetNodes.a).data.outputAssetId)
+h.afterImage = undefined
+await turn('继续')
+assert.equal(h.images.length, 4, 'resume skips the completed image')
+h = reset(); await turn('分析剧本'); await turn('继续'); await turn('继续')
+stop = false
+h.afterVideo = () => { stop = true }
+const videoPaused = await runContinuousTurn('继续', ()=>{}, {stopAfterCurrent:()=>stop})
+assert.match(videoPaused.reply, /已停止后续/)
+assert.equal(h.videos.length, 1)
+assert.equal(h.store.current.continuousCapture.phase, 'videos')
+h.afterVideo = undefined
+await turn('继续')
+assert.equal(h.videos.length, 3, 'resume does not regenerate the completed first video')
+console.log('PASS pre-generation LLM dialogue repair, independent video review, repair retry, stop-after-current and resume')
+
+h = reset()
+h.store.current.settings.defaultVideoResolution = '480p'
+await turn('分析剧本')
+s = h.store.current.continuousCapture
+assert.equal(h.store.current.canvas.nodes.find(n=>n.id===s.videoNodes['s1:0']).data.videoResolution, '480p', 'new video inherits project resolution')
+// Simulate a pre-fix node with no stored tier and another node with its own choice.
+delete h.store.current.canvas.nodes.find(n=>n.id===s.videoNodes['s1:0']).data.videoResolution
+h.store.current.canvas.nodes.find(n=>n.id===s.videoNodes['s1:1']).data.videoResolution = '1080p'
+await turn('继续'); await turn('继续'); await turn('继续')
+assert.equal(h.videos[0].videoResolution, '480p', 'old node falls back to project preference in real request')
+assert.equal(h.videos[1].videoResolution, '1080p', 'explicit node tier wins')
+assert.equal(h.videos[2].videoResolution, '480p')
+console.log('PASS resolution inheritance, legacy-node fallback, and explicit node override at generation boundary')

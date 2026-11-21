@@ -105,13 +105,20 @@ function profileMentionsWan(profile?: { name?: string; workflowId?: string } | n
 /** 文档写了哪些档就显示哪些。没写入选项的万相，按万相 3.0 文档给出 480P / 720P / 1080P。 */
 export function videoResolutionChoices(input: {
   model?: VideoGenModel
-  profile?: { name?: string; workflowId?: string; options?: ModelNodeOptions } | null
+  profile?: { name?: string; model?: string; workflowId?: string; options?: ModelNodeOptions } | null
 }): DocVideoResolution[] {
+  if (/grok/i.test(`${input.profile?.name || ''} ${input.profile?.model || ''} ${input.profile?.workflowId || ''}`)) return ['480p', '720p', '1080p']
   const listed = input.profile?.options?.videoResolutions
   if (listed?.length) return [...listed]
   if (input.model === 'wan-prime' || profileMentionsWan(input.profile)) return ['480p', '720p', '1080p']
   if (input.model === 'h3-v5') return ['768p', '1080p']
   return []
+}
+
+/** Grok does not accept the 768p tier used by H3 workflows. */
+export function providerVideoResolution(model: string, raw?: string): DocVideoResolution {
+  const picked = normalizeDocVideoResolution(raw) || '720p'
+  return /grok/i.test(model) && picked === '768p' ? '720p' : picked
 }
 
 export function pickDocVideoResolution(

@@ -36,6 +36,8 @@ export interface CaptureState {
   openingNodes: Record<string, string>
   videoNodes: Record<string, string>
   tailAssets: Record<string, { videoAssetId: string; assetId: string }>
+  /** 已通过生成前对白复核的内容摘要；图片和视频阶段分别验收。 */
+  dialoguePreflight?: Partial<Record<'images' | 'videos', string>>
 }
 export const compact = (s: string) => s.replace(/\s+/g, '')
 function asRecord(value: unknown): Record<string, unknown> | undefined {

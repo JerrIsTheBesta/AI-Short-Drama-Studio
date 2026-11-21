@@ -18,6 +18,7 @@ import {
   type ComfyInputRole
 } from './comfyInputMap'
 import { zealmanWorkflowById } from './zealman'
+import { providerVideoResolution } from './modelOptions'
 
 function timeoutSignal(ms: number): AbortSignal {
   const c = new AbortController()
@@ -499,14 +500,7 @@ function requestBodyForProvider(
     body.aspect_ratio = ratio
     const seconds = Math.round(Number(source.duration) || 6)
     body.duration = /grok-imagine-1\.5/i.test(model) ? Math.min(15, Math.max(6, seconds || 6)) : seconds
-    const quality = String(source.resolution || '').toLowerCase()
-    body.resolution = /1080/.test(quality)
-      ? '1080p'
-      : /768/.test(quality)
-        ? '768p'
-        : /480/.test(quality)
-          ? '480p'
-          : '720p'
+    body.resolution = providerVideoResolution(model, String(source.resolution || ''))
     if (images.length) body.image_urls = images.slice(0, 7)
     for (const [key, value] of Object.entries(source)) {
       if (typeof value === 'boolean' && /audio/i.test(key) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {

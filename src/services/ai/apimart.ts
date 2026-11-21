@@ -7,6 +7,7 @@
  */
 
 import { isApimartHost, isLocalComfyHost, providerHttp } from './adapters'
+import { providerVideoResolution } from './modelOptions'
 
 export const APIMART_DEFAULT_BASE = 'https://api.aishuch.com'
 export const APIMART_IMAGE_MODEL = 'gpt-image-2'
@@ -129,14 +130,6 @@ function videoSeconds(model: string, raw?: number, limit?: number): number {
   if (limit === 30 && /seedance[\s._-]*2[._-]5|wan[\s._-]*3[._-]0/i.test(model)) return Math.min(30, Math.max(6, seconds || 6))
   if (/grok-imagine-1\.5/i.test(model)) return Math.min(15, Math.max(6, seconds || 6))
   return Math.min(15, Math.max(1, seconds || 6))
-}
-
-function videoQuality(raw?: string): '480p' | '720p' | '768p' | '1080p' {
-  const text = String(raw || '').toLowerCase()
-  if (/1080/.test(text)) return '1080p'
-  if (/768/.test(text)) return '768p'
-  if (/480/.test(text)) return '480p'
-  return '720p'
 }
 
 function errorMessage(json: any, status: number): string {
@@ -615,7 +608,7 @@ export async function apimartGenerateVideo(opts: {
       size: videoSize(ratio, opts.width, opts.height),
       aspect_ratio: ratio,
       duration,
-      resolution: videoQuality(opts.resolution)
+      resolution: providerVideoResolution(model, opts.resolution)
     }
     if (typeof opts.generateAudio === 'boolean') {
       const field = String(opts.audioField || 'audio').trim()

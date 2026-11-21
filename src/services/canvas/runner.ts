@@ -1083,7 +1083,7 @@ function canvasVideoModelForShot(shot: Shot): VideoGenModel {
 }
 
 function canvasVideoResolutionForShot(shot: Shot, videoModel: VideoGenModel): VideoResolution {
-  return normalizeVideoResolution(canvasVideoNodeForShot(shot)?.data.videoResolution, videoModel)
+  return normalizeVideoResolution(canvasVideoNodeForShot(shot)?.data.videoResolution ?? useProjectStore().current?.settings.defaultVideoResolution, videoModel)
 }
 
 function clampVideoDuration(raw: number | undefined, videoModel: VideoGenModel, fallback = 5) {
@@ -2810,7 +2810,7 @@ export async function generateFreeformVideo(
       promptStyle: 'scene-narrative',
       videoModel,
       videoProfileId: node.data.videoProfileId,
-      videoResolution: node.data.videoResolution,
+      videoResolution: node.data.videoResolution ?? p.settings.defaultVideoResolution,
       h3GenMode: useFl2va && blobs[1] ? 'fl2va' : 'reference',
       mode: 'R2VA',
       signal,

@@ -1,4 +1,5 @@
 import { getAIMode } from '@/services/ai/client'
+import { lookFromScript, lookFromTexts, styleLinesFromPlay } from '@/utils/visualStyle'
 import { planStudioActions } from './aiSdkAgent'
 import { skillContextForAgent } from '@/skills'
 import { importedDirectorPrefix } from '@/services/settings/directorSkill'
@@ -77,6 +78,8 @@ export interface AgentTurnResult {
   chips: { label: string; text: string }[]
 }
 export interface AgentRunOptions {
+  /** 连续拍：只停止尚未启动的节点，不取消当前外部请求。 */
+  stopAfterCurrent?: () => boolean
   signal?: AbortSignal
   autonomy?: 'assist' | 'gated' | 'autopilot'
   /** 已废弃：合并后不再按模式分叉，路线由意图与画布状态决定 */
@@ -265,6 +268,26 @@ export async function runAgentTurn(
     options.signal
   )
   onEvent({ kind: 'intent', label: intent.label })
+  const styleAnswer = lookFromTexts('cinematic', baseText)
+  if (styleAnswer.userNamed && baseText.trim().replace(/^(?:画风|风格|就用|采用|用|选择|要)[：:\s]*/, '').replace(/[。！!]$/, '') === styleAnswer.medium) {
+    p0.visualStylePreference = styleAnswer.medium
+    if (p0.script) project.setScript({ ...p0.script, visualStyleOverride: styleAnswer.medium, style: styleAnswer.style })
+    await project.save()
+    return { reply: '已确认画风：「' + styleAnswer.medium + '」。后续角色图、场景图和视频沿用此风格。回复「继续」继续制作。', results: [], chips: [{label:'继续',text:'继续'}] }
+  }
+  if (['pipeline', 'create_asset', 'prompt_polish'].includes(intent.kind)) {
+    const requested = lookFromTexts('cinematic', baseText, styleLinesFromPlay(userText))
+    const known = p0.visualStylePreference ? lookFromTexts('cinematic', p0.visualStylePreference) : lookFromScript(p0.script)
+    if (!requested.userNamed && !known.userNamed) {
+      return { reply: '开始制作前，你希望采用什么画风？例如 3D 半写实、3D 卡通、日系动画、真人写实或水墨。确认后我再继续，不会默认替你选电影质感。', results: [], chips: [] }
+    }
+    if (requested.userNamed) p0.visualStylePreference = requested.medium
+    const effective = requested.userNamed ? requested : known
+    if (p0.script) {
+      project.setScript({ ...p0.script, visualStyleOverride: effective.medium, style: effective.style })
+      await project.save()
+    }
+  }
 
   // 闲聊也交给语言模型写回复，不用固定开场白
   if (intent.kind === 'chitchat') {

@@ -871,6 +871,7 @@ const definitions: ToolDefinition[] = [
           label: `视频 ${count}`,
           prompt: action.text,
           aspectRatio: project.current.settings.aspectRatio,
+          videoResolution: project.current.settings.defaultVideoResolution,
           duration: Math.max(1, Math.min(15, Math.round(action.duration || 8)))
         },
         status: 'idle'

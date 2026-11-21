@@ -122,6 +122,8 @@ function removeAttachment(index: number) {
 }
 
 let controller: AbortController | null = null
+const stopQueued = ref(false)
+const continuousTurn = ref(false)
 
 /* ── 生成配置：比例 / 图像模型 / 视频模型 / 分辨率，选好即生效 ── */
 const ASPECT_OPTIONS: { value: AspectRatio; label: string }[] = [
@@ -618,11 +620,14 @@ async function sendText(text: string) {
   trace.value = [{ key: 'think', kind: 'think', label: '在想怎么做…', status: 'running' }]
   chips.value = []
   const turnController = new AbortController()
+  stopQueued.value = false
+  continuousTurn.value = continuousEnabled.value && !props.selectedNode
   controller = turnController
   await scrollToEnd()
   try {
     const options = {
       signal: turnController.signal,
+      stopAfterCurrent: () => stopQueued.value,
       autonomy: autonomy.value,
       selectedNodeId: props.selectedNode?.id,
       attachments: attachOptions,
@@ -641,7 +646,7 @@ async function sendText(text: string) {
           chips: []
         }
       : continuousEnabled.value
-        ? await runContinuousTurn(t, onProgress, options)
+        ? await (continuousTurn.value = true, runContinuousTurn(t, onProgress, options))
         : await runAgentTurn(messages.value, t, onProgress, options)
     thinking.value = false
     const think = trace.value.find((s) => s.kind === 'think' && s.status === 'running')
@@ -673,11 +678,18 @@ async function sendText(text: string) {
     thinking.value = false
     trace.value = []
     controller = null
+    continuousTurn.value = false
+    stopQueued.value = false
     await scrollToEnd()
   }
 }
 
 function cancel() {
+  if (continuousTurn.value) {
+    stopQueued.value = true
+    log.value = '已请求停止后续，当前节点完成后暂停…'
+    return
+  }
   controller?.abort()
   log.value = '正在停止…'
 }
@@ -1056,9 +1068,12 @@ function visibleRows(rows: TraceRow[]) {
             v-if="busy"
             type="button"
             class="icon-act stop"
-            title="停止"
+            :class="{ 'stop-queue': continuousTurn }"
+            :title="continuousTurn ? '停止后续节点，当前节点完成后暂停' : '停止'"
+            :aria-label="continuousTurn ? '停止后续节点' : '停止'"
             @click="cancel"
           >
+            <span v-if="continuousTurn">{{ stopQueued ? '等待当前完成' : '停止后续' }}</span>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="7" y="7" width="10" height="10" rx="1.5" />
             </svg>
@@ -1827,6 +1842,7 @@ textarea {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.icon-act.stop-queue { width: auto; min-width: 28px; padding: 0 8px; gap: 4px; font-size: 11px; white-space: nowrap; }
 .send {
   border-radius: 8px;
   background: var(--nb-accent);
